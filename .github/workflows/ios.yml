@@ -21,18 +21,21 @@ jobs:
           xcodebuild -project ios/Arbos.xcodeproj -scheme Arbos \
             -configuration Release -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Arbos.xcarchive" archive \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}"
+          test -x "$RUNNER_TEMP/Arbos.xcarchive/Products/Applications/Arbos.app/Arbos"
 
       - name: Upload to TestFlight
         env:
           AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
           AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
           AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          ARBOS_APPLE_TEAM_ID: ${{ secrets.ARBOS_APPLE_TEAM_ID }}
         run: |
           set +e
           set -u
           missing=0
-          for name in AC_API_KEY_P8 AC_API_KEY_ID AC_API_ISSUER_ID; do
+          for name in AC_API_KEY_P8 AC_API_KEY_ID AC_API_ISSUER_ID ARBOS_APPLE_TEAM_ID; do
             if [ -z "${!name:-}" ]; then
               echo "Apple secret $name is not set. The archive stands. TestFlight was not uploaded."
               missing=1
@@ -49,7 +52,7 @@ jobs:
           plutil -insert method -string app-store-connect "$options"
           plutil -insert destination -string upload "$options"
           plutil -insert signingStyle -string automatic "$options"
-          plutil -insert teamID -string 5XY3M483YQ "$options"
+          plutil -insert teamID -string "$ARBOS_APPLE_TEAM_ID" "$options"
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/Arbos.xcarchive" \
             -exportPath "$RUNNER_TEMP/TestFlightExport" \

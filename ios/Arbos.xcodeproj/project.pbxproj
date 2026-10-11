@@ -3,20 +3,19 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 56;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A10000000000000000000010 /* ArbosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* ArbosApp.swift */; };
+		A10000000000000000000011 /* PhoneSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* PhoneSession.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
+		A10000000000000000000012 /* ArbosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArbosApp.swift; sourceTree = "<group>"; };
+		A10000000000000000000013 /* PhoneSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSession.swift; sourceTree = "<group>"; };
 		A10000000000000000000022 /* Arbos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Arbos.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-		A10000000000000000000020 /* Arbos */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Arbos;
-			sourceTree = "<group>";
-		};
-/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000005 /* Frameworks */ = {
@@ -29,6 +28,15 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		A10000000000000000000020 /* Arbos */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000012 /* ArbosApp.swift */,
+				A10000000000000000000013 /* PhoneSession.swift */,
+			);
+			path = Arbos;
+			sourceTree = "<group>";
+		};
 		A10000000000000000000021 = {
 			isa = PBXGroup;
 			children = (
@@ -52,14 +60,12 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = A10000000000000000000031 /* Build configuration list for PBXNativeTarget "Arbos" */;
 			buildPhases = (
+				A10000000000000000000003 /* Sources */,
 				A10000000000000000000005 /* Frameworks */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				A10000000000000000000020 /* Arbos */,
 			);
 			name = Arbos;
 			productName = Arbos;
@@ -81,7 +87,7 @@
 				};
 			};
 			buildConfigurationList = A10000000000000000000030 /* Build configuration list for PBXProject "Arbos" */;
-			compatibilityVersion = "Xcode 15.0";
+			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -97,6 +103,18 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000010 /* ArbosApp.swift in Sources */,
+				A10000000000000000000011 /* PhoneSession.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
 		A10000000000000000000032 /* Debug */ = {

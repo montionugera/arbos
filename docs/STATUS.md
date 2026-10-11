@@ -51,4 +51,3 @@ unread — no balance route on the public API
 ## Blocked
 
 - engy balance stays unread until a real route exists. The public OpenAPI at `https://api.engy.ai/openapi.json` has no credits or balance route (checked 2026-10-11).
-- TestFlight has no private key to sign with. The vault items whose titles contain Apple are `Apple id` and `Appe Cert Apple Developer`. The second note names an App Store Connect key id. It does not contain a `.p8` private key. The iOS job archives without signing and stays green when that key is missing, so Linux CI is unchanged.
