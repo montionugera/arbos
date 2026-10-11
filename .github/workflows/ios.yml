@@ -3,6 +3,9 @@ name: iOS
 on:
   push:
     branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
 
 permissions:
   contents: read
