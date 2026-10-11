@@ -2,7 +2,7 @@
 
 Arbos is a coding-agent app. You open a folder, talk to Main, and watch workers. The harness is fx. It speaks engy (`https://api.engy.ai/v1`, model `glm-5.3`).
 
-Current status is in [docs/STATUS.md](docs/STATUS.md). The design is in [docs/design/arbos-rebuild-ideation.md](docs/design/arbos-rebuild-ideation.md).
+Current status is in [docs/STATUS.md](docs/STATUS.md). How the pieces fit is in [docs/architecture.md](docs/architecture.md). The design is in [docs/design/arbos-rebuild-ideation.md](docs/design/arbos-rebuild-ideation.md).
 
 ## Install
 
@@ -38,6 +38,6 @@ Open the **Main** tab. The composer says "Do anything…". The chip shows `engy`
 
 Ask Main to spawn a worker. Each worker is its own tab. When a worker finishes, Main shows a line that starts with `Worked`. A worker runs on this machine, or on another install you have registered.
 
-The phone app in `ios/` can list those projects, follow Main, and send a prompt. It has no voice and no calls. Apple did not accept the TestFlight upload. See [docs/STATUS.md](docs/STATUS.md).
+The phone app in `ios/` can list those projects, follow Main, and send a prompt. It has no voice and no calls. TestFlight accepted build 7. The phone is not installed on a device. The MacBook is offline, so signing stops there. See [docs/STATUS.md](docs/STATUS.md).
 
 The root license is MIT. `fx/` stays Apache-2.0. See `fx/LICENSE` and the `THIRD_PARTY_NOTICES.md` files in `app/` and `fx/`.

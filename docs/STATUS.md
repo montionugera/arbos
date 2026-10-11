@@ -38,7 +38,7 @@ unread — no balance route on the public API
 
 - The window title, the about string, and `zeron --version` say Arbos. The Rust package stays `zeron`. The on-disk binary stays `zeron`. `zeron --version` prints `Arbos 0.2.111`. The published Linux tarball is `arbos-<version>-linux-<arch>.tar.gz` and also contains an `arbos` binary.
 - The phone is not on a device yet. This machine has no iOS simulator. The protocol proof is the Rust test in `docs/qa/2026-10-11-phone.md`.
-- The product is not installable yet.
+- The Linux install is the tarball and `install.sh`. There is no Mac disk image. The MacBook is offline, so there is no signed Mac build.
 - Some Pi and opencode live tests and examples still name the deleted drivers. `cargo build --locked -p zeron` does not compile those files. Root CI does not run them.
 - These `zig build test` failures also fail on `0f998ae8`, the fx tree before the engy commit. That commit does not change their files. They are left unfixed so the required CI check can stay green:
   - `git worktree reports dirty for obvious metadata and tracked-file changes` (expected `.dirty`, found `.unknown`)
