@@ -9397,7 +9397,7 @@ impl Shell {
     /// Update strip: shown above the user menu whenever this app's release
     /// checker ([`crate::app_update`]) has found a newer version. Self-updating
     /// installs (macOS bundles, Windows installs, Linux managed installs) show
-    /// the background download and then "restart to apply"; installs that
+    /// the background download and then "Restart to update"; installs that
     /// can't replace themselves explain why; advisory installs point at
     /// `zeron update` or the GitHub releases page and dismiss per version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {

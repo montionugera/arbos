@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
       - name: gpui system deps
         run: |
           sudo apt-get update -qq
@@ -36,12 +37,17 @@ jobs:
         working-directory: app
         env:
           PROFILE: debug
-        run: scripts/package-linux.sh
+        run: |
+          set -euo pipefail
+          # The fourth version component is the commit count. A new commit on
+          # main is a newer build, so the update strip can offer a restart.
+          export ARBOS_BUILD="$(git rev-list --count HEAD)"
+          scripts/package-linux.sh
       - name: Write the release manifest
         working-directory: app
         run: |
           set -euo pipefail
-          ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          ver=$(tr -d '\n' < target/package/version.txt)
           arch=$(uname -m)
           name="arbos-${ver}-linux-${arch}.tar.gz"
           tarball="target/package/${name}"
@@ -82,7 +88,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          ver=$(tr -d '\n' < target/package/version.txt)
           arch=$(uname -m)
           name="arbos-${ver}-linux-${arch}.tar.gz"
           cd target/package

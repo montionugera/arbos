@@ -45,7 +45,7 @@ pub mod windows;
 
 /// The version compiled into this binary (the workspace version).
 pub const fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    env!("ARBOS_VERSION")
 }
 
 /// Successful checks repeat this often. The feed is a sub-kilobyte,
@@ -1652,6 +1652,8 @@ mod tests {
         assert!(version_newer("0.1.10", "0.1.9"));
         assert!(version_newer("v0.1.1", "0.1.0"));
         assert!(version_newer("0.1.0.1", "0.1.0"));
+        assert!(version_newer("0.2.111.2", "0.2.111"));
+        assert!(!version_newer("0.2.111", "0.2.111.2"));
         assert!(!version_newer("0.1.0", "0.1.0"));
         assert!(!version_newer("0.1.0", "0.1.1"));
         // Garbage never counts as newer.

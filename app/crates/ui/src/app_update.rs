@@ -9,7 +9,7 @@
 //!
 //! Lifecycle, idiomatic to desktop updaters (Sparkle, VS Code, Zed): a found
 //! release downloads in the background and is verified, the strip offers
-//! "restart to apply", and a staged update the user never restarts for is
+//! "Restart to update", and a staged update the user never restarts for is
 //! installed when the app quits — so nobody stays on a stale version just
 //! because they never clicked. `ZERON_AUTO_UPDATE=0` keeps it report-only.
 
@@ -400,10 +400,7 @@ pub fn strip_for(
             Flow::Downloading { version } => {
                 (format!("Downloading v{version}…").into(), StripAction::None)
             }
-            Flow::Ready { .. } => (
-                "Update ready — restart to apply".into(),
-                StripAction::Restart,
-            ),
+            Flow::Ready { .. } => ("Restart to update".into(), StripAction::Restart),
             Flow::Failed { message, .. } => (
                 format!("Update failed: {message}").into(),
                 StripAction::Download,
@@ -474,8 +471,11 @@ mod tests {
             staged: PathBuf::from("/tmp/Zeron.app"),
         };
         assert_eq!(
-            strip_for(&mac_app, false, &ready, "0.2.86").1,
-            StripAction::Restart
+            strip_for(&mac_app, false, &ready, "0.2.86"),
+            (
+                SharedString::from("Restart to update"),
+                StripAction::Restart
+            )
         );
         let failed = Flow::Failed {
             version: "0.2.86".into(),
@@ -515,6 +515,17 @@ mod tests {
             // Linux desktop installs share the managed layout and update
             // themselves like the other desktop platforms.
             assert_eq!(strip.1, StripAction::Download);
+            let ready = Flow::Ready {
+                version: "0.2.86".into(),
+                staged: PathBuf::from("/tmp/staged"),
+            };
+            assert_eq!(
+                strip_for(&managed, false, &ready, "0.2.86"),
+                (
+                    SharedString::from("Restart to update"),
+                    StripAction::Restart
+                )
+            );
         } else {
             assert_eq!(
                 strip.0,

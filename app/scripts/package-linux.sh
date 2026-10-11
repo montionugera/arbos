@@ -14,7 +14,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 PROFILE="${PROFILE:-release}"
 ARCH="$(uname -m)"
-VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+BASE="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+if [[ -n "${ARBOS_BUILD:-}" ]]; then
+  if [[ ! "$ARBOS_BUILD" =~ ^[0-9]+$ ]]; then
+    echo "ARBOS_BUILD must be a decimal build number" >&2
+    exit 1
+  fi
+  VERSION="${BASE}.${ARBOS_BUILD}"
+  export ARBOS_BUILD
+else
+  VERSION="$BASE"
+fi
 OUT_DIR="$ROOT/target/package"
 STAGE="$OUT_DIR/arbos-$VERSION-linux-$ARCH"
 TARBALL="$STAGE.tar.gz"
@@ -147,5 +157,6 @@ chmod 755 "$STAGE/install.sh"
 
 tar -czf "$TARBALL" -C "$OUT_DIR" "$(basename "$STAGE")"
 rm -rf "$STAGE"
+printf '%s\n' "$VERSION" > "$OUT_DIR/version.txt"
 echo "packaged: $TARBALL"
 tar -tzf "$TARBALL"

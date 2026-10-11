@@ -52,3 +52,4 @@ unread — no balance route on the public API
 ## Blocked
 
 - engy balance stays unread until a real route exists. The public OpenAPI at `https://api.engy.ai/openapi.json` has no credits or balance route (checked 2026-10-11).
+- Developer ID signing stays blocked. The MacBook worker `2a05bc55-df5b-4687-8b45-ac94702d71d0` is offline. No signed Mac build was made.

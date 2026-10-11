@@ -8,9 +8,9 @@ Current status is in [docs/STATUS.md](docs/STATUS.md). How the pieces fit is in 
 
 The download is a Linux tarball. There is no Mac disk image.
 
-On the GitHub Release tagged `edge`, take `arbos-<version>-linux-<arch>.tar.gz`. This tree is version `0.2.111`, and the published file is `arbos-0.2.111-linux-x86_64.tar.gz`:
+On the GitHub Release tagged `edge`, read `manifest.json`. It names `arbos-<version>-linux-<arch>.tar.gz`. The version is `0.2.111` plus the commit count, so a new commit on main is a newer build. There is no Mac disk image. The current manifest names `arbos-0.2.111.2471-linux-x86_64.tar.gz`:
 
-https://github.com/unarbos/arbos/releases/download/edge/arbos-0.2.111-linux-x86_64.tar.gz
+https://github.com/unarbos/arbos/releases/download/edge/arbos-0.2.111.2471-linux-x86_64.tar.gz
 
 Unpack it and run `install.sh`. That script does not need root. It copies the app to `~/.zeron/app` and links `~/.local/bin/arbos`. `arbos` and `zeron` start the same program. `arbos --version` prints `Arbos 0.2.111`.
 

@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "Arbos",
-    version,
+    version = env!("ARBOS_VERSION"),
     about = "Arbos is a coding-agent app. The harness speaks engy."
 )]
 struct Cli {
