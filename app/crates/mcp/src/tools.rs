@@ -64,6 +64,13 @@ fn device_schema() -> Value {
     json!({ "type": "string", "description": "Host device id or exact name. Omit for the local engine." })
 }
 
+fn arbos_profile() -> Option<String> {
+    std::env::var("ARBOS_MCP")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 fn catalog() -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef {
@@ -436,16 +443,27 @@ impl Tools {
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
+        if let Some(profile) = arbos_profile() {
+            return crate::arbos::catalog(&profile);
+        }
         catalog()
     }
 
     pub fn has(&self, name: &str) -> bool {
+        if let Some(profile) = arbos_profile() {
+            return crate::arbos::catalog(&profile)
+                .iter()
+                .any(|tool| tool.name == name);
+        }
         catalog().iter().any(|t| t.name == name)
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
     /// should read (surfaced as `isError`, never as a protocol error).
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+        if arbos_profile().is_some() {
+            return crate::arbos::call(&self.zeron, name, args).await;
+        }
         let result = match name {
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,

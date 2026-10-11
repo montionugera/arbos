@@ -50,6 +50,7 @@
 //! handlers stay transport-agnostic. This includes the workspace file surface,
 //! whose checkout always lives on the routed target device.
 
+mod arbos_call;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -2539,6 +2540,10 @@ impl RpcService for EngineRpc {
             methods::SET_HARNESS_UPDATE_POLICY => {
                 let p: SetHarnessUpdatePolicyParams = parse_params(params)?;
                 RpcReply::value(&self.harness_updates()?.set_policy(p.harness, p.policy))
+            }
+            methods::ARBOS_CALL => {
+                let value = self.arbos_call(params).map_err(RpcError::Failed)?;
+                RpcReply::value(&value)
             }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;

@@ -846,12 +846,37 @@ impl ChatDocHandle {
         text: &str,
         created_at: i64,
     ) -> Result<(), DocError> {
+        if let Some(body) = text.strip_prefix(zeron_proto::ARBOS_WAKE_MARK) {
+            let line = format!("Worked · {}", body.trim());
+            return self.write_system_message(message_id, &line, created_at);
+        }
+        self.write_role_message(message_id, MessageRole::User, text, created_at)
+    }
+
+    /// A coordinator wake. The transcript draws this as a Worked line, not a
+    /// user bubble. The fx process still receives the prompt.
+    pub fn write_system_message(
+        &self,
+        message_id: &str,
+        text: &str,
+        created_at: i64,
+    ) -> Result<(), DocError> {
+        self.write_role_message(message_id, MessageRole::System, text, created_at)
+    }
+
+    fn write_role_message(
+        &self,
+        message_id: &str,
+        role: MessageRole,
+        text: &str,
+        created_at: i64,
+    ) -> Result<(), DocError> {
         if self.doc.read_entries()?.iter().any(|e| e.id == message_id) {
             return Ok(());
         }
         self.doc.push_message(&SessionMessageEntry {
             id: message_id.to_string(),
-            role: MessageRole::User,
+            role,
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: text.to_string(),

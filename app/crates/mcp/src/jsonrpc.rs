@@ -147,16 +147,19 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
             } else {
                 LATEST_PROTOCOL
             };
+            let arbos = std::env::var("ARBOS_MCP")
+                .ok()
+                .is_some_and(|value| !value.is_empty());
             ok_response(
                 id,
                 json!({
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": {
-                        "name": "zeron",
+                        "name": if arbos { "arbos" } else { "zeron" },
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": INSTRUCTIONS,
+                    "instructions": if arbos { crate::arbos::instructions() } else { INSTRUCTIONS },
                 }),
             )
         }

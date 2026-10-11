@@ -25,13 +25,14 @@ use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use zeron_doc::{
-    DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
-    SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
+    DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter,
+    SessionCommandPayload, SessionDoc, SessionMessageEntry, fold_event_into_parts,
+    sanitize_tool_call,
 };
 use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage, TurnControl};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, UserInputAnswer,
-    UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, McpServer, RunRequest, SandboxLevel, Session, SessionStatus,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -1288,6 +1289,14 @@ impl SessionsEngine {
             .is_some_and(|h| h.run_id == run_id)
     }
 
+    /// A chat has a live runtime or a Working session row.
+    pub fn is_working(&self, chat_id: &str) -> bool {
+        lock(&self.inner.runs).contains_key(chat_id)
+            || lock(&self.inner.statuses)
+                .get(chat_id)
+                .is_some_and(|session| session.status == SessionStatus::Working)
+    }
+
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         self.inner.set_status(chat_id, status, fresh_start);
     }
@@ -1536,6 +1545,36 @@ impl Inner {
         self.doc_host()
             .and_then(|host| host.open(chat_id).ok())
             .is_some_and(|handle| handle.continues_with_sent_message())
+    }
+
+    /// The `arbos` MCP server for a project chat. Main gets `agents.*` and
+    /// `context.*`. Every other agent in the project gets `context.*` only.
+    fn arbos_mcp(&self, chat_id: &str, cwd: &str) -> Option<McpServer> {
+        let prep = crate::arbos_layout::prepare_turn(std::path::Path::new(cwd), chat_id)?;
+        let port = self.ipc_port.load(std::sync::atomic::Ordering::Relaxed);
+        if port == 0 {
+            return None;
+        }
+        let command = std::env::current_exe().ok()?.to_str()?.to_owned();
+        let profile = if prep.role == "coordinator" {
+            "coordinator"
+        } else {
+            "worker"
+        };
+        Some(McpServer {
+            name: "arbos".into(),
+            command,
+            args: vec!["mcp".into()],
+            env: [
+                ("ZERON_IPC_PORT".to_owned(), port.to_string()),
+                ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
+                ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
+                ("ARBOS_MCP".to_owned(), profile.to_owned()),
+                ("ARBOS_PROJECT".to_owned(), cwd.to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        })
     }
 
     /// Zeron's own MCP server for a run of `chat_id`: this binary's `zeron
@@ -2047,6 +2086,72 @@ fn turn_replaces_error_banner(status: &DoneStatus, folded: &[MessagePart]) -> bo
     })
 }
 
+fn wake_if_worker(inner: &Inner, chat_id: &str, cwd: &str, status: &DoneStatus, reply: &str) {
+    let label = match status {
+        DoneStatus::Completed => "done",
+        DoneStatus::Errored => "error",
+        DoneStatus::Interrupted => "stopped",
+    };
+    let Some(done) =
+        crate::arbos_layout::finish_worker(std::path::Path::new(cwd), chat_id, label, reply)
+    else {
+        return;
+    };
+    let body = if done.result.is_empty() {
+        format!("Worker {} {label}.", done.id)
+    } else {
+        format!("Worker {} {label}.\n{}", done.id, done.result)
+    };
+    let prompt = format!("{}{body}", zeron_proto::ARBOS_WAKE_MARK);
+    let Some(host) = lock(&inner.doc_host).clone() else {
+        return;
+    };
+    let working = lock(&inner.runs).contains_key(&done.main_chat_id);
+    let queued = if working {
+        host.queue_command(
+            &done.main_chat_id,
+            SessionCommandPayload::Steer {
+                prompt,
+                message_id: Some(new_id()),
+            },
+        )
+    } else {
+        let mut request = lock(&inner.last_requests)
+            .get(&done.main_chat_id)
+            .cloned()
+            .unwrap_or(RunRequest {
+                prompt: String::new(),
+                harness: Some(HarnessId::Fx),
+                model: Some("glm-5.3".into()),
+                reasoning: None,
+                model_options: serde_json::Map::new(),
+                cwd: cwd.to_owned(),
+                sandbox: SandboxLevel::DangerFullAccess,
+                auto_approve: true,
+                resume: None,
+                attachments: Vec::new(),
+                worktree: None,
+                mcp: None,
+            });
+        request.prompt = prompt;
+        request.cwd = cwd.to_owned();
+        request.mcp = None;
+        request.worktree = None;
+        request.attachments.clear();
+        request.harness = Some(HarnessId::Fx);
+        host.queue_command(
+            &done.main_chat_id,
+            SessionCommandPayload::Run {
+                request,
+                message_id: new_id(),
+            },
+        )
+    };
+    if let Err(err) = queued {
+        tracing::warn!(worker = %done.id, error = %err, "worker wake was not queued");
+    }
+}
+
 fn folded_text(parts: &[MessagePart]) -> String {
     parts
         .iter()
@@ -2201,7 +2306,9 @@ async fn drive_run(
     // The host stamps its own MCP server onto every run it drives, so the
     // agent can spawn and talk to side chats through the engine it runs in.
     if request.mcp.is_none() {
-        request.mcp = inner.zeron_mcp(&chat_id);
+        request.mcp = inner
+            .arbos_mcp(&chat_id, &request.cwd)
+            .or_else(|| inner.zeron_mcp(&chat_id));
     }
     if harness_id == HarnessId::Fx
         && let Some(prep) =
@@ -3326,6 +3433,9 @@ async fn drive_run(
             // way (see `continues_with_sent_message`); rows the user queued
             // themselves still notify.
             let pending_steer = inner.has_pending_steers(&chat_id, &run_id);
+            if turn_was_active && !pending_steer {
+                wake_if_worker(&inner, &chat_id, &run_cwd, status, &folded_text(&folded));
+            }
             let completed_turn = (*status == DoneStatus::Completed
                 && !interrupted
                 && turn_was_active

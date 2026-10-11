@@ -3202,17 +3202,33 @@ fn stop_outcome(
 /// `prompt_id` (agents with the prompt-complete extension) rides `_meta` so
 /// the `_x.ai/session/prompt_complete` notification can be matched exactly —
 /// grok echoes it back (verified live, 1.0.4).
+fn split_arbos_wake(text: &str) -> (&str, bool) {
+    match text.strip_prefix(zeron_proto::ARBOS_WAKE_MARK) {
+        Some(body) => (body, true),
+        None => (text, false),
+    }
+}
+
 fn prompt_turn(
     client: RpcClient,
     session_id: String,
     text: String,
     prompt_id: Option<String>,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
+    let (text, wake) = split_arbos_wake(&text);
     let mut params = json!({
         "sessionId": session_id,
         "prompt": [{ "type": "text", "text": text }],
     });
-    if let Some(id) = prompt_id {
+    if wake {
+        let mut meta = serde_json::Map::new();
+        meta.insert("fx".into(), json!({ "wake": true }));
+        if let Some(id) = &prompt_id {
+            meta.insert("promptId".into(), json!(id));
+            meta.insert("requestId".into(), json!(id));
+        }
+        params["_meta"] = Value::Object(meta);
+    } else if let Some(id) = prompt_id {
         params["_meta"] = json!({ "promptId": id, "requestId": id });
     }
     // Written now, not on first poll: a steer's `session/cancel` issued in
@@ -3749,10 +3765,15 @@ fn steering_call_future(
 
 /// Mid-turn steer for fx. An idle steer stays an ordinary `session/prompt`.
 pub(crate) fn fx_steer_params(session_id: &str, text: &str) -> Value {
+    let (text, wake) = split_arbos_wake(text);
+    let mut fx = json!({ "steer": true });
+    if wake {
+        fx["wake"] = json!(true);
+    }
     json!({
         "sessionId": session_id,
         "prompt": [{ "type": "text", "text": text }],
-        "_meta": { "fx": { "steer": true } },
+        "_meta": { "fx": fx },
     })
 }
 

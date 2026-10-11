@@ -16,6 +16,7 @@
 //! environment. Every send from such an agent is then attributed to its
 //! originating chat, and a chat can never message itself.
 
+mod arbos;
 mod jsonrpc;
 mod tools;
 mod transcript;

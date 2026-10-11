@@ -10028,7 +10028,16 @@ impl Render for Transcript {
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
         self.rendered_rows.clear();
-        let compact_mode = crate::settings::transcript_compact_mode(cx);
+        let mut compact_mode = crate::settings::transcript_compact_mode(cx);
+        // Main is the coordinator. Its transcript is Project style: a folded
+        // Worked line, the reply, and no tool cards. Other chats stay classic.
+        if self
+            .chat_id
+            .as_deref()
+            .is_some_and(|id| id.ends_with("-main"))
+        {
+            compact_mode = true;
+        }
         if self.compact_mode != compact_mode {
             self.compact_mode = compact_mode;
             // The row SPLIT differs by mode (one work fold vs per-segment

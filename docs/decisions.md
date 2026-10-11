@@ -17,3 +17,7 @@
 - 2026-10-11: The fx binary is the first `fx` on `PATH`. If PATH has none, the app uses `fx/zig-out/bin/fx` from this repo. `FX_EXECUTABLE` still overrides both.
 - 2026-10-11: The app starts in dark appearance. A settings file with no `appearance` key loads dark.
 - 2026-10-11: A project is `<folder>/.arbos/`. That directory is its own git repo. The app commits it after a turn. fx files for a chat go under `.arbos/agents/<id>/fx`.
+- 2026-10-11: A project fx session gets one MCP server named `arbos`. Main gets `agents.spawn`, `agents.send`, `agents.list`, `agents.result`, `context.read`, and `context.write`. Every other chat in the project gets `context.read` and `context.write` only. fx calls those tools as `mcp_arbos_<name>` after `mcp_select_tool`.
+- 2026-10-11: `agents.spawn` accepts `machine` `local` only. Any other machine is an error. `worktree: true` is an error.
+- 2026-10-11: When a worker's turn ends, the engine wakes Main. If Main is mid-turn, the wake is a steer with `_meta.fx.steer` and `_meta.fx.wake`. Otherwise it is a new prompt with `_meta.fx.wake`. The transcript stores that line as a system message that begins `Worked ·`, not as a user bubble.
+- 2026-10-11: Main's transcript uses the compact fold: one `Worked for` line, the reply, and no tool cards. Every other chat keeps the classic transcript.

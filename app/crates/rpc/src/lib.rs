@@ -120,6 +120,9 @@ pub mod methods {
     /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
     /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
+    /// Project tools for the `arbos` MCP server. Params `{op, ...}`.
+    /// IPC-only. `op` is `spawn`, `send`, `list`, `result`, `read`, or `write`.
+    pub const ARBOS_CALL: &str = "ArbosCall";
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).
     pub const LOCAL_DEVICE: &str = "LocalDevice";

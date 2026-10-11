@@ -298,6 +298,11 @@ pub struct WorktreeSpec {
 /// life of a run.
 pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
 
+/// Prefix on a prompt that wakes the coordinator. The transcript stores the
+/// rest as a Worked line. The fx `session/prompt` strips it and sets
+/// `_meta.fx.wake`.
+pub const ARBOS_WAKE_MARK: &str = "\u{E000}arbos-wake\n";
+
 /// A decoded tool invocation, reduced to the fields each kind renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]

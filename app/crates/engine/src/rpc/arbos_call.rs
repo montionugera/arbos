@@ -1,0 +1,263 @@
+//! `ArbosCall` — the `arbos` MCP tools. The engine owns every write under
+//! `.arbos/` and every worker process.
+
+use std::path::Path;
+
+use serde_json::{Value, json};
+use zeron_doc::SessionCommandPayload;
+use zeron_proto::{ChatConfig, HarnessId, RunRequest, SandboxLevel};
+
+use super::EngineRpc;
+use crate::arbos_layout::{self, AgentView};
+use crate::new_id;
+
+impl EngineRpc {
+    pub(super) fn arbos_call(&self, params: Value) -> Result<Value, String> {
+        let op = params
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let project = params
+            .get("project")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| "project path is missing".to_string())?;
+        let project_path = Path::new(project);
+        if !project_path.join(".arbos").join("project.toml").is_file() {
+            return Err("that folder is not an Arbos project".into());
+        }
+        match op.as_str() {
+            "spawn" => self.spawn_worker(project_path, &params),
+            "send" => self.send_worker(project_path, &params),
+            "list" => Ok(json!({ "agents": agent_rows(&arbos_layout::agents(project_path)) })),
+            "result" => {
+                let name = text_field(&params, "name").ok_or_else(|| "name the worker".to_string())?;
+                let agent = arbos_layout::worker_result(project_path, &name)?;
+                Ok(agent_row(&agent))
+            }
+            "read" => {
+                let path = context_path(&params)?;
+                let text = arbos_layout::read_context(project_path, &path)?;
+                Ok(json!({ "path": path, "text": text }))
+            }
+            "write" => {
+                let path = context_path(&params)?;
+                let text = params
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "text is missing".to_string())?;
+                arbos_layout::write_context(project_path, &path, text)?;
+                Ok(json!({ "path": path, "bytes": text.len() }))
+            }
+            _ => Err("unknown arbos op".into()),
+        }
+    }
+
+    fn require_coordinator(&self, project: &Path, params: &Value) -> Result<(), String> {
+        let origin = text_field(params, "originChatId")
+            .ok_or_else(|| "origin chat is missing".to_string())?;
+        let agent = arbos_layout::agents(project)
+            .into_iter()
+            .find(|agent| agent.chat_id == origin)
+            .ok_or_else(|| "origin chat is not in this project".to_string())?;
+        if agent.role != "coordinator" {
+            return Err("workers cannot spawn or message agents".into());
+        }
+        Ok(())
+    }
+
+    fn spawn_worker(&self, project: &Path, params: &Value) -> Result<Value, String> {
+        self.require_coordinator(project, params)?;
+        if params
+            .get("worktree")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err("worktree workers are not available yet".into());
+        }
+        let brief = text_field(params, "brief").ok_or_else(|| "the worker needs a brief".to_string())?;
+        let name = text_field(params, "name").unwrap_or_default();
+        let model = text_field(params, "model").unwrap_or_else(|| "glm-5.3".into());
+        let machine = params.get("machine").and_then(Value::as_str);
+        let readonly = params
+            .get("readonly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let worker = arbos_layout::reserve_worker(project, &name, &brief, &model, machine)?;
+        let origin = text_field(params, "originChatId").unwrap_or_default();
+        let chat = self
+            .workspace
+            .chat(&origin)
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| "origin chat is missing".to_string())?;
+        let space = chat
+            .space_id
+            .clone()
+            .ok_or_else(|| "origin chat has no project".to_string())?;
+        let cwd = chat.cwd.clone().unwrap_or_else(|| project.display().to_string());
+        let chat_id = format!("{space}-w-{}", worker.id);
+        let config = ChatConfig {
+            harness: HarnessId::Fx,
+            model: Some(worker_model(&model)),
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            sandbox: if readonly {
+                SandboxLevel::ReadOnly
+            } else {
+                SandboxLevel::DangerFullAccess
+            },
+        };
+        if self
+            .workspace
+            .chat(&chat_id)
+            .map_err(|err| err.to_string())?
+            .is_none()
+        {
+            self.workspace
+                .create_chat(
+                    &chat_id,
+                    Some(&space),
+                    Some(&chat.device_id),
+                    Some(config.clone()),
+                    Some(cwd.clone()),
+                )
+                .map_err(|err| err.to_string())?;
+        }
+        self.workspace
+            .rename_chat(&chat_id, &worker.id)
+            .map_err(|err| err.to_string())?;
+        self.workspace
+            .set_chat_config(&chat_id, &config)
+            .map_err(|err| err.to_string())?;
+        arbos_layout::bind_worker_chat(project, &worker.id, &chat_id)?;
+        self.queue_prompt(&chat_id, &cwd, &brief, &config)?;
+        Ok(json!({
+            "name": worker.id,
+            "chatId": chat_id,
+            "status": "working",
+            "machine": "local",
+        }))
+    }
+
+    fn send_worker(&self, project: &Path, params: &Value) -> Result<Value, String> {
+        self.require_coordinator(project, params)?;
+        let name = text_field(params, "name").ok_or_else(|| "name the worker".to_string())?;
+        let text = text_field(params, "text").ok_or_else(|| "the message is empty".to_string())?;
+        let worker = arbos_layout::worker_result(project, &name)?;
+        if worker.chat_id.is_empty() {
+            return Err("that worker has no chat".into());
+        }
+        let cwd = self
+            .workspace
+            .chat(&worker.chat_id)
+            .map_err(|err| err.to_string())?
+            .and_then(|chat| chat.cwd)
+            .unwrap_or_else(|| project.display().to_string());
+        let working = self.sessions.is_working(&worker.chat_id);
+        if working {
+            self.doc_host
+                .queue_command(
+                    &worker.chat_id,
+                    SessionCommandPayload::Steer {
+                        prompt: text,
+                        message_id: Some(new_id()),
+                    },
+                )
+                .map_err(|err| err.to_string())?;
+        } else {
+            let config = ChatConfig {
+                harness: HarnessId::Fx,
+                model: Some("glm-5.3".into()),
+                reasoning: None,
+                model_options: serde_json::Map::new(),
+                sandbox: SandboxLevel::DangerFullAccess,
+            };
+            self.queue_prompt(&worker.chat_id, &cwd, &text, &config)?;
+        }
+        Ok(json!({
+            "name": worker.id,
+            "steered": working,
+        }))
+    }
+
+    fn queue_prompt(
+        &self,
+        chat_id: &str,
+        cwd: &str,
+        prompt: &str,
+        config: &ChatConfig,
+    ) -> Result<(), String> {
+        self.doc_host
+            .queue_command(
+                chat_id,
+                SessionCommandPayload::Run {
+                    request: RunRequest {
+                        prompt: prompt.to_owned(),
+                        harness: Some(config.harness),
+                        model: config.model.clone(),
+                        reasoning: config.reasoning,
+                        model_options: serde_json::Map::new(),
+                        cwd: cwd.to_owned(),
+                        sandbox: config.sandbox,
+                        auto_approve: true,
+                        resume: None,
+                        attachments: Vec::new(),
+                        worktree: None,
+                        mcp: None,
+                    },
+                    message_id: new_id(),
+                },
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+}
+
+fn worker_model(model: &str) -> String {
+    let model = model.trim();
+    if model.is_empty() {
+        "glm-5.3".into()
+    } else {
+        model.to_owned()
+    }
+}
+
+fn text_field(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+fn context_path(params: &Value) -> Result<String, String> {
+    let raw = text_field(params, "path").ok_or_else(|| "name the context file".to_string())?;
+    let raw = raw.trim_start_matches('/');
+    let relative = raw
+        .strip_prefix(".arbos/context/")
+        .or_else(|| raw.strip_prefix("context/"))
+        .unwrap_or(raw);
+    if relative.is_empty() {
+        return Err("name the context file".into());
+    }
+    Ok(relative.to_owned())
+}
+
+fn agent_rows(agents: &[AgentView]) -> Vec<Value> {
+    agents.iter().map(agent_row).collect()
+}
+
+fn agent_row(agent: &AgentView) -> Value {
+    json!({
+        "name": agent.id,
+        "role": agent.role,
+        "status": agent.status,
+        "chatId": agent.chat_id,
+        "brief": agent.brief,
+        "result": agent.result,
+        "resultPointer": format!("agents/{}/agent.toml", agent.id),
+    })
+}

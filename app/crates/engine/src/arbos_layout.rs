@@ -11,7 +11,26 @@ use serde::{Deserialize, Serialize};
 
 pub const COORDINATOR_PROMPT: &str = "\
 You are the coordinator for this project. \
-You keep `.arbos/context/status.md` current. \
+Plan the work and delegate it. Do not edit project code. \
+Context files are yours to keep current. \
+The arbos tools are mcp_arbos_agents_spawn, mcp_arbos_agents_send, mcp_arbos_agents_list, mcp_arbos_agents_result, mcp_arbos_context_read, and mcp_arbos_context_write. \
+A tool works only after mcp_select_tool names it. The schema is ready on the next step, so call the tool then. \
+To spawn one worker: mcp_select_tool {\"name\":\"mcp_arbos_agents_spawn\"}, then mcp_arbos_agents_spawn. \
+Repeat that pair for every worker. Spawn returns at once. machine must be \"local\". \
+Start every independent worker before you wait for any of them. \
+When a worker finishes you see a Worked line. \
+Then summarise in a few sentences and tick the matching line in context/status.md with mcp_arbos_context_write. \
+Do not tick a line before that worker reports. \
+Read `.arbos/context/GOALS.md` first. \
+Write what you learn to `.arbos/context/`. \
+Keep `status.md` current.";
+
+pub const WORKER_PROMPT: &str = "\
+You are a worker. Do the brief. Do not spawn agents and do not edit project code. \
+Write the requested file with mcp_arbos_context_write. \
+Before that call, call mcp_select_tool with name mcp_arbos_context_write. \
+The path is relative to context, for example research/note.md. \
+Then reply with that path and stop. \
 Read `.arbos/context/GOALS.md` first. \
 Write what you learn to `.arbos/context/`. \
 Keep `status.md` current.";
@@ -40,6 +59,33 @@ struct AgentFile {
     #[serde(default)]
     chat_id: String,
     model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    parent: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    brief: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    result: String,
+}
+
+/// One row of `agents/*/agent.toml` for the tab strip and the list tool.
+#[derive(Debug, Clone)]
+pub struct AgentView {
+    pub id: String,
+    pub role: String,
+    pub chat_id: String,
+    pub status: String,
+    pub brief: String,
+    pub result: String,
+}
+
+/// A worker turn just ended. `main_chat_id` is the coordinator to wake.
+#[derive(Debug, Clone)]
+pub struct WorkerDone {
+    pub id: String,
+    pub main_chat_id: String,
+    pub result: String,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +93,7 @@ pub struct TurnPrep {
     pub fx_home: String,
     pub system_prompt: String,
     pub agent_id: String,
+    pub role: String,
 }
 
 fn layout_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -104,15 +151,7 @@ pub fn ensure(project: &Path, name: Option<&str>) -> Result<(), String> {
     }
     let main = root.join("agents").join("main").join("agent.toml");
     if !main.is_file() {
-        write_toml(
-            &main,
-            &AgentFile {
-                id: "main".into(),
-                role: "coordinator".into(),
-                chat_id: String::new(),
-                model: "glm-5.3".into(),
-            },
-        )?;
+        write_toml(&main, &coordinator_agent())?;
     }
     if !root.join(".git").exists() {
         if !git(&root, &["init"]) {
@@ -193,15 +232,16 @@ pub fn prepare_turn(project: &Path, chat_id: &str) -> Option<TurnPrep> {
     let agent = bind_agent(&root, chat_id).ok()?;
     let fx = root.join("agents").join(&agent.id).join("fx");
     fs::create_dir_all(&fx).ok()?;
-    let system_prompt = if agent.role == "coordinator" {
-        COORDINATOR_PROMPT
-    } else {
-        CHAT_PROMPT
+    let system_prompt = match agent.role.as_str() {
+        "coordinator" => COORDINATOR_PROMPT,
+        "worker" => WORKER_PROMPT,
+        _ => CHAT_PROMPT,
     };
     Some(TurnPrep {
         fx_home: fx.display().to_string(),
         system_prompt: system_prompt.to_owned(),
         agent_id: agent.id,
+        role: agent.role,
     })
 }
 
@@ -209,17 +249,209 @@ pub fn prepare_turn(project: &Path, chat_id: &str) -> Option<TurnPrep> {
 pub fn claim_main(project: &Path, chat_id: &str) -> Result<(), String> {
     let _guard = layout_lock();
     let path = root_of(project).join("agents").join("main").join("agent.toml");
-    let mut agent = read_agent(&path).unwrap_or(AgentFile {
-        id: "main".into(),
-        role: "coordinator".into(),
-        chat_id: String::new(),
-        model: "glm-5.3".into(),
-    });
+    let mut agent = read_agent(&path).unwrap_or_else(coordinator_agent);
     if agent.chat_id.is_empty() {
         agent.chat_id = chat_id.to_owned();
         write_toml(&path, &agent)?;
     }
     Ok(())
+}
+
+fn coordinator_agent() -> AgentFile {
+    AgentFile {
+        id: "main".into(),
+        role: "coordinator".into(),
+        chat_id: String::new(),
+        model: "glm-5.3".into(),
+        parent: String::new(),
+        brief: String::new(),
+        status: String::new(),
+        result: String::new(),
+    }
+}
+
+/// Agents in this project, main first, then the rest by id.
+pub fn agents(project: &Path) -> Vec<AgentView> {
+    let _guard = layout_lock();
+    let mut rows: Vec<_> = list_agents(&root_of(project))
+        .into_iter()
+        .map(agent_view)
+        .collect();
+    rows.sort_by(|a, b| {
+        let rank = |role: &str| match role {
+            "coordinator" => 0,
+            "worker" => 1,
+            _ => 2,
+        };
+        rank(&a.role)
+            .cmp(&rank(&b.role))
+            .then(a.id.cmp(&b.id))
+    });
+    rows
+}
+
+/// Create or reuse `agents/<name>/` for a local worker. `machine` must be
+/// empty or `local`. The chat id is filled in by [`bind_worker_chat`].
+pub fn reserve_worker(
+    project: &Path,
+    name: &str,
+    brief: &str,
+    model: &str,
+    machine: Option<&str>,
+) -> Result<AgentView, String> {
+    let _guard = layout_lock();
+    let machine = machine.unwrap_or("local").trim();
+    if machine != "local" {
+        return Err("only local workers are available".into());
+    }
+    let brief = brief.trim();
+    if brief.is_empty() {
+        return Err("the worker needs a brief".into());
+    }
+    let id = worker_id(project, name)?;
+    let root = root_of(project);
+    let dir = root.join("agents").join(&id);
+    fs::create_dir_all(dir.join("fx")).map_err(|e| e.to_string())?;
+    let path = dir.join("agent.toml");
+    let mut agent = read_agent(&path).unwrap_or(AgentFile {
+        id: id.clone(),
+        role: "worker".into(),
+        chat_id: String::new(),
+        model: model.to_owned(),
+        parent: "main".into(),
+        brief: String::new(),
+        status: String::new(),
+        result: String::new(),
+    });
+    if agent.role == "coordinator" {
+        return Err("main is the coordinator".into());
+    }
+    agent.role = "worker".into();
+    agent.parent = "main".into();
+    agent.brief = brief.to_owned();
+    agent.model = if model.trim().is_empty() {
+        "glm-5.3".into()
+    } else {
+        model.trim().to_owned()
+    };
+    agent.status = "working".into();
+    agent.result.clear();
+    write_toml(&path, &agent)?;
+    Ok(agent_view(agent))
+}
+
+/// Point a reserved worker at the chat that will run it.
+pub fn bind_worker_chat(project: &Path, worker_id: &str, chat_id: &str) -> Result<(), String> {
+    let _guard = layout_lock();
+    let path = root_of(project)
+        .join("agents")
+        .join(worker_id)
+        .join("agent.toml");
+    let mut agent = read_agent(&path).ok_or_else(|| "worker is missing".to_string())?;
+    agent.chat_id = chat_id.to_owned();
+    write_toml(&path, &agent)
+}
+
+/// Record a worker turn that just ended. Returns the coordinator to wake.
+/// A second call for the same turn returns nothing.
+pub fn finish_worker(
+    project: &Path,
+    chat_id: &str,
+    status: &str,
+    result: &str,
+) -> Option<WorkerDone> {
+    let _guard = layout_lock();
+    let root = root_of(project);
+    let agents = list_agents(&root);
+    let current = agents.iter().find(|agent| agent.chat_id == chat_id)?;
+    if current.role != "worker" || current.status != "working" {
+        return None;
+    }
+    let main_chat_id = agents
+        .iter()
+        .find(|agent| agent.id == "main")
+        .map(|agent| agent.chat_id.clone())
+        .filter(|id| !id.is_empty())?;
+    let path = root.join("agents").join(&current.id).join("agent.toml");
+    let mut agent = read_agent(&path)?;
+    agent.status = status.to_owned();
+    agent.result = clip_result(result);
+    write_toml(&path, &agent).ok()?;
+    Some(WorkerDone {
+        id: agent.id,
+        main_chat_id,
+        result: agent.result,
+    })
+}
+
+/// Last stored reply for `agents.result`.
+pub fn worker_result(project: &Path, name: &str) -> Result<AgentView, String> {
+    let _guard = layout_lock();
+    let id = slug(name);
+    if id.is_empty() {
+        return Err("name the worker".into());
+    }
+    let path = root_of(project)
+        .join("agents")
+        .join(&id)
+        .join("agent.toml");
+    read_agent(&path)
+        .map(agent_view)
+        .ok_or_else(|| "no such worker".to_string())
+}
+
+fn agent_view(agent: AgentFile) -> AgentView {
+    AgentView {
+        id: agent.id,
+        role: agent.role,
+        chat_id: agent.chat_id,
+        status: agent.status,
+        brief: agent.brief,
+        result: agent.result,
+    }
+}
+
+fn worker_id(project: &Path, name: &str) -> Result<String, String> {
+    let slug = slug(name);
+    if !slug.is_empty() && slug != "main" {
+        return Ok(slug);
+    }
+    let root = root_of(project);
+    for n in 1..100 {
+        let id = format!("worker-{n}");
+        if !root.join("agents").join(&id).exists() {
+            return Ok(id);
+        }
+    }
+    Err("too many workers".into())
+}
+
+fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+        if out.len() >= 32 {
+            break;
+        }
+    }
+    out.trim_matches('-').to_owned()
+}
+
+fn clip_result(text: &str) -> String {
+    let text = text.trim();
+    let mut end = 500.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut clipped = text[..end].to_owned();
+    if text.len() > end {
+        clipped.push('…');
+    }
+    clipped
 }
 
 /// Commit `.arbos` when a turn changed it. A clean tree is left alone.
@@ -259,6 +491,10 @@ fn bind_agent(root: &Path, chat_id: &str) -> Result<AgentFile, String> {
                 role: "chat".into(),
                 chat_id: chat_id.to_owned(),
                 model: "glm-5.3".into(),
+                parent: String::new(),
+                brief: String::new(),
+                status: String::new(),
+                result: String::new(),
             };
             let dir = root.join("agents").join(&id);
             fs::create_dir_all(dir.join("fx")).map_err(|e| e.to_string())?;

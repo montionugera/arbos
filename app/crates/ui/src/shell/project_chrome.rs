@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Task, div, prelude::*, px,
+    Animation, AnimationExt, AnyElement, Context, Entity, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled,
+    Task, div, prelude::*, px,
 };
 
 use crate::composer::ComposerInput;
@@ -68,6 +69,9 @@ struct ChatTab {
     id: String,
     title: String,
     main: bool,
+    worker: bool,
+    /// `working`, `done`, `error`, `stopped`, or empty.
+    status: String,
 }
 
 impl Shell {
@@ -623,9 +627,18 @@ impl Shell {
     }
 
     fn chat_tabs(&self, space_id: &str, cx: &gpui::App) -> Vec<ChatTab> {
-        let mut chats: Vec<_> = self
-            .state
-            .read(cx)
+        let state = self.state.read(cx);
+        let path = state
+            .spaces
+            .iter()
+            .find(|space| space.id == space_id)
+            .map(|space| space.path.clone());
+        let agents = path
+            .as_deref()
+            .map(|path| zeron_engine::arbos_layout::agents(std::path::Path::new(path)))
+            .unwrap_or_default();
+        let now = chrono::Utc::now();
+        let mut chats: Vec<_> = state
             .chats
             .iter()
             .filter(|chat| chat.space_id.as_deref() == Some(space_id))
@@ -633,13 +646,37 @@ impl Shell {
             .filter(|chat| chat.parent_chat_id.is_none())
             .cloned()
             .collect();
-        chats.sort_by_key(|chat| chat.created_at);
+        chats.sort_by(|left, right| {
+            let worker = |id: &str| {
+                agents
+                    .iter()
+                    .any(|agent| agent.chat_id == id && agent.role == "worker")
+            };
+            worker(&right.id)
+                .cmp(&worker(&left.id))
+                .then(left.created_at.cmp(&right.created_at))
+        });
         chats
             .into_iter()
-            .map(|chat| ChatTab {
-                main: chat.id.ends_with("-main"),
-                title: chat.title.clone().unwrap_or_else(|| "Chat".into()),
-                id: chat.id,
+            .map(|chat| {
+                let agent = agents.iter().find(|agent| agent.chat_id == chat.id);
+                let working = matches!(
+                    state.indicator_for(&chat.id, now),
+                    crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
+                );
+                let stored = agent.map(|agent| agent.status.as_str()).unwrap_or("");
+                let status = if working || stored == "working" {
+                    "working".into()
+                } else {
+                    stored.to_owned()
+                };
+                ChatTab {
+                    main: chat.id.ends_with("-main"),
+                    worker: agent.is_some_and(|agent| agent.role == "worker"),
+                    title: chat.title.clone().unwrap_or_else(|| "Chat".into()),
+                    id: chat.id,
+                    status,
+                }
             })
             .collect()
     }
@@ -775,12 +812,38 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = surface == Surface::Chat && selected == Some(tab.id.as_str());
-        let label = if tab.main {
-            format!("● {}", tab.title)
-        } else {
-            tab.title.clone()
-        };
         let chat_id = tab.id.clone();
+        let mut label = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0));
+        if tab.main {
+            label = label.child("●");
+        } else if tab.worker {
+            label = label.child("⚙");
+        }
+        label = label.child(tab.title.clone());
+        if tab.worker && tab.status == "working" {
+            let pulse_id = SharedString::from(format!("worker-pulse-{}", tab.id));
+            label = label.child(
+                div()
+                    .text_color(theme.accent)
+                    .child("●")
+                    .with_animation(
+                        pulse_id,
+                        Animation::new(Duration::from_millis(900)).repeat(),
+                        |dot, t| {
+                            let wave = (t * std::f32::consts::PI).sin().abs();
+                            dot.opacity(1.0 - 0.65 * wave)
+                        },
+                    ),
+            );
+        } else if tab.worker && tab.status == "error" {
+            label = label.child("✕");
+        } else if tab.worker && (tab.status == "done" || tab.status == "stopped") {
+            label = label.child("✓");
+        }
         div()
             .id(SharedString::from(format!("project-tab-{}", tab.id)))
             .h(px(26.0))
