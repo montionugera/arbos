@@ -1,43 +1,15 @@
 # Arbos
 
-Arbos is a coding-agent app. You open a folder, talk to Main, and watch workers. The harness is fx. It speaks engy (`https://api.engy.ai/v1`, model `glm-5.3`).
+Arbos is a coding agent for one project. Talk to Main, watch workers, keep the work in one place.
 
-Current status is in [docs/STATUS.md](docs/STATUS.md). How the pieces fit is in [docs/architecture.md](docs/architecture.md). The design is in [docs/design/arbos-rebuild-ideation.md](docs/design/arbos-rebuild-ideation.md).
+![Main after two workers finished. The checklist is ticked.](docs/images/arbos.png)
+
+The left rail lists your projects. Each project has one Main chat. Main delegates work to workers, and each worker is a tab. A checklist tracks what is done. A Context folder belongs to the project.
 
 ## Install
 
-The download is a Linux tarball. There is no Mac disk image.
+Download the Linux edge tarball from [GitHub Releases](https://github.com/unarbos/arbos/releases/tag/edge). `manifest.json` on that release names the file. Unpack it and run `install.sh`. There is no Mac disk image.
 
-On the GitHub Release tagged `edge`, read `manifest.json`. It names `arbos-<version>-linux-<arch>.tar.gz`. The version is `0.2.111` plus the commit count, so a new commit on main is a newer build. There is no Mac disk image. The current manifest names `arbos-0.2.111.2471-linux-x86_64.tar.gz`:
+Open **Settings → Keys** and paste an engy.ai key. Open a folder. Talk to Main. Watch the workers.
 
-https://github.com/unarbos/arbos/releases/download/edge/arbos-0.2.111.2471-linux-x86_64.tar.gz
-
-Unpack it and run `install.sh`. That script does not need root. It copies the app to `~/.zeron/app` and links `~/.local/bin/arbos`. `arbos` and `zeron` start the same program. `arbos --version` prints `Arbos 0.2.111`.
-
-If `~/.local/bin` is not on your `PATH`, add it, then open a new terminal. The application menu entry is still named Zeron. The window title is Arbos.
-
-## Paste an engy key
-
-Open Arbos. Open **Settings**, then **Keys**. The first row is **engy**. Paste the key into the Key field and click **Save**.
-
-The app stores the key outside the project. On Linux the file is `~/.local/share/arbos/secrets/engy`, mode 600. On macOS the key goes to the login keychain under the service `arbos`. The app passes that value to fx as `ENGY_API_KEY`.
-
-You can also export `ENGY_API_KEY` before you start `arbos`. The Settings page is the way to paste it.
-
-## Open a folder
-
-The first screen says "Add a project to get started" and "A project is a folder on one of your devices." Click **Add a project**. You can also click **+** on the left rail. Pick this computer, then the folder.
-
-The app creates `<folder>/.arbos/` and a Main chat. The left rail shows one icon per project.
-
-## Talk to Main
-
-Open the **Main** tab. The composer says "Do anything…". The chip shows `engy` and `glm-5.3`. Type the prompt there.
-
-## Watch workers
-
-Ask Main to spawn a worker. Each worker is its own tab. When a worker finishes, Main shows a line that starts with `Worked`. A worker runs on this machine, or on another install you have registered.
-
-The phone app in `ios/` can list those projects, follow Main, and send a prompt. It has no voice and no calls. TestFlight accepted build 7. The phone is not installed on a device. The MacBook is offline, so signing stops there. See [docs/STATUS.md](docs/STATUS.md).
-
-The root license is MIT. `fx/` stays Apache-2.0. See `fx/LICENSE` and the `THIRD_PARTY_NOTICES.md` files in `app/` and `fx/`.
+TestFlight build 7 exists, with no voice and no calls.
