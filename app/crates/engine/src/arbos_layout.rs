@@ -16,7 +16,7 @@ Context files are yours to keep current. \
 The arbos tools are mcp_arbos_agents_spawn, mcp_arbos_agents_send, mcp_arbos_agents_list, mcp_arbos_agents_result, mcp_arbos_context_read, and mcp_arbos_context_write. \
 A tool works only after mcp_select_tool names it. The schema is ready on the next step, so call the tool then. \
 To spawn one worker: mcp_select_tool {\"name\":\"mcp_arbos_agents_spawn\"}, then mcp_arbos_agents_spawn. \
-Repeat that pair for every worker. Spawn returns at once. machine must be \"local\". \
+Repeat that pair for every worker. Spawn returns at once. machine is \"local\" or the name of a registered install. \
 Start every independent worker before you wait for any of them. \
 When a worker finishes you see a Worked line. \
 A Worked line can also be a subscription wake, with no message from the person. Answer that wake in a few sentences. \
@@ -68,6 +68,9 @@ struct AgentFile {
     status: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     result: String,
+    /// `local`, or the install name that runs this worker.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    machine: String,
 }
 
 /// One row of `agents/*/agent.toml` for the tab strip and the list tool.
@@ -79,6 +82,7 @@ pub struct AgentView {
     pub status: String,
     pub brief: String,
     pub result: String,
+    pub machine: String,
 }
 
 /// A worker turn just ended. `main_chat_id` is the coordinator to wake.
@@ -167,7 +171,45 @@ pub fn ensure(project: &Path, name: Option<&str>) -> Result<(), String> {
             return Err("initial project commit failed".into());
         }
     }
+    if let Some(file) = read_project(project) {
+        crate::arbos_remote::remember_project(&file.name, project);
+    }
     Ok(())
+}
+
+/// Home machine recorded in `project.toml`. Empty and missing both mean `local`.
+pub fn home_of(project: &Path) -> String {
+    read_project(project)
+        .map(|file| {
+            let home = file.home.trim();
+            if home.is_empty() {
+                "local".into()
+            } else {
+                home.to_owned()
+            }
+        })
+        .unwrap_or_else(|| "local".into())
+}
+
+/// Point the rail and the scheduler at `home`. The name is a machine, not a path.
+pub fn set_home(project: &Path, home: &str) -> Result<(), String> {
+    let _guard = layout_lock();
+    let home = home.trim();
+    if home.is_empty()
+        || !home
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("the machine name is empty".into());
+    }
+    let path = root_of(project).join("project.toml");
+    let mut file = read_project(project).ok_or_else(|| "project.toml is missing".to_string())?;
+    file.home = home.to_owned();
+    write_toml(&path, &file)
+}
+
+pub fn project_id(project: &Path) -> Option<String> {
+    read_project(project).map(|file| file.id)
 }
 
 /// The icon string stored in `project.toml`: `emoji:…`, `image:…`, or `repo`.
@@ -272,6 +314,7 @@ fn coordinator_agent() -> AgentFile {
         brief: String::new(),
         status: String::new(),
         result: String::new(),
+        machine: String::new(),
     }
 }
 
@@ -295,8 +338,9 @@ pub fn agents(project: &Path) -> Vec<AgentView> {
     rows
 }
 
-/// Create or reuse `agents/<name>/` for a local worker. `machine` must be
-/// empty or `local`. The chat id is filled in by [`bind_worker_chat`].
+/// Create or reuse `agents/<name>/`. `machine` is `local` or a registered
+/// install. The chat id is filled in by [`bind_worker_chat`] when this
+/// install runs the worker.
 pub fn reserve_worker(
     project: &Path,
     name: &str,
@@ -306,8 +350,8 @@ pub fn reserve_worker(
 ) -> Result<AgentView, String> {
     let _guard = layout_lock();
     let machine = machine.unwrap_or("local").trim();
-    if machine != "local" {
-        return Err("only local workers are available".into());
+    if machine.is_empty() {
+        return Err("name the machine".into());
     }
     let brief = brief.trim();
     if brief.is_empty() {
@@ -327,6 +371,7 @@ pub fn reserve_worker(
         brief: String::new(),
         status: String::new(),
         result: String::new(),
+        machine: String::new(),
     });
     if agent.role == "coordinator" {
         return Err("main is the coordinator".into());
@@ -341,6 +386,7 @@ pub fn reserve_worker(
     };
     agent.status = "working".into();
     agent.result.clear();
+    agent.machine = machine.to_owned();
     write_toml(&path, &agent)?;
     Ok(agent_view(agent))
 }
@@ -413,6 +459,7 @@ fn agent_view(agent: AgentFile) -> AgentView {
         status: agent.status,
         brief: agent.brief,
         result: agent.result,
+        machine: agent.machine,
     }
 }
 
@@ -500,6 +547,7 @@ fn bind_agent(root: &Path, chat_id: &str) -> Result<AgentFile, String> {
                 brief: String::new(),
                 status: String::new(),
                 result: String::new(),
+                machine: String::new(),
             };
             let dir = root.join("agents").join(&id);
             fs::create_dir_all(dir.join("fx")).map_err(|e| e.to_string())?;

@@ -63,6 +63,7 @@ struct ProjectRow {
     id: String,
     path: String,
     name: String,
+    home: String,
 }
 
 struct ChatTab {
@@ -608,6 +609,7 @@ impl Shell {
                 id: space.id.clone(),
                 path: space.path.clone(),
                 name: space.display_name().to_owned(),
+                home: zeron_engine::arbos_layout::home_of(Path::new(&space.path)),
             })
             .collect()
     }
@@ -623,6 +625,7 @@ impl Shell {
             id: space.id.clone(),
             path: space.path.clone(),
             name: space.display_name().to_owned(),
+            home: zeron_engine::arbos_layout::home_of(Path::new(&space.path)),
         })
     }
 
@@ -713,11 +716,14 @@ impl Shell {
         let icon = self.rail_icon(row, cx);
         div()
             .id(SharedString::from(format!("project-rail-{}", row.id)))
-            .size(px(32.0))
+            .w(px(48.0))
+            .py(px(4.0))
             .rounded(px(8.0))
             .flex()
+            .flex_col()
             .items_center()
             .justify_center()
+            .gap(px(2.0))
             .cursor_pointer()
             .border_1()
             .border_color(if active { theme.accent } else { theme.border })
@@ -726,8 +732,15 @@ impl Shell {
             } else {
                 gpui::transparent_black()
             })
-            .aria_label(format!("{} {}", index + 1, row.name))
+            .aria_label(format!("{} {} {}", index + 1, row.name, row.home))
             .child(icon)
+            .child(
+                div()
+                    .text_size(px(8.0))
+                    .line_height(px(10.0))
+                    .text_color(theme.text_muted)
+                    .child(row.home.clone()),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_project(&space_id, cx);
             }))

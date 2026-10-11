@@ -134,10 +134,20 @@ fn require_mac_app_update_platform() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `zeron-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
+/// `arbos-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
 pub fn headless_artifact(version: &str) -> String {
     let (os, arch) = platform_key();
-    format!("zeron-{version}-{os}-{arch}.tar.gz")
+    format!("arbos-{version}-{os}-{arch}.tar.gz")
+}
+
+fn staged_cli(dir: &Path) -> Option<PathBuf> {
+    for name in ["arbos", "zeron"] {
+        let path = dir.join(name);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// `zeron-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
@@ -474,7 +484,8 @@ impl InstallKind {
                     .context("staged install has no version directory")?;
                 apply_headless(app_root, version)?;
                 if relaunch {
-                    let binary = app_root.join("current").join("zeron");
+                    let binary = staged_cli(&app_root.join("current"))
+                        .unwrap_or_else(|| app_root.join("current").join("arbos"));
                     relaunch_after_exit(&binary, Path::new(""));
                 }
                 Ok(())
@@ -685,8 +696,9 @@ async fn verify_staged_binary(binary: &Path, version: &str) -> anyhow::Result<()
     .context("staged binary version check timed out")?
     .with_context(|| format!("running {} --version", binary.display()))?;
     let reported = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let named = reported == format!("zeron {version}") || reported == format!("arbos {version}");
     anyhow::ensure!(
-        output.status.success() && reported == format!("zeron {version}"),
+        output.status.success() && named,
         "staged binary reported {reported:?} (exit {}), expected \"zeron {version}\"",
         output.status
     );
@@ -712,7 +724,7 @@ pub async fn stage_headless(
         "invalid release version {version:?}"
     );
     let dest = app_root.join(version);
-    if dest.join("zeron").exists() {
+    if staged_cli(&dest).is_some() {
         return Ok(dest);
     }
     let file = headless_artifact(version);
@@ -736,14 +748,14 @@ pub async fn stage_headless(
                 "--strip-components=1",
             ],
         )?;
-        if !unpacked.join("zeron").is_file() {
-            bail!("tarball {file} did not contain a zeron binary");
-        }
-        verify_staged_binary(&unpacked.join("zeron"), version).await?;
+        let Some(binary) = staged_cli(&unpacked) else {
+            bail!("tarball {file} did not contain an arbos binary");
+        };
+        verify_staged_binary(&binary, version).await?;
         match std::fs::rename(&unpacked, &dest) {
             Ok(()) => {}
             // Lost a race with another stager — the staged copy is equivalent.
-            Err(_) if dest.join("zeron").exists() => {}
+            Err(_) if staged_cli(&dest).is_some() => {}
             Err(err) => {
                 return Err(err).with_context(|| format!("moving {} into place", dest.display()));
             }
@@ -761,7 +773,7 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         let target = app_root.join(version);
-        if !target.join("zeron").exists() {
+        if staged_cli(&target).is_none() {
             bail!("{} is not a staged install", target.display());
         }
         let tmp = app_root.join(format!(".current-{}", std::process::id()));
@@ -1685,10 +1697,10 @@ mod tests {
     #[test]
     fn artifact_names_match_packaging() {
         let (os, arch) = platform_key();
-        assert!(headless_artifact("0.2.0").starts_with("zeron-0.2.0-"));
+        assert!(headless_artifact("0.2.0").starts_with("arbos-0.2.0-"));
         assert_eq!(
             headless_artifact("0.2.0"),
-            format!("zeron-0.2.0-{os}-{arch}.tar.gz")
+            format!("arbos-0.2.0-{os}-{arch}.tar.gz")
         );
         assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
     }
@@ -1757,12 +1769,12 @@ mod tests {
     #[test]
     fn manifest_parses_with_and_without_files() {
         let full: Manifest = serde_json::from_str(
-            r#"{"version":"0.1.1","files":{"zeron-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
+            r#"{"version":"0.1.1","files":{"arbos-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
         )
         .unwrap();
         assert_eq!(full.version, "0.1.1");
         assert_eq!(
-            full.files["zeron-0.1.1-linux-x86_64.tar.gz"]
+            full.files["arbos-0.1.1-linux-x86_64.tar.gz"]
                 .sha256
                 .as_deref(),
             Some("abc")

@@ -59,6 +59,64 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Move a project, or record where it lives.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+    /// Record a remote engine in `~/.arbos/machines.toml`.
+    Machine {
+        #[command(subcommand)]
+        command: MachineCommand,
+    },
+    /// Run a worker on a registered install.
+    Spawn {
+        /// Project name.
+        project: String,
+        /// Registered install that runs the worker.
+        #[arg(long)]
+        machine: String,
+        /// What the worker should do.
+        #[arg(long)]
+        brief: String,
+        /// Worker name. A slug is used when this is omitted.
+        #[arg(long)]
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectCommand {
+    /// Copy the project to a machine and make that machine its home.
+    Move {
+        /// Project name.
+        name: String,
+        /// Machine name from `machines.toml`.
+        #[arg(long)]
+        to: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MachineCommand {
+    /// Add or replace one machine entry. The access token stays in the secrets directory.
+    Add {
+        name: String,
+        #[arg(long)]
+        url: String,
+        /// Secrets-file name. The file holds `client_id` and `client_secret` lines.
+        #[arg(long)]
+        credential: String,
+        /// `user@host` used to copy the project tree.
+        #[arg(long)]
+        ssh: String,
+        /// Directory on that host. The project folder is created inside it.
+        #[arg(long)]
+        dir: String,
+        /// Path to the SSH private key. The key is not copied into the config.
+        #[arg(long)]
+        key: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -243,6 +301,56 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(update_cli::update(&edge_url_from_env(), check))
+        }
+        Some(Command::Project { command }) => match command {
+            ProjectCommand::Move { name, to } => {
+                let runtime = tokio::runtime::Runtime::new()?;
+                let moved = runtime
+                    .block_on(zeron_engine::arbos_remote::move_project(&name, &to))
+                    .map_err(anyhow::Error::msg)?;
+                println!("{moved}");
+                Ok(())
+            }
+        },
+        Some(Command::Machine { command }) => match command {
+            MachineCommand::Add {
+                name,
+                url,
+                credential,
+                ssh,
+                dir,
+                key,
+            } => {
+                zeron_engine::arbos_remote::add_machine(zeron_engine::arbos_remote::Machine {
+                    name,
+                    url,
+                    credential,
+                    ssh,
+                    dir,
+                    key: key.unwrap_or_default(),
+                })
+                .map_err(anyhow::Error::msg)?;
+                println!("machine recorded");
+                Ok(())
+            }
+        },
+        Some(Command::Spawn {
+            project,
+            machine,
+            brief,
+            name,
+        }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let spawned = runtime
+                .block_on(zeron_engine::arbos_remote::spawn_cli(
+                    &project,
+                    &machine,
+                    &brief,
+                    name.as_deref().unwrap_or(""),
+                ))
+                .map_err(anyhow::Error::msg)?;
+            println!("{spawned}");
+            Ok(())
         }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),

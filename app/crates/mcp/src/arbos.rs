@@ -8,8 +8,8 @@ use crate::zeron::Zeron;
 
 const ARBOS_INSTRUCTIONS: &str = "\
 This server is the Arbos project. \
-agents.spawn starts a local worker and returns at once. \
-machine accepts only local. \
+agents.spawn starts a worker and returns at once. \
+machine is local or the name of a registered install. \
 context.read and context.write use paths under the project context directory, \
 such as research/note.md or status.md. \
 Workers do not have the agents tools.";
@@ -24,7 +24,7 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
         tools.extend([
             tool(
                 "agents.spawn",
-                "Start a local worker and return at once. machine must be local. The worker runs the brief in its own chat.",
+                "Start a worker and return at once. machine is local or the name of a registered install. The worker runs the brief in its own chat.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -33,7 +33,7 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
                         "model": { "type": "string", "description": "Model id. Defaults to glm-5.3." },
                         "readonly": { "type": "boolean", "description": "Run the worker read-only." },
                         "worktree": { "type": "boolean", "description": "Not available. Must be omitted or false." },
-                        "machine": { "type": "string", "description": "Must be local." }
+                        "machine": { "type": "string", "description": "local, or the name of a registered install." }
                     },
                     "required": ["brief"]
                 }),

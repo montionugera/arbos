@@ -77,6 +77,7 @@ pub fn spawn(host: DocHost, workspace: WorkspaceHost, sessions: SessionsEngine) 
 }
 
 fn tick(host: &DocHost, workspace: &WorkspaceHost, sessions: &SessionsEngine, poll_github: bool) {
+    crate::arbos_remote::mirror(host, workspace);
     for (chat_id, cwd) in main_chats(workspace) {
         if let Err(err) = tick_project(host, sessions, &chat_id, &cwd, poll_github) {
             tracing::warn!(chat = %chat_id, error = %err, "subscription project tick failed");
@@ -95,8 +96,12 @@ fn main_chats(workspace: &WorkspaceHost) -> Vec<(String, String)> {
                 return None;
             }
             let cwd = chat.cwd?;
-            let root = Path::new(&cwd).join(".arbos").join("project.toml");
-            root.is_file().then_some((chat.id, cwd))
+            let project = Path::new(&cwd);
+            let root = project.join(".arbos").join("project.toml");
+            if !root.is_file() || !crate::arbos_remote::owns_project(project) {
+                return None;
+            }
+            Some((chat.id, cwd))
         })
         .collect()
 }
@@ -159,7 +164,12 @@ fn tick_project(
         match body {
             Ok(Some(body)) => {
                 match queue_wake(host, sessions, chat_id, cwd, &body) {
-                    Ok(()) => tracing::info!(chat = %chat_id, file = name, "subscription wake queued"),
+                    Ok(()) => {
+                        let id = crate::new_id();
+                        let line = format!("Worked · {}", body.trim());
+                        crate::arbos_remote::note_worked(cwd, &id, &line);
+                        tracing::info!(chat = %chat_id, file = name, "subscription wake queued");
+                    }
                     Err(err) => {
                         tracing::warn!(chat = %chat_id, file = name, error = %err, "subscription wake was not queued")
                     }

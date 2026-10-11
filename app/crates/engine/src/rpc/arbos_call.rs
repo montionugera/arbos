@@ -86,7 +86,20 @@ impl EngineRpc {
             .get("readonly")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let worker = arbos_layout::reserve_worker(project, &name, &brief, &model, machine)?;
+        let requested = machine.unwrap_or("local").trim().to_owned();
+        let worker = arbos_layout::reserve_worker(project, &name, &brief, &model, Some(requested.as_str()))?;
+        if crate::arbos_remote::is_remote_machine(&requested) {
+            if crate::arbos_remote::owns_project(project) {
+                crate::arbos_remote::enqueue_local(&requested, project, &worker.id, &brief)?;
+            } else {
+                crate::arbos_remote::forward_spawn(project, &requested, &worker.id, &brief)?;
+            }
+            return Ok(json!({
+                "name": worker.id,
+                "status": "working",
+                "machine": requested,
+            }));
+        }
         let origin = text_field(params, "originChatId").unwrap_or_default();
         let chat = self
             .workspace

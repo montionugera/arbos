@@ -17,6 +17,7 @@ use zeron_sync::DocsStore;
 
 pub mod agent_accounts;
 pub mod arbos_layout;
+pub mod arbos_remote;
 mod arbos_wakes;
 pub mod auth;
 mod change_request_store;
@@ -791,6 +792,11 @@ impl Engine {
         };
         zeron_harness::secrets::install_process_env();
         arbos_wakes::spawn(core.doc_host.clone(), core.workspace.clone(), core.sessions.clone());
+        arbos_remote::spawn(
+            core.doc_host.clone(),
+            core.workspace.clone(),
+            core.sessions.clone(),
+        );
         let updater = zeron_update::Updater::spawn(String::new(), Some(quiescent));
         if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
             let updater_for_tokens = updater.clone();

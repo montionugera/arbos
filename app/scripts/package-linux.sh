@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Linux packaging: build the release binary and produce
-#   target/package/zeron-<version>-linux-<arch>.tar.gz
+#   target/package/arbos-<version>-linux-<arch>.tar.gz
 # containing the binary, the .desktop entry, and the icon, plus an install.sh
 # that installs them into the self-updating ~/.zeron/app layout and links
 # ~/.local (XDG) paths to it.
@@ -16,7 +16,7 @@ PROFILE="${PROFILE:-release}"
 ARCH="$(uname -m)"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 OUT_DIR="$ROOT/target/package"
-STAGE="$OUT_DIR/zeron-$VERSION-linux-$ARCH"
+STAGE="$OUT_DIR/arbos-$VERSION-linux-$ARCH"
 TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
@@ -31,6 +31,7 @@ fi
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
 install -m 755 "$BIN" "$STAGE/zeron"
+cp -a "$STAGE/zeron" "$STAGE/arbos"
 install -m 644 "$ROOT/dist/zeron.desktop" "$STAGE/zeron.desktop"
 install -m 644 "$ROOT/dist/zeron.png" "$STAGE/zeron.png"
 install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"
@@ -65,6 +66,11 @@ fi
 ln -sfn "$DEST" "$APP_ROOT/current"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$APP_ROOT/current/zeron" "$HOME/.local/bin/zeron"
+if [ -x "$APP_ROOT/current/arbos" ]; then
+  ln -sfn "$APP_ROOT/current/arbos" "$HOME/.local/bin/arbos"
+else
+  ln -sfn "$APP_ROOT/current/zeron" "$HOME/.local/bin/arbos"
+fi
 
 # Launchers list Zeron through a per-user .desktop entry. The one in the tarball
 # says `Exec=zeron` and `TryExec=zeron`, which only resolve when ~/.local/bin is
