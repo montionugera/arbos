@@ -24,7 +24,7 @@ final class PhoneSession: ObservableObject {
     private var task: URLSessionWebSocketTask?
     private var listenTask: Task<Void, Never>?
     private var nextId = 1
-    private var calls: [Int: CheckedContinuation<Data, Error>] = []
+    private var calls: [Int: CheckedContinuation<Data, Error>] = [:]
     private var watchId: Int?
     private var project: PhoneProject?
 
