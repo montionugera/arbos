@@ -1,0 +1,13 @@
+name: Scratch red
+
+on:
+  pull_request:
+
+jobs:
+  red:
+    name: This scratch pull request is meant to fail
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fail on purpose
+        run: echo "This scratch pull request is meant to go red. It uploads nothing." && exit 1
