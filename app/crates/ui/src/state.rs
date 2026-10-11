@@ -346,6 +346,8 @@ impl EngineHandle {
             service: assembled_service.clone(),
         });
         let client = memory_client(service.clone());
+        // The phone uses this same service on the remote port.
+        zeron_engine::arbos_remote::attach_rpc(service.clone());
 
         // Serve the same service on the IPC port so a terminal viewport can
         // attach to this window's engine with no setup. Deliberately the

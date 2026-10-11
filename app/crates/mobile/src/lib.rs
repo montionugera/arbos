@@ -17,5 +17,5 @@ pub mod wallpaper;
 /// Version handshake: the Swift/Kotlin bindings must match the linked library.
 #[uniffi::export]
 pub fn core_version() -> String {
-    env!("CARGO_PKG_VERSION").to_owned()
+    format!("Arbos {}", env!("CARGO_PKG_VERSION"))
 }

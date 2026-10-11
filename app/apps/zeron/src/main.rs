@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "zeron",
+    name = "Arbos",
     version,
     about = "Arbos is a coding-agent app. The harness speaks engy."
 )]

@@ -28,7 +28,7 @@ pub use device_room::{
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame,
 };
-pub use server::{serve_connection, serve_ws_listener};
+pub use server::{serve_connection, serve_remote_ws, serve_ws_listener};
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -120,8 +120,9 @@ pub mod methods {
     /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
     /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
-    /// Project tools for the `arbos` MCP server. Params `{op, ...}`.
-    /// IPC-only. `op` is `spawn`, `send`, `list`, `result`, `read`, or `write`.
+    /// Project tools for the `arbos` MCP server and the phone. Params `{op, ...}`.
+    /// `op` is `projects`, `spawn`, `send`, `list`, `result`, `read`, or `write`.
+    /// `projects` needs no project path.
     pub const ARBOS_CALL: &str = "ArbosCall";
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).

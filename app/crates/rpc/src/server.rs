@@ -141,7 +141,7 @@ pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcServic
         match listener.accept().await {
             Ok((stream, peer)) => {
                 tracing::debug!(%peer, "rpc: connection accepted");
-                tokio::spawn(serve_ws_socket(stream, service.clone()));
+                tokio::spawn(serve_ws_socket(stream, service.clone(), false));
             }
             Err(err) => {
                 tracing::warn!(error = %err, "rpc: accept failed");
@@ -151,7 +151,13 @@ pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcServic
     }
 }
 
-async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
+/// The phone dials the home engine through the tunnel. That handshake carries
+/// an Origin header. Localhost IPC still rejects Origin.
+pub async fn serve_remote_ws(stream: TcpStream, service: Arc<dyn RpcService>) {
+    serve_ws_socket(stream, service, true).await;
+}
+
+async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, allow_origin: bool) {
     // Native viewports dial this socket with a bare `connect_async` and send
     // no `Origin` header. A browser always attaches `Origin` to a WebSocket
     // handshake and cannot forge or suppress it from script, and WebSockets
@@ -174,11 +180,21 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
         }
         Ok(resp)
     };
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, reject_cross_origin).await {
-        Ok(ws) => ws,
-        Err(err) => {
-            tracing::warn!(error = %err, "rpc: websocket handshake failed");
-            return;
+    let ws = if allow_origin {
+        match tokio_tungstenite::accept_async(stream).await {
+            Ok(ws) => ws,
+            Err(err) => {
+                tracing::warn!(error = %err, "rpc: remote websocket handshake failed");
+                return;
+            }
+        }
+    } else {
+        match tokio_tungstenite::accept_hdr_async(stream, reject_cross_origin).await {
+            Ok(ws) => ws,
+            Err(err) => {
+                tracing::warn!(error = %err, "rpc: websocket handshake failed");
+                return;
+            }
         }
     };
     let (mut sink, mut ws_stream) = ws.split();

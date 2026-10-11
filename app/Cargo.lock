@@ -13559,6 +13559,7 @@ dependencies = [
  "zeron-doc",
  "zeron-harness",
  "zeron-mcp",
+ "zeron-phone",
  "zeron-preview",
  "zeron-proto",
  "zeron-rpc",
@@ -13646,6 +13647,17 @@ dependencies = [
 [[package]]
 name = "zeron-orb"
 version = "0.2.111"
+
+[[package]]
+name = "zeron-phone"
+version = "0.2.111"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+ "zeron-rpc",
+]
 
 [[package]]
 name = "zeron-preview"

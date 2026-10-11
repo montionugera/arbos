@@ -18,6 +18,9 @@ impl EngineRpc {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
+        if op == "projects" {
+            return Ok(json!({ "projects": crate::arbos_remote::phone_projects() }));
+        }
         let project = params
             .get("project")
             .and_then(Value::as_str)

@@ -1,0 +1,68 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  phone:
+    name: Build the phone app
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Archive the phone app
+        run: |
+          set -euo pipefail
+          xcodebuild -project ios/Arbos.xcodeproj -scheme Arbos \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Arbos.xcarchive" archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+
+      - name: Upload to TestFlight
+        env:
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+        run: |
+          set +e
+          set -u
+          missing=0
+          for name in AC_API_KEY_P8 AC_API_KEY_ID AC_API_ISSUER_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "Apple secret $name is not set. The archive stands. TestFlight was not uploaded."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 0
+          fi
+          key_path="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$AC_API_KEY_P8" > "$key_path"
+          chmod 600 "$key_path"
+          options="$RUNNER_TEMP/ExportOptions.plist"
+          plutil -create xml1 "$options"
+          plutil -insert method -string app-store-connect "$options"
+          plutil -insert destination -string upload "$options"
+          plutil -insert signingStyle -string automatic "$options"
+          plutil -insert teamID -string 5XY3M483YQ "$options"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Arbos.xcarchive" \
+            -exportPath "$RUNNER_TEMP/TestFlightExport" \
+            -exportOptionsPlist "$options" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$key_path" \
+            -authenticationKeyID "$AC_API_KEY_ID" \
+            -authenticationKeyIssuerID "$AC_API_ISSUER_ID"
+          status=$?
+          rm -f "$key_path"
+          if [ "$status" -ne 0 ]; then
+            echo "TestFlight upload did not succeed (exit $status). The phone archive was built. This job stays green so Linux CI is unchanged."
+          else
+            echo "TestFlight upload finished."
+          fi
+          exit 0

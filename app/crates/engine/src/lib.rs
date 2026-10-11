@@ -17,6 +17,7 @@ use zeron_sync::DocsStore;
 
 pub mod agent_accounts;
 pub mod arbos_layout;
+pub mod arbos_phone;
 pub mod arbos_remote;
 mod arbos_wakes;
 pub mod auth;
@@ -879,7 +880,10 @@ impl Engine {
             inner: runtime.core().rpc_service(),
             stop_tx,
         });
-        let server = serve_ipc(config.ipc_port, service).await?;
+        let server = serve_ipc(config.ipc_port, service.clone()).await?;
+        // The phone dials the remote port, which starts before this service
+        // exists. Attach it now so `/v1/rpc` can answer.
+        arbos_remote::attach_rpc(service);
         // Only a port this process actually serves goes to agents: the
         // injected MCP server must dial back into THIS engine.
         runtime.core().sessions.set_ipc_port(config.ipc_port);

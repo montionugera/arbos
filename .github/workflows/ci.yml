@@ -38,7 +38,9 @@ jobs:
           test -f fx/build.zig.zon
           test -f ios/README.md
           grep -q "phase 6" ios/README.md
-          test "$(find ios -type f | wc -l)" -eq 1
+          test -f ios/Arbos/ArbosApp.swift
+          test -f ios/Arbos/PhoneSession.swift
+          test -f ios/Arbos.xcodeproj/project.pbxproj
           test -s docs/design/arbos-rebuild-ideation.md
           grep -q "Arbos rebuild: fx + zeron, from scratch" docs/design/arbos-rebuild-ideation.md
           test -f docs/STATUS.md

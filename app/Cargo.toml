@@ -20,6 +20,7 @@ members = [
     "crates/syntax",
     "crates/markdown",
     "crates/mobile",
+    "crates/phone",
     "crates/client",
     "crates/mcp",
     "crates/text",
@@ -50,6 +51,7 @@ zeron-ui = { path = "crates/ui" }
 zeron-syntax = { path = "crates/syntax" }
 zeron-markdown = { path = "crates/markdown" }
 zeron-mobile = { path = "crates/mobile" }
+zeron-phone = { path = "crates/phone" }
 zeron-client = { path = "crates/client" }
 zeron-theme = { path = "crates/theme" }
 zeron-mcp = { path = "crates/mcp" }

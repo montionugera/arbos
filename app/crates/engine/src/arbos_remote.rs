@@ -8,7 +8,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::io::AsyncWriteExt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -177,6 +178,45 @@ pub fn remember_project(name: &str, path: &Path) {
         });
     }
     let _ = write_toml(&projects_path(), &file);
+}
+
+/// Projects the phone may list. A path that is not an Arbos project is skipped.
+/// The rows have no secrets.
+pub fn phone_projects() -> Vec<Value> {
+    let file = read_toml::<ProjectsFile>(&projects_path());
+    let mut rows = Vec::new();
+    for row in file.project {
+        let path = PathBuf::from(&row.path);
+        if !path.join(".arbos").join("project.toml").is_file() {
+            continue;
+        }
+        let name = arbos_layout::project_name(&path).unwrap_or(row.name);
+        rows.push(json!({
+            "name": name,
+            "path": row.path,
+            "home": arbos_layout::home_of(&path),
+            "mainChatId": arbos_layout::main_chat_id(&path),
+        }));
+    }
+    rows
+}
+
+fn rpc_slot() -> &'static Mutex<Option<Arc<dyn zeron_rpc::RpcService>>> {
+    static SLOT: Mutex<Option<Arc<dyn zeron_rpc::RpcService>>> = Mutex::new(None);
+    &SLOT
+}
+
+/// Hand the phone websocket the same service the desktop IPC uses.
+pub fn attach_rpc(service: Arc<dyn zeron_rpc::RpcService>) {
+    let mut slot = rpc_slot().lock().unwrap_or_else(|poison| poison.into_inner());
+    *slot = Some(service);
+}
+
+fn attached_rpc() -> Option<Arc<dyn zeron_rpc::RpcService>> {
+    rpc_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
 }
 
 pub fn find_project(name: &str) -> Result<PathBuf, String> {
@@ -755,9 +795,73 @@ async fn serve(state: RemoteState, port: u16) -> Result<(), String> {
         };
         let state = state.clone();
         tokio::spawn(async move {
+            if phone_rpc_upgrade(&stream).await {
+                if let Some(service) = attached_rpc() {
+                    zeron_rpc::serve_remote_ws(stream, service).await;
+                } else {
+                    let _ = write_unavailable(stream).await;
+                }
+                return;
+            }
             let _ = handle_connection(state, stream).await;
         });
     }
+}
+
+async fn phone_rpc_upgrade(stream: &tokio::net::TcpStream) -> bool {
+    let Some(headers) = peek_headers(stream).await else {
+        return false;
+    };
+    let mut lines = headers.lines();
+    let request = lines.next().unwrap_or("");
+    let path_ok = request.starts_with("GET /v1/rpc ")
+        || request.starts_with("GET /v1/rpc?")
+        || request == "GET /v1/rpc";
+    if !path_ok {
+        return false;
+    }
+    headers.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("upgrade:") && lower.contains("websocket")
+    })
+}
+
+async fn peek_headers(stream: &tokio::net::TcpStream) -> Option<String> {
+    let mut buf = [0u8; 8192];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let n = stream.peek(&mut buf).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        if let Some(end) = buf[..n]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+        {
+            return String::from_utf8(buf[..end + 4].to_vec()).ok();
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn write_unavailable(mut stream: tokio::net::TcpStream) -> Result<(), String> {
+    let body = br#"{"error":"the engine is not ready"}"#;
+    let head = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .await
+        .map_err(|err| err.to_string())?;
+    stream
+        .write_all(body)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 async fn handle_connection(

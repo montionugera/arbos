@@ -292,6 +292,23 @@ pub fn prepare_turn(project: &Path, chat_id: &str) -> Option<TurnPrep> {
     })
 }
 
+/// Chat id the phone follows for Main.
+///
+/// A claimed coordinator uses the chat id in `agents/main/agent.toml`.
+/// Before that claim, Main is `{project id}-main`.
+pub fn main_chat_id(project: &Path) -> String {
+    let path = root_of(project).join("agents").join("main").join("agent.toml");
+    let claimed = read_agent(&path)
+        .map(|agent| agent.chat_id)
+        .unwrap_or_default();
+    let claimed = claimed.trim();
+    if !claimed.is_empty() {
+        return claimed.to_owned();
+    }
+    let id = project_id(project).unwrap_or_default();
+    format!("{id}-main")
+}
+
 /// Stamp the coordinator agent with the chat created for Main.
 pub fn claim_main(project: &Path, chat_id: &str) -> Result<(), String> {
     let _guard = layout_lock();

@@ -696,7 +696,9 @@ async fn verify_staged_binary(binary: &Path, version: &str) -> anyhow::Result<()
     .context("staged binary version check timed out")?
     .with_context(|| format!("running {} --version", binary.display()))?;
     let reported = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let named = reported == format!("zeron {version}") || reported == format!("arbos {version}");
+    let named = reported == format!("zeron {version}")
+        || reported == format!("arbos {version}")
+        || reported == format!("Arbos {version}");
     anyhow::ensure!(
         output.status.success() && named,
         "staged binary reported {reported:?} (exit {}), expected \"zeron {version}\"",
