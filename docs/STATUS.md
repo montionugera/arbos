@@ -13,6 +13,7 @@ fx speaks engy. The built-in connection is `engy` (`https://api.engy.ai/v1`, Ope
 - CI on Linux checks the layout, licenses, and notices, and compiles `app` (`cargo build --locked -p zeron`) and `fx` (`zig build`).
 - fx now injects the engy connection, defaults the model to `glm-5.3`, reads `ENGY_API_KEY`, passes `reasoning_effort`, honors `ARBOS_FX_HOME`, and defaults permission to full access.
 - A live `fx acp` turn against engy answered `pong`. See `docs/qa/2026-10-11-fx-engy.md`.
+- Root CI on Linux runs fx's 2 ms startup budget and binary-size watch. The GitHub description is "Arbos is a coding-agent app being rebuilt on fx and zeron. The harness speaks engy.ai."
 
 ## Next
 
@@ -26,8 +27,6 @@ unread — no balance route on the public API
 
 - The product is not branded Arbos yet.
 - The product is not installable yet.
-- Root CI does not run fx's 2 ms startup budget or binary-size watch (those workflows live under `fx/.github` and will not run).
-- The GitHub repo description still describes the old product.
 
 ## Blocked
 

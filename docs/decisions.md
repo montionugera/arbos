@@ -4,3 +4,4 @@
 - 2026-10-11: This product key is vault item ENGY_2, because it is the key Jacob named.
 - 2026-10-11: Balance stays unread until a real route exists.
 - 2026-10-11: The fx binary is still named `fx` this increment so the upstream smoke test and subtree pull stay intact.
+- 2026-10-11: The GitHub description is "Arbos is a coding-agent app being rebuilt on fx and zeron. The harness speaks engy.ai." Root CI runs fx's 2 ms startup budget and the Linux binary-size watch at the upstream thresholds (2 ms raw mean, 52,429 byte warning).
