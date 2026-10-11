@@ -97,6 +97,16 @@ struct HarnessPrefsFile {
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
     enabled: Option<Vec<HarnessId>>,
+    /// When false, the picker lists fx only. Mock stays in this catalog and
+    /// the UI hides it unless `ZERON_HARNESS=mock`.
+    #[serde(rename = "show_all")]
+    show_all: bool,
+}
+
+/// fx is the harness this build shows. Mock stays listed so the hidden test
+/// slot still resolves. Every other harness needs `show_all`.
+fn harness_shown(id: HarnessId, show_all: bool) -> bool {
+    show_all || matches!(id, HarnessId::Fx | HarnessId::Mock)
 }
 
 /// Per-device automatic session title preferences.
@@ -519,6 +529,15 @@ impl HarnessRegistry {
             })
             .collect()
     }
+
+    /// `ListHarnesses` after the `show_all` filter.
+    pub fn listed_descriptors(&self) -> Vec<HarnessDescriptor> {
+        let show_all = self.prefs().show_all;
+        self.descriptors()
+            .into_iter()
+            .filter(|descriptor| harness_shown(descriptor.id, show_all))
+            .collect()
+    }
 }
 
 /// The production registry: MockHarness (hidden from production pickers) plus a lazy
@@ -573,6 +592,20 @@ pub fn default_registry() -> HarnessRegistry {
             },
         ],
     }));
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Fx,
+            name: "fx".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::StepBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: None,
+        },
+        Box::new(|| zeron_harness::AcpHarness::fx().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::fx()) as Arc<dyn Harness>)),
+    );
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::ClaudeCode,
@@ -698,46 +731,6 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
     );
-    // Native Pi RPC. Thinking levels are discovered per model.
-    registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Pi,
-            name: "Pi".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::StepBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
-        Box::new(|| zeron_harness::PiHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::PiHarness::new()) as Arc<dyn Harness>)),
-    );
-    // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
-    // desktop app speaks — `opencode serve` + the /global/event bus), same
-    // lazy pattern: the static descriptor mirrors OpencodeHarness exactly.
-    // Turn-boundary steering; the effort ladder rides model VARIANTS (the
-    // run sends the first advertised variant id for the picked level).
-    registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Opencode,
-            name: "OpenCode".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: vec![
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
-                ReasoningLevel::XHigh,
-                ReasoningLevel::Max,
-            ],
-            installed: true,
-            can_install: false,
-            enabled: None,
-        },
-        Box::new(|| zeron_harness::OpencodeHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
-    );
     // antigravity over acp (google's agy_acp_server), same lazy pattern: the
     // static descriptor mirrors AcpHarness::antigravity() exactly. No steering
     // extension (turn boundaries), and effort is baked into the model ids, so
@@ -830,14 +823,13 @@ mod tests {
             ids,
             vec![
                 HarnessId::Mock,
+                HarnessId::Fx,
                 HarnessId::ClaudeCode,
                 HarnessId::Codex,
                 HarnessId::Cursor,
                 HarnessId::Devin,
                 HarnessId::Grok,
                 HarnessId::Hermes,
-                HarnessId::Pi,
-                HarnessId::Opencode,
                 HarnessId::Antigravity
             ]
         );
@@ -877,30 +869,37 @@ mod tests {
         assert_eq!(hermes.display_name(), "Hermes");
         assert_eq!(hermes.steering_mode(), SteeringMode::TurnBoundary);
         assert!(hermes.reasoning_levels().is_empty());
-        let opencode = registry.resolve(HarnessId::Opencode).unwrap();
-        assert_eq!(opencode.id(), HarnessId::Opencode);
-        assert_eq!(opencode.display_name(), "OpenCode");
-        assert_eq!(opencode.steering_mode(), SteeringMode::StepBoundary);
-        assert_eq!(
-            opencode.reasoning_levels(),
-            &[
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
-                ReasoningLevel::XHigh,
-                ReasoningLevel::Max,
-            ]
-        );
+        let fx = registry.resolve(HarnessId::Fx).unwrap();
+        assert_eq!(fx.id(), HarnessId::Fx);
+        assert_eq!(fx.display_name(), "fx");
+        assert_eq!(fx.steering_mode(), SteeringMode::StepBoundary);
+        assert!(fx.reasoning_levels().is_empty());
         let antigravity = registry.resolve(HarnessId::Antigravity).unwrap();
         assert_eq!(antigravity.id(), HarnessId::Antigravity);
         assert_eq!(antigravity.display_name(), "Antigravity");
         assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
         assert!(antigravity.reasoning_levels().is_empty());
-        let pi = registry.resolve(HarnessId::Pi).unwrap();
-        assert_eq!(pi.id(), HarnessId::Pi);
-        assert_eq!(pi.display_name(), "Pi");
-        assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
-        assert!(pi.reasoning_levels().is_empty());
+    }
+
+    #[test]
+    fn show_all_defaults_off_and_lists_fx() {
+        let hidden: HarnessPrefsFile = serde_json::from_str("{}").unwrap();
+        assert!(!hidden.show_all);
+        let shown: HarnessPrefsFile = serde_json::from_str(r#"{"show_all":true}"#).unwrap();
+        assert!(shown.show_all);
+        assert!(harness_shown(HarnessId::Fx, false));
+        assert!(harness_shown(HarnessId::Mock, false));
+        assert!(!harness_shown(HarnessId::Grok, false));
+        assert!(!harness_shown(HarnessId::ClaudeCode, false));
+        assert!(!harness_shown(HarnessId::Devin, false));
+        assert!(harness_shown(HarnessId::Grok, true));
+        assert!(harness_shown(HarnessId::ClaudeCode, true));
+        let ids: Vec<HarnessId> = default_registry()
+            .listed_descriptors()
+            .iter()
+            .map(|descriptor| descriptor.id)
+            .collect();
+        assert_eq!(ids, vec![HarnessId::Mock, HarnessId::Fx]);
     }
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`

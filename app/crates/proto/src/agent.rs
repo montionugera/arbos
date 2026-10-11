@@ -23,6 +23,10 @@ pub enum HarnessId {
     /// google's antigravity agent over acp (`agy_acp_server`, installed from
     /// its pinned release archive).
     Antigravity,
+    /// fx over ACP (`fx acp`). The wire id stays `arbos-fx` so it does not
+    /// collide with a future short name.
+    #[serde(rename = "arbos-fx")]
+    Fx,
     /// Test harness; never shown in production pickers.
     Mock,
 }

@@ -8,3 +8,10 @@
 - 2026-10-11: A missing profile home does not fail `fx ask`. Full access stays the default when the client sets no mode. The one-time full-access warning and its acknowledgment save are skipped when no home is available.
 - 2026-10-11: The profile usage ledger uses the session home override, then `ARBOS_FX_HOME`, then `HOME`.
 - 2026-10-11: Root CI runs a filtered Zig check for engy defaults, `reasoning_effort`, home selection, and the ask tests. The full `zig build test` suite is not a required check. Six failures in that suite already fail on `0f998ae8`, before the engy commit.
+- 2026-10-11: The Rust package stays `zeron` and the binary stays `zeron`. Renaming either one touches the whole tree. The window title and the about string say Arbos.
+- 2026-10-11: The visible harness is fx (`fx acp`), wire id `arbos-fx`. Other ACP specs and the native Claude, Codex, and Cursor drivers stay compiled in. `harness-prefs.json` field `show_all` defaults to false and hides them from `ListHarnesses`. Mock stays in that list. The UI already hides Mock unless `ZERON_HARNESS=mock`.
+- 2026-10-11: The Pi and opencode driver modules are deleted. `HarnessId::Pi` and `HarnessId::Opencode` stay so old chat JSON still parses. They are not registered.
+- 2026-10-11: Hosted sync is not in this build. The process does not construct an edge client, does not read a WorkOS client id, and does not dial zeron.sh. The edge and sync source files stay on disk. There is no flag that turns the dial back on.
+- 2026-10-11: `ENGY_API_KEY` is an environment variable for this phase. The app copies it into the fx child environment. It is not written to disk, settings, logs, or the repo. Keychain storage is a later phase.
+- 2026-10-11: fx files for this process use `ARBOS_FX_HOME` when that variable is set. Otherwise they use `~/.local/share/arbos/fx`. That home is stable across a relaunch so `session/load` can find the session. Phase 2 moves homes under `.arbos/agents/<id>/fx/`.
+- 2026-10-11: The fx binary is the first `fx` on `PATH`. If PATH has none, the app uses `fx/zig-out/bin/fx` from this repo. `FX_EXECUTABLE` still overrides both.

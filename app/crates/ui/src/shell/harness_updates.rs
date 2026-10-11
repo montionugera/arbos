@@ -101,6 +101,7 @@ fn agent_name(harness: HarnessId) -> &'static str {
         HarnessId::Pi => "Pi",
         HarnessId::Opencode => "OpenCode",
         HarnessId::Antigravity => "Antigravity",
+        HarnessId::Fx => "fx",
         HarnessId::Mock => "Mock",
     }
 }
@@ -907,7 +908,11 @@ impl Shell {
                     && !matches!(&error, zeron_rpc::RpcError::Failed(message)
                         if method == methods::APPLY_HARNESS_UPDATE && message == "update cancelled")
                 {
-                    shell.show_notice(crate::toast::ToastKind::Error, format!("Agent update ({device}): {error}"), cx);
+                    shell.show_notice(
+                        crate::toast::ToastKind::Error,
+                        format!("Agent update ({device}): {error}"),
+                        cx,
+                    );
                 }
                 cx.notify();
             })

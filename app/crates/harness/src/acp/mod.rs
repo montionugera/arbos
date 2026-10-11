@@ -154,6 +154,103 @@ fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String 
     text.to_owned()
 }
 
+fn no_extra_paths() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Repo-relative fallback. The harness crate lives at `app/crates/harness`.
+fn monorepo_fx_binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fx/zig-out/bin/fx")
+}
+
+/// PATH wins. The monorepo build is used only when PATH has no `fx`.
+pub(crate) fn pick_fx_binary(
+    on_path: Option<PathBuf>,
+    monorepo: Option<PathBuf>,
+) -> Option<PathBuf> {
+    on_path.or(monorepo)
+}
+
+fn find_fx_binary() -> Option<PathBuf> {
+    let on_path = find_on_paths("fx", Vec::new());
+    let monorepo = {
+        let path = monorepo_fx_binary();
+        path.is_file().then_some(path)
+    };
+    pick_fx_binary(on_path, monorepo)
+}
+
+/// Child env for `fx acp`. The key is copied only when it is non-empty.
+/// This function does not write the key, the home, or a log line.
+pub(crate) fn fx_child_env(key: Option<&str>, home: &str) -> Vec<(&'static str, String)> {
+    let mut env = vec![("ARBOS_FX_HOME", home.to_owned())];
+    if let Some(key) = key.map(str::trim).filter(|key| !key.is_empty()) {
+        env.push(("ENGY_API_KEY", key.to_owned()));
+    }
+    env
+}
+
+fn fx_process_home() -> String {
+    if let Ok(home) = std::env::var("ARBOS_FX_HOME") {
+        let home = home.trim();
+        if !home.is_empty() {
+            return home.to_owned();
+        }
+    }
+    match crate::executable::home_dir() {
+        Some(home) => home
+            .join(".local")
+            .join("share")
+            .join("arbos")
+            .join("fx")
+            .display()
+            .to_string(),
+        None => ".local/share/arbos/fx".into(),
+    }
+}
+
+fn fx_static_models() -> Vec<Model> {
+    vec![Model {
+        id: "glm-5.3".into(),
+        label: "glm-5.3".into(),
+        description: Some("engy default".into()),
+        reasoning_levels: Vec::new(),
+        options: Vec::new(),
+    }]
+}
+
+fn fx_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Fx,
+        display_name: "fx",
+        executable: "fx",
+        env_override: "FX_EXECUTABLE",
+        args: &["acp"],
+        npm_package: None,
+        archive: None,
+        extra_paths: no_extra_paths,
+        cli_executable: "fx",
+        cli_extra_paths: no_extra_paths,
+        install_hint: "fx (searched PATH, then fx/zig-out/bin/fx in this repo; \
+             set FX_EXECUTABLE to override)",
+        models: fx_static_models,
+        // Mid-turn steers go out as session/prompt with `_meta.fx.steer`.
+        steering_mode: SteeringMode::StepBoundary,
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: false,
+    }
+}
+
 /// PATH + login-shell + extra dirs + node-version-manager scan for a binary.
 pub(crate) fn find_on_paths(exe: &str, extra: Vec<PathBuf>) -> Option<PathBuf> {
     crate::executable::find_on_paths(exe, extra)
@@ -1292,6 +1389,11 @@ impl AcpHarness {
             .with_model_discovery_timeout(ANTIGRAVITY_DISCOVERY_TIMEOUT)
     }
 
+    /// fx (`fx acp`). Files go under `ARBOS_FX_HOME`, not `~/.fx`.
+    pub fn fx() -> Self {
+        Self::with_spec(fx_spec())
+    }
+
     /// sign the agent out with acp `logout`, clearing the credentials its
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
@@ -1527,6 +1629,9 @@ impl AcpHarness {
     /// managed install of the spec's pinned npm package. `NotInstalled` only
     /// when neither the binary nor the machinery to install it (npm) exists.
     fn find_server(&self) -> Option<PathBuf> {
+        if self.spec.id == HarnessId::Fx {
+            return find_fx_binary();
+        }
         find_on_paths(self.spec.executable, (self.spec.extra_paths)()).or_else(|| {
             if self.spec.id == HarnessId::Antigravity {
                 ["agy_acp_server.par", "agy_acp_server.exe"]
@@ -1699,6 +1804,16 @@ impl AcpHarness {
         self.configure_adapter_environment(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
+        }
+        if self.spec.id == HarnessId::Fx {
+            let home = fx_process_home();
+            if let Err(error) = std::fs::create_dir_all(&home) {
+                tracing::warn!(%error, "fx home directory was not created");
+            }
+            let key = std::env::var("ENGY_API_KEY").ok();
+            for (name, value) in fx_child_env(key.as_deref(), &home) {
+                cmd.env(name, value);
+            }
         }
         if self.spec.id == HarnessId::Antigravity {
             cmd.env("GEMINI_HOME", antigravity_paths::home()?);
@@ -2194,6 +2309,9 @@ impl Harness for AcpHarness {
         if self.installed_archive_entry().is_some() {
             return true;
         }
+        if self.spec.id == HarnessId::Fx {
+            return find_fx_binary().is_some();
+        }
         if self.spec.id == HarnessId::Antigravity {
             self.find_server().is_some()
         } else {
@@ -2217,6 +2335,9 @@ impl Harness for AcpHarness {
             if let Some(path) = std::env::var_os(self.spec.env_override).filter(|p| !p.is_empty()) {
                 return Some(PathBuf::from(path));
             }
+        }
+        if self.spec.id == HarnessId::Fx {
+            return find_fx_binary();
         }
         find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)())
     }
@@ -2413,6 +2534,7 @@ impl Harness for AcpHarness {
             stall_hint: self.spec.stall_hint,
             effort_in_model_id: self.spec.effort_in_model_id,
             auth_method: self.spec.auth_method,
+            fx_steer: self.spec.id == HarnessId::Fx,
             sessions_root: self.sessions_root.clone(),
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
@@ -2460,6 +2582,8 @@ struct Session {
     stall_hint: &'static str,
     effort_in_model_id: bool,
     auth_method: Option<&'static str>,
+    /// Mid-turn steers use `session/prompt` with `_meta.fx.steer`.
+    fx_steer: bool,
     /// Sessions-root override for the subagent transcript tail (tests).
     sessions_root: Option<PathBuf>,
     prompt_transform: fn(Option<ReasoningLevel>, &str) -> String,
@@ -2510,17 +2634,32 @@ fn initialize_params(harness: HarnessId) -> Value {
         // separate subagentControl extension: Zeron has no matching UI yet.
         capabilities["_meta"] = json!({ "cognition.ai/subagentSupport": true });
     }
-    json!({
+    let mut params = json!({
         "protocolVersion": 1,
         "clientInfo": {
             "name": "zeron",
-            "title": "Zeron",
+            "title": "Arbos",
             "version": env!("CARGO_PKG_VERSION"),
         },
         // Declined: agents fall back to their own fs/terminal access, which
         // is what zeron wants — the working tree is the source of truth for
         // the diff pane, and commands belong to the agent's own sandbox.
         "clientCapabilities": capabilities,
+    });
+    // fx reads this from initialize, not from session/new. `true` is the
+    // terminal UI. The app wants the ACP stream only.
+    if harness == HarnessId::Fx {
+        params["_meta"] = json!({ "fx": { "terminal": false } });
+    }
+    params
+}
+
+/// `session/set_mode` after a fresh `session/new`. fx does not read a mode
+/// field on `session/new`.
+pub(crate) fn fx_full_access_params(session_id: &str) -> Value {
+    json!({
+        "sessionId": session_id,
+        "modeId": "full-access",
     })
 }
 
@@ -3524,6 +3663,40 @@ fn steering_call_future(
     prompt_like_request(client.clone(), "_session/steering", params)
 }
 
+/// Mid-turn steer for fx. An idle steer stays an ordinary `session/prompt`.
+pub(crate) fn fx_steer_params(session_id: &str, text: &str) -> Value {
+    json!({
+        "sessionId": session_id,
+        "prompt": [{ "type": "text", "text": text }],
+        "_meta": { "fx": { "steer": true } },
+    })
+}
+
+fn fx_steer_call_future(
+    client: &RpcClient,
+    session_id: &str,
+    text: &str,
+) -> BoxFuture<'static, Result<Value, HarnessError>> {
+    prompt_like_request(
+        client.clone(),
+        "session/prompt",
+        fx_steer_params(session_id, text),
+    )
+}
+
+fn mid_turn_steer_future(
+    fx_steer: bool,
+    client: &RpcClient,
+    session_id: &str,
+    text: &str,
+) -> BoxFuture<'static, Result<Value, HarnessError>> {
+    if fx_steer {
+        fx_steer_call_future(client, session_id, text)
+    } else {
+        steering_call_future(client, session_id, text)
+    }
+}
+
 /// The per-run event loop: one task multiplexing agent messages, the pending
 /// turn, the steering mailbox, the interrupt token, and consumer liveness.
 /// Select `request`'s model, effort and model options on the session —
@@ -3713,6 +3886,7 @@ async fn run_session(session: Session) {
         stall_hint,
         effort_in_model_id,
         auth_method,
+        fx_steer,
         sessions_root,
         prompt_transform,
         effort_values,
@@ -3749,6 +3923,7 @@ async fn run_session(session: Session) {
             "cwd": request.cwd,
             "mcpServers": acp_mcp_servers(request.mcp.as_ref()),
         });
+        let mut fresh_session = request.resume.is_none();
         let (session_id, session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
@@ -3766,6 +3941,7 @@ async fn run_session(session: Session) {
                     let _ = send(&event_tx, AgentEvent::Error {
                         message: format!("{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"),
                     }).await;
+                    fresh_session = true;
                     let new = new_session(
                         &client,
                         &mut incoming,
@@ -3821,6 +3997,15 @@ async fn run_session(session: Session) {
             devin_selection.clone(),
         )
         .await?;
+        if harness == HarnessId::Fx && fresh_session {
+            request_draining(
+                &client,
+                &mut incoming,
+                "session/set_mode",
+                fx_full_access_params(&session_id),
+            )
+            .await?;
+        }
         Ok::<(String, bool, Vec<SlashCommand>, Value), HarnessError>((
             session_id,
             steer_ext,
@@ -4600,7 +4785,7 @@ async fn run_session(session: Session) {
                 }
                 while let Some(next_text) = steer_backlog.pop_front() {
                     if turn.is_some() && !interrupted {
-                        let fut = steering_call_future(&client, &session_id, &next_text);
+                        let fut = mid_turn_steer_future(fx_steer, &client, &session_id, &next_text);
                         steering_call = Some((next_text, fut));
                         break;
                     }
@@ -4852,15 +5037,14 @@ async fn run_session(session: Session) {
                         text,
                         current_prompt_id.clone(),
                     ));
-                    } else if steer_ext {
-                        // Mid-turn injection via the `_session/steering`
-                        // extension: start the call, resolved by its own
-                        // select branch. One call in flight at a time;
-                        // followers wait in the backlog.
+                    } else if fx_steer || steer_ext {
+                        // fx: `session/prompt` with `_meta.fx.steer`.
+                        // Others: the `_session/steering` extension.
+                        // One call in flight at a time; followers wait.
                         if steering_call.is_some() {
                             steer_backlog.push_back(text);
                         } else {
-                            let fut = steering_call_future(&client, &session_id, &text);
+                            let fut = mid_turn_steer_future(fx_steer, &client, &session_id, &text);
                             steering_call = Some((text, fut));
                         }
                     } else {
@@ -5598,6 +5782,65 @@ mod tests {
                 "the pinned digest needs no registry archive"
             );
         }
+    }
+
+    #[test]
+    fn fx_spec_uses_acp_and_turns_the_terminal_off() {
+        let harness = AcpHarness::fx();
+        assert_eq!(harness.id(), HarnessId::Fx);
+        assert_eq!(harness.spec.executable, "fx");
+        assert_eq!(harness.spec.args, &["acp"]);
+        assert_eq!(harness.steering_mode(), SteeringMode::StepBoundary);
+        let params = initialize_params(HarnessId::Fx);
+        assert_eq!(params["_meta"]["fx"]["terminal"], false);
+        assert_eq!(params["clientInfo"]["title"], "Arbos");
+        assert_eq!(serde_json::to_value(HarnessId::Fx).unwrap(), "arbos-fx");
+    }
+
+    #[test]
+    fn fx_full_access_mode_names_the_session() {
+        let params = fx_full_access_params("sess-1");
+        assert_eq!(params["sessionId"], "sess-1");
+        assert_eq!(params["modeId"], "full-access");
+    }
+
+    #[test]
+    fn fx_steer_sets_the_meta_flag() {
+        let params = fx_steer_params("sess-1", "hold on");
+        assert_eq!(params["sessionId"], "sess-1");
+        assert_eq!(params["prompt"][0]["text"], "hold on");
+        assert_eq!(params["_meta"]["fx"]["steer"], true);
+    }
+
+    #[test]
+    fn fx_child_env_passes_a_fake_key_and_does_not_write_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("fx-home");
+        let home_text = home.display().to_string();
+        let env = fx_child_env(Some("test-key-not-real"), &home_text);
+        assert!(
+            env.iter()
+                .any(|(name, value)| { *name == "ARBOS_FX_HOME" && value == &home_text })
+        );
+        assert!(
+            env.iter()
+                .any(|(name, value)| { *name == "ENGY_API_KEY" && value == "test-key-not-real" })
+        );
+        assert!(!home.exists());
+        let without_key = fx_child_env(Some("  "), &home_text);
+        assert!(without_key.iter().all(|(name, _)| *name != "ENGY_API_KEY"));
+    }
+
+    #[test]
+    fn pick_fx_binary_prefers_path_over_the_monorepo() {
+        let on_path = PathBuf::from("/usr/bin/fx");
+        let monorepo = PathBuf::from("/repo/fx/zig-out/bin/fx");
+        assert_eq!(
+            pick_fx_binary(Some(on_path.clone()), Some(monorepo.clone())),
+            Some(on_path)
+        );
+        assert_eq!(pick_fx_binary(None, Some(monorepo.clone())), Some(monorepo));
+        assert_eq!(pick_fx_binary(None, None), None);
     }
 
     #[test]

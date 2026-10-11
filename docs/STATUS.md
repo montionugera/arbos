@@ -2,7 +2,7 @@
 
 ## Now
 
-fx speaks engy. The built-in connection is `engy` (`https://api.engy.ai/v1`, OpenAI chat completions). The default model is `glm-5.3`. The key comes from `ENGY_API_KEY`. `main` holds `app/` (zeron), `fx/` (fx), `ios/` (a README; the iPhone app arrives in phase 6), and these docs.
+The app in `app/` talks to fx. One visible harness runs `fx acp`. The window title and the about string say Arbos. The package and the binary are still named `zeron`. fx speaks engy (`https://api.engy.ai/v1`, model `glm-5.3`). The key is the `ENGY_API_KEY` environment variable. `main` holds `app/` (zeron), `fx/` (fx), `ios/` (a README; the iPhone app arrives in phase 6), and these docs.
 
 ## Done today
 
@@ -18,10 +18,11 @@ fx speaks engy. The built-in connection is `engy` (`https://api.engy.ai/v1`, Ope
 - Profile usage follows the session home, then `ARBOS_FX_HOME`, then `HOME`. A run with `ARBOS_FX_HOME` set does not append to the real `~/.fx/usage.jsonl`.
 - Root CI runs the filtered Zig behavior check for engy defaults, the effort field, home selection, and the ask tests. The independent check is `docs/qa/2026-10-11-fx-engy-check.md`.
 - A live `fx acp` turn with reasoning effort `low` answered `pong`. The gateway trace recorded `effort=low` and `reasoning=selected`. The real `~/.fx/usage.jsonl` did not change.
+- The app spawns `fx acp`, sets full-access on a fresh session, passes `ENGY_API_KEY` and `ARBOS_FX_HOME`, and sends a mid-turn steer as `session/prompt` with `_meta.fx.steer`. Hosted sync is not in this build. See `docs/qa/2026-10-11-app-fx.md`.
 
 ## Next
 
-The zeron `AcpAgentSpec` that spawns this fx.
+Phase 2: the projects rail, the `.arbos/` layout, the Main tab, and Context.
 
 ## Balance
 
@@ -29,8 +30,9 @@ unread — no balance route on the public API
 
 ## Known gaps
 
-- The product is not branded Arbos yet.
+- The window title and the about string say Arbos. The Rust package and the binary are still `zeron`.
 - The product is not installable yet.
+- Some Pi and opencode live tests and examples still name the deleted drivers. `cargo build --locked -p zeron` does not compile those files. Root CI does not run them.
 - These `zig build test` failures also fail on `0f998ae8`, the fx tree before the engy commit. That commit does not change their files. They are left unfixed so the required CI check can stay green:
   - `git worktree reports dirty for obvious metadata and tracked-file changes` (expected `.dirty`, found `.unknown`)
   - `McpRuntime cancels blocked stdio discovery without exposing partial state`

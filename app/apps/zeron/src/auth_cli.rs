@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! `zeron login` / `zeron logout` / `zeron status` — the standalone auth surface.
 //!
 //! Sign-in used to live only inside `zeron headless`, coupling authentication to

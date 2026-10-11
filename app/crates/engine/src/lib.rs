@@ -627,22 +627,16 @@ impl Engine {
     /// modes. A clean WorkOS boot deliberately avoids probing Edge: signed-out
     /// installations must be able to start locally without network access.
     pub async fn build_auth(config: &EngineConfig) -> Auth {
-        let mut auth_config = AuthConfig::new(config.edge_url.clone(), config.data_dir.clone());
-        auth_config.workos_client_id = config.workos_client_id.clone();
-        if let Ok(base) = std::env::var("ZERON_WORKOS_API_BASE")
-            && !base.trim().is_empty()
-        {
-            auth_config.workos_api_base = base;
-        }
+        // Hosted sync is compiled out. The client id, edge URL, and dev
+        // bearer are ignored so this process cannot dial WorkOS or zeron.sh.
+        let mut auth_config = AuthConfig::new(String::new(), config.data_dir.clone());
+        auth_config.workos_client_id = None;
         auth_config.callback_port = Some(
             std::env::var("ZERON_CALLBACK_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(27641),
         );
-        if let Some(token) = &config.edge_token {
-            auth_config.dev_user_id = token.clone();
-        }
         Auth::new(auth_config)
     }
 
@@ -748,43 +742,11 @@ impl Engine {
         profile: EngineProfile,
         lock: Option<InstanceLock>,
     ) -> anyhow::Result<EngineRuntime> {
-        let edge_enabled = match profile.scope() {
-            WorkspaceScope::Local => false,
-            WorkspaceScope::Synced => {
-                // Validate the persisted session in the BACKGROUND: the probe
-                // still transitions auth to SignedOut on definitive revocation
-                // (and warms the single-flight refresh every first dial waits
-                // on), but assembly — and the viewport blocked on it — no
-                // longer stalls on a WorkOS round trip that can take seconds
-                // on a bad link. Everything shown at boot is local anyway.
-                let auth_probe = auth.clone();
-                tokio::spawn(async move {
-                    let _ = auth_probe.access_token().await;
-                });
-                true
-            }
-            // Dev Auth always exposes `dev_user_id` as its synthetic access
-            // token, including when WorkOS was merely disabled with
-            // ZERON_WORKOS_CLIENT_ID="". Only an explicitly configured,
-            // non-empty bearer opts this runtime into Edge rooms and relays.
-            WorkspaceScope::Development => config
-                .edge_token
-                .as_deref()
-                .is_some_and(|token| !token.trim().is_empty()),
-        };
-        if edge_enabled {
-            // OS network-path events (macOS NWPathMonitor): the instant the
-            // path returns every parked reconnect backoff redials, and while
-            // the OS says there is no path the dial loops park instead of
-            // burning attempts. No-op on platforms without a monitor.
-            zeron_sync::net_path::spawn_path_monitor();
-        }
-        let device_id = load_or_create_device_id(profile.device_root())?;
-        let edge = edge_enabled.then(|| {
-            EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)
-        });
+        // Hosted sync is not constructed. Local Loro docs stay. No flag
+        // turns Edge rooms, the WorkOS probe, or the path monitor back on.
+        let _device_id = load_or_create_device_id(profile.device_root())?;
+        let edge: Option<EdgeConfig> = None;
 
-        let preview_org = profile.org_id().to_string();
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
@@ -812,11 +774,7 @@ impl Engine {
                 .filter_map(|chat| chat.cwd.map(std::path::PathBuf::from))
                 .collect()
         });
-        let preview_signaling = edge_enabled.then(|| zeron_preview::signaling::Config {
-            edge_url: config.edge_url.clone(),
-            org_id: preview_org,
-            tokens: Arc::new(auth.clone()),
-        });
+        let preview_signaling: Option<zeron_preview::signaling::Config> = None;
         core.previews.start(projects, preview_signaling).await;
         // Release checker: polls {edge}/releases hourly (wall clock); headless
         // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated
@@ -829,7 +787,7 @@ impl Engine {
             let terminals = core.terminals.clone();
             Arc::new(move || !sessions.any_active() && !terminals.any_open())
         };
-        let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+        let updater = zeron_update::Updater::spawn(String::new(), Some(quiescent));
         if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
             let updater_for_tokens = updater.clone();
             let wake = tokio::spawn(async move {

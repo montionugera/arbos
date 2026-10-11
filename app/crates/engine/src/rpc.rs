@@ -1382,7 +1382,7 @@ where
     install()
         .await
         .map_err(|error| RpcError::Failed(error.to_string()))?;
-    Ok(registry.descriptors())
+    Ok(registry.listed_descriptors())
 }
 
 fn forward_deadline(method: &str) -> std::time::Duration {
@@ -1823,7 +1823,7 @@ impl RpcService for EngineRpc {
         match method {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
-            methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
+            methods::LIST_HARNESSES => RpcReply::value(&self.registry.listed_descriptors()),
             methods::INSTALL_HARNESS => {
                 let p: ListModelsParams = parse_params(params)?;
                 let installing = self.registry.installs.begin(p.harness)?;
@@ -1854,7 +1854,7 @@ impl RpcService for EngineRpc {
                 }
                 // Fresh catalog in the reply: the page repaints from it in one
                 // round trip, and a refused/raced toggle self-corrects.
-                RpcReply::value(&self.registry.descriptors())
+                RpcReply::value(&self.registry.listed_descriptors())
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;

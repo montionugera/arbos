@@ -174,7 +174,7 @@ impl AuthConfig {
             edge_url: edge_url.into(),
             data_dir: data_dir.into(),
             workos_client_id: None,
-            workos_api_base: "https://api.workos.com".into(),
+            workos_api_base: String::new(),
             dev_user_id: "dev-user".into(),
             callback_port: None,
         }

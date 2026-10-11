@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "zeron",
     version,
-    about = "Multi-device controller for coding agents"
+    about = "Arbos is a coding-agent app. The harness speaks engy."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -77,34 +77,14 @@ enum DaemonCommand {
     Status,
 }
 
-/// Production edge (Cloudflare Worker + Durable Objects on the zeron.sh zone).
-/// `ZERON_EDGE_URL` overrides (local dev / self-hosting).
-const DEFAULT_EDGE_URL: &str = "https://edge.zeron.sh";
-
-/// Production WorkOS AuthKit client id — public knowledge (it appears in every
-/// authorize URL), so baking it in is safe. Overridden by `ZERON_WORKOS_CLIENT_ID`;
-/// set it to the empty string — or set a dev bearer via `ZERON_EDGE_TOKEN` — to
-/// force dev-mode auth instead.
-const DEFAULT_WORKOS_CLIENT_ID: &str = "client_01KWD0EAKZKD50YCQJNYSRE4BY";
-
+/// Hosted sync is not in this build. The edge URL stays empty so nothing
+/// dials zeron.sh. There is no env flag that turns it back on.
 fn edge_url_from_env() -> String {
-    std::env::var("ZERON_EDGE_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_EDGE_URL.into())
+    String::new()
 }
 
-/// WorkOS client id resolution: explicit env wins (empty string = dev mode);
-/// otherwise a `ZERON_EDGE_TOKEN` dev bearer keeps dev mode (smoke tests,
-/// local wrangler); otherwise the baked production client id makes optional
-/// sync available while a bare start remains local-only.
-fn workos_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
-    match std::env::var("ZERON_WORKOS_CLIENT_ID") {
-        Ok(v) if v.trim().is_empty() => None,
-        Ok(v) => Some(v),
-        Err(_) if edge_token.is_some() => None,
-        Err(_) => Some(DEFAULT_WORKOS_CLIENT_ID.into()),
-    }
+fn workos_client_id_from_env(_edge_token: &Option<String>) -> Option<String> {
+    None
 }
 
 /// mimalloc, macOS only: libmalloc never returns the streaming churn's
@@ -239,21 +219,17 @@ fn main() -> anyhow::Result<()> {
                 engine.run().await
             })
         }
-        Some(Command::Login) => {
-            let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(auth_cli::login(engine_config_from_env()))
-        }
-        Some(Command::Logout) => {
-            let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(auth_cli::logout(engine_config_from_env()))
+        Some(Command::Login | Command::Logout) => {
+            println!("Arbos does not use hosted sign-in in this build.");
+            Ok(())
         }
         Some(Command::Status) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(auth_cli::status(engine_config_from_env()))
         }
         Some(Command::Sync) => {
-            let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(sync_cli(engine_config_from_env().ipc_port))
+            println!("Arbos does not use hosted sync in this build.");
+            Ok(())
         }
         Some(Command::Mcp) => {
             let runtime = tokio::runtime::Runtime::new()?;
@@ -290,7 +266,7 @@ fn main() -> anyhow::Result<()> {
                 workos_client_id: workos_client_id_from_env(&edge_token),
                 edge_token,
                 org_id: std::env::var("ZERON_ORG_ID").ok(),
-                default_harness: zeron_ui::HarnessId::ClaudeCode,
+                default_harness: harness_from_env(),
                 initial_url: cli.open_url,
             });
             Ok(())
@@ -347,8 +323,8 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
     }
 }
 
-/// `ZERON_HARNESS` (kebab-case id) picks the default harness for chats without a
-/// config row — `mock` powers the e2e smoke; default `claude-code`.
+/// `ZERON_HARNESS` picks the default harness for chats without a config row.
+/// `mock` powers the e2e smoke. The default is fx.
 fn harness_from_env() -> zeron_engine::HarnessId {
     match std::env::var("ZERON_HARNESS").as_deref().map(str::trim) {
         Ok("mock") => zeron_engine::HarnessId::Mock,
@@ -358,14 +334,18 @@ fn harness_from_env() -> zeron_engine::HarnessId {
         Ok("grok") => zeron_engine::HarnessId::Grok,
         Ok("hermes") => zeron_engine::HarnessId::Hermes,
         Ok("pi") => zeron_engine::HarnessId::Pi,
+        Ok("opencode") => zeron_engine::HarnessId::Opencode,
         Ok("antigravity") => zeron_engine::HarnessId::Antigravity,
-        _ => zeron_engine::HarnessId::ClaudeCode,
+        Ok("claude-code") => zeron_engine::HarnessId::ClaudeCode,
+        Ok("fx") | Ok("arbos-fx") => zeron_engine::HarnessId::Fx,
+        _ => zeron_engine::HarnessId::Fx,
     }
 }
 
 /// `zeron sync`: dial the running engine's IPC and print per-room sync state.
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.
+#[allow(dead_code)]
 async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
     let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
         .await
