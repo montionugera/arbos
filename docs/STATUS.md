@@ -21,7 +21,7 @@ The app in `app/` talks to fx and opens a folder as a project. Main can spawn lo
 - The app spawns `fx acp`, sets full-access on a fresh session, passes `ENGY_API_KEY` and `ARBOS_FX_HOME`, and sends a mid-turn steer as `session/prompt` with `_meta.fx.steer`. Hosted sync is not in this build. See `docs/qa/2026-10-11-app-fx.md`.
 - The left rail is projects. A folder gets `<folder>/.arbos/` with `project.toml`, `context/`, and a git repo that is committed after a turn. Each project has a Main tab, extra chats, and a Context tab. The checklist under Main is `context/status.md`. See `docs/qa/2026-10-11-projects.md`.
 - Main can spawn local workers through an MCP server named `arbos`. Each worker is its own `fx acp` process, its own tab, and its own `agents/<id>/fx` home. A finished worker wakes Main as a Worked line. Main's transcript is the folded project style. Other chats stay classic. See `docs/qa/2026-10-11-delegation.md`.
-- A timer, a pull request, a branch's CI, and Slack are subscription files. A firing prompts Main with no typed message. The live proof was a one-minute timer, plus scratch pull request 820 on `cursor/phase4-red-ci-22f6`. The morning file is 08:00 and did not fire. Settings → Keys saved an OpenRouter connection. The key file is mode 600 and is outside the project. See `docs/qa/2026-10-11-wakes.md`.
+- A timer, a pull request, a branch's CI, and Slack are subscription files. A firing prompts Main with no typed message. The live proof was a one-minute timer, plus scratch pull request 820 on `cursor/phase4-red-ci-22f6`. The morning file is 08:00 and did not fire. Settings → Keys saved an OpenRouter connection. The key file is mode 600 and is outside the project. A rejected tool call no longer fails the next prompt, and a later successful turn clears an error card that shared a line with earlier text. See `docs/qa/2026-10-11-wakes.md`.
 
 ## Next
 
@@ -44,7 +44,6 @@ unread — no balance route on the public API
   - `McpRuntime continues discovery after one server times out` (expected a startup timeout, found an early exit)
   - `skill refresh publishes one generation and coalesces one latest request` (expected `.adopted`, found `.unchanged`; this one also passes on some runs)
 - A `slack` subscription does not wake until `~/.fx/slack/installation.json` exists. This fx build has no Slack message stream, so an installed workspace still does not produce a wake. The public install config did not ask for a Vercel login.
-- The first model turn after the CI wake showed `session/prompt: InvalidToolArguments (code -32603)`. The Worked line was already on screen. Later timer turns replied `awake`.
 
 ## Blocked
 

@@ -671,12 +671,15 @@ impl SessionDoc {
         Ok(false)
     }
 
-    /// Drop earlier entries that are only an error banner. A later turn that
-    /// produced a real reply replaces that banner. `keep_entry_id` is the
-    /// turn that just finished, and it stays even when it also carries an error.
+    /// Remove earlier error banners. A later turn that produced a real reply
+    /// replaces them. An entry that is only an error is dropped. An entry that
+    /// also has text keeps that text and loses the error part. `keep_entry_id`
+    /// is the turn that just finished, and it stays even when it also carries
+    /// an error.
     pub fn clear_error_banners(&self, keep_entry_id: &str) -> Result<bool, DocError> {
         let messages = self.doc.get_list("messages");
-        let mut drop_at = Vec::new();
+        let mut drop_entries = Vec::new();
+        let mut changed = false;
         for index in 0..messages.len() {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
                 messages.get(index)
@@ -698,31 +701,41 @@ impl SessionDoc {
             if parts.len() == 0 {
                 continue;
             }
+            let mut error_at = Vec::new();
             let mut only_errors = true;
             for part_index in 0..parts.len() {
                 let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
                     parts.get(part_index)
                 else {
                     only_errors = false;
-                    break;
+                    continue;
                 };
                 let is_error = matches!(
                     part.get("kind"),
                     Some(loro::ValueOrContainer::Value(LoroValue::String(kind))) if kind.as_str() == "error"
                 );
-                if !is_error {
+                if is_error {
+                    error_at.push(part_index);
+                } else {
                     only_errors = false;
-                    break;
                 }
             }
-            if only_errors {
-                drop_at.push(index);
+            if error_at.is_empty() {
+                continue;
             }
+            if only_errors {
+                drop_entries.push(index);
+                continue;
+            }
+            for part_index in error_at.into_iter().rev() {
+                parts.delete(part_index, 1)?;
+            }
+            changed = true;
         }
-        if drop_at.is_empty() {
+        if drop_entries.is_empty() && !changed {
             return Ok(false);
         }
-        for index in drop_at.into_iter().rev() {
+        for index in drop_entries.into_iter().rev() {
             messages.delete(index, 1)?;
         }
         self.doc.commit();
@@ -2216,6 +2229,70 @@ mod tests {
         });
         let entry = entry_from_json(v).expect("strict");
         assert_eq!(entry.id, "m1");
+    }
+
+    #[test]
+    fn later_turn_clears_an_error_banner_on_a_text_entry() {
+        let doc = SessionDoc::init("banners").unwrap();
+        doc.push_message(&SessionMessageEntry {
+            id: "turn-1".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "t".into(),
+                text: "I'll check.".into(),
+            }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        assert!(doc
+            .append_error_part(
+                "turn-1",
+                "e",
+                "harness protocol error: session/prompt: InvalidToolArguments (code -32603)",
+            )
+            .unwrap());
+        doc.push_message(&SessionMessageEntry {
+            id: "banner-only".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Error {
+                id: "only".into(),
+                message: "old banner".into(),
+            }],
+            created_at: 2,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        doc.push_message(&SessionMessageEntry {
+            id: "turn-2".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "a".into(),
+                text: "awake".into(),
+            }],
+            created_at: 3,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        assert!(doc.clear_error_banners("turn-2").unwrap());
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, "turn-1");
+        assert!(matches!(
+            &entries[0].parts[..],
+            [MessagePart::Text { text, .. }] if text == "I'll check."
+        ));
+        assert_eq!(entries[1].id, "turn-2");
+        assert!(doc.clear_error_banners("turn-2").unwrap() == false);
     }
 }
 

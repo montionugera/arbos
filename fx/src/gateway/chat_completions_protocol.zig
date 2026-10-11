@@ -305,9 +305,14 @@ fn validate_history(alloc: Allocator, messages: []const types.ChatMessage) Error
             if (call.provenance != .fx_local or call.provider_result != null) return error.UnsupportedToolProvenance;
             if (call.id.len == 0 or call.final_identity != .valid) return error.InvalidToolCallId;
             try validate_name(call.name);
-            if (call.argument_integrity != .valid) return error.InvalidToolArguments;
             if (call.arguments_json.len > max_history_arguments_bytes) return error.ArgumentsTooLarge;
-            try validate_arguments(alloc, call.arguments_json);
+            // A rejected call keeps its integrity flag and is replayed as "{}".
+            // The flag must not fail the next request. Raw arguments that are
+            // still not an object still fail.
+            try check_json_depth(call.arguments_json);
+            if (try types.ToolArgumentIntegrity.classifyFunctionInput(alloc, call.arguments_json) != .valid) {
+                return error.InvalidToolArguments;
+            }
             const entry = try pending.getOrPut(alloc, call.id);
             if (entry.found_existing) return error.InvalidToolHistory;
             entry.value_ptr.* = call.name;
@@ -2107,6 +2112,38 @@ test "chat completions rejects unmatched native malformed and duplicate history 
     messages[0].tool_calls = &.{call};
     messages[0].provider_replay = .{ .source = .{ .provider = .gateway, .model = "old" }, .parts_json = "[]" };
     try std.testing.expectError(error.UnsupportedReplay, build_request(alloc, request, .{}));
+}
+
+test "chat completions accepts a rejected call replayed as an empty object" {
+    const alloc = std.testing.allocator;
+    var request = test_request();
+    const repaired: types.ToolCall = .{
+        .id = "call-1",
+        .name = "read_file",
+        .arguments_json = "{}",
+        .argument_integrity = .malformed_json,
+    };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .assistant, .content = "I'll inspect it.", .tool_calls = &.{repaired} },
+        .{ .role = .tool, .tool_call_id = repaired.id, .tool_name = "read_file", .content = "invalid arguments" },
+    };
+    request.messages = &messages;
+    const body = try build_request(alloc, request, .{});
+    defer alloc.free(body);
+    try std.testing.expect(std.mem.find(u8, body, "\"arguments\":\"{}\"") != null);
+
+    const raw: types.ToolCall = .{
+        .id = "call-1",
+        .name = "read_file",
+        .arguments_json = "{",
+        .argument_integrity = .malformed_json,
+    };
+    const broken = [_]types.ChatMessage{
+        .{ .role = .assistant, .tool_calls = &.{raw} },
+        .{ .role = .tool, .tool_call_id = raw.id, .content = "invalid arguments" },
+    };
+    request.messages = &broken;
+    try std.testing.expectError(error.InvalidToolArguments, build_request(alloc, request, .{}));
 }
 
 test "chat completions accepts matching empty terminal usage choices" {
