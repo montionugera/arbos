@@ -14,6 +14,7 @@ use crate::state::AppState;
 use crate::theme::Theme;
 
 const PROVIDERS: &[(&str, &str, &str)] = &[
+    ("engy", "engy", "https://api.engy.ai/v1"),
     ("ai-gateway", "AI Gateway", "https://ai-gateway.vercel.sh/v1"),
     ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1"),
     ("ollama", "Ollama", "http://127.0.0.1:11434/v1"),

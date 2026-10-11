@@ -163,7 +163,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.2.111;
-				PRODUCT_BUNDLE_IDENTIFIER = life.arbos.phone;
+				PRODUCT_BUNDLE_IDENTIFIER = com.unarbos.arbos.ios;
 				PRODUCT_NAME = Arbos;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -187,7 +187,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.2.111;
-				PRODUCT_BUNDLE_IDENTIFIER = life.arbos.phone;
+				PRODUCT_BUNDLE_IDENTIFIER = com.unarbos.arbos.ios;
 				PRODUCT_NAME = Arbos;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;

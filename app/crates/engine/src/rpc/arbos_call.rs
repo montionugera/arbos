@@ -279,6 +279,14 @@ struct ByokSpec {
 
 fn byok_spec(provider: &str) -> Option<ByokSpec> {
     Some(match provider {
+        "engy" => ByokSpec {
+            id: "engy",
+            secret_name: "engy",
+            env_name: "ENGY_API_KEY",
+            base_url: "https://api.engy.ai/v1",
+            needs_key: true,
+            builtin: Some("engy"),
+        },
         "ai-gateway" => ByokSpec {
             id: "ai-gateway",
             secret_name: "ai-gateway",

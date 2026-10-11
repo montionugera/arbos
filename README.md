@@ -18,9 +18,11 @@ If `~/.local/bin` is not on your `PATH`, add it, then open a new terminal. The a
 
 ## Paste an engy key
 
-Set `ENGY_API_KEY` in the environment, then start `arbos`. The app stores the key and does not write it into the project. On Linux the file is `~/.local/share/arbos/secrets/engy`, mode 600. On macOS the key goes to the login keychain under the service `arbos`.
+Open Arbos. Open **Settings**, then **Keys**. The first row is **engy**. Paste the key into the Key field and click **Save**.
 
-Settings → Keys can save a key for AI Gateway, OpenRouter, Ollama, Codex, or Grok. That page has no engy row. The engy key is `ENGY_API_KEY`.
+The app stores the key outside the project. On Linux the file is `~/.local/share/arbos/secrets/engy`, mode 600. On macOS the key goes to the login keychain under the service `arbos`. The app passes that value to fx as `ENGY_API_KEY`.
+
+You can also export `ENGY_API_KEY` before you start `arbos`. The Settings page is the way to paste it.
 
 ## Open a folder
 

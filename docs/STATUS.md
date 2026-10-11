@@ -51,4 +51,4 @@ unread — no balance route on the public API
 ## Blocked
 
 - engy balance stays unread until a real route exists. The public OpenAPI at `https://api.engy.ai/openapi.json` has no credits or balance route (checked 2026-10-11).
-- TestFlight rejected the phone archive. `xcodebuild -exportArchive` printed `error: exportArchive Error Downloading App Information` and `EXPORT FAILED`, then exited 70. The bundle id is `life.arbos.phone`. The archive itself contains an `Arbos` executable. The iOS job stays green after that rejection, so Linux CI is unchanged.
+- TestFlight rejected the first phone export. `xcodebuild -exportArchive` printed `error: exportArchive Error Downloading App Information` and `EXPORT FAILED`, then exited 70. That archive used `life.arbos.phone`, which is not the existing app. The phone bundle id is now `com.unarbos.arbos.ios`, read from tag `legacy-2026-10`. That id already has an App Store Connect app record. The next export targets it. The iOS job stays green if Apple rejects again, so Linux CI is unchanged.
