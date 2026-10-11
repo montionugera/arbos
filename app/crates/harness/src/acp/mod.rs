@@ -1842,8 +1842,19 @@ impl AcpHarness {
             if let Err(error) = std::fs::create_dir_all(&home) {
                 tracing::warn!(%error, "fx home directory was not created");
             }
-            let key = std::env::var("ENGY_API_KEY").ok();
-            for (name, value) in fx_child_env(key.as_deref(), &home) {
+            let key = std::env::var("ENGY_API_KEY")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .or_else(|| crate::secrets::read("engy"));
+            let mut pairs = fx_child_env(key.as_deref(), &home);
+            for (name, value) in crate::secrets::provider_env_pairs() {
+                if pairs.iter().any(|(existing, _)| *existing == name) {
+                    continue;
+                }
+                pairs.push((name, value));
+            }
+            for (name, value) in pairs {
                 cmd.env(name, value);
             }
         }

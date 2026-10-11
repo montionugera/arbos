@@ -287,6 +287,7 @@ mod catalog;
 mod catalog_failure;
 pub(crate) mod code_signature;
 pub mod redact;
+pub mod secrets;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
 pub mod codex;

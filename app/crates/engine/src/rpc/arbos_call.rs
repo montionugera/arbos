@@ -51,6 +51,7 @@ impl EngineRpc {
                 arbos_layout::write_context(project_path, &path, text)?;
                 Ok(json!({ "path": path, "bytes": text.len() }))
             }
+            "byok" => save_byok(project_path, &params),
             _ => Err("unknown arbos op".into()),
         }
     }
@@ -213,6 +214,155 @@ impl EngineRpc {
             .map_err(|err| err.to_string())?;
         Ok(())
     }
+}
+
+/// Settings → Keys. Writes the fx connection into the main agent's home and
+/// the secret into the keychain or the mode 600 file. The secret is not
+/// copied into the connection file or the reply.
+fn save_byok(project: &Path, params: &Value) -> Result<Value, String> {
+    let provider = text_field(params, "provider").ok_or_else(|| "name the provider".to_string())?;
+    let spec = byok_spec(&provider).ok_or_else(|| "unknown provider".to_string())?;
+    let secret = params
+        .get("secret")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let base_url = text_field(params, "baseUrl").unwrap_or_else(|| spec.base_url.to_owned());
+    if spec.needs_key && secret.is_empty() {
+        return Err("that provider needs a key".into());
+    }
+    if !secret.is_empty() {
+        zeron_harness::secrets::write(spec.secret_name, secret)?;
+        if let Some(var_name) = zeron_harness::secrets::PROVIDERS
+            .iter()
+            .find(|(name, _)| *name == spec.secret_name)
+            .map(|(_, var_name)| *var_name)
+        {
+            // The next fx child inherits this. The value is not logged.
+            unsafe { std::env::set_var(var_name, secret) };
+        }
+    }
+    write_fx_connection(project, &spec, &base_url, secret)?;
+    Ok(json!({
+        "ok": true,
+        "provider": spec.id,
+        "stored": !secret.is_empty(),
+        "place": zeron_harness::secrets::place(),
+    }))
+}
+
+struct ByokSpec {
+    id: &'static str,
+    secret_name: &'static str,
+    env_name: &'static str,
+    base_url: &'static str,
+    needs_key: bool,
+    /// Built-in fx provider name. Custom connections use `providers` instead.
+    builtin: Option<&'static str>,
+}
+
+fn byok_spec(provider: &str) -> Option<ByokSpec> {
+    Some(match provider {
+        "ai-gateway" => ByokSpec {
+            id: "ai-gateway",
+            secret_name: "ai-gateway",
+            env_name: "AI_GATEWAY_API_KEY",
+            base_url: "https://ai-gateway.vercel.sh/v1",
+            needs_key: true,
+            builtin: None,
+        },
+        "openrouter" => ByokSpec {
+            id: "openrouter",
+            secret_name: "openrouter",
+            env_name: "OPENROUTER_API_KEY",
+            base_url: "https://openrouter.ai/api/v1",
+            needs_key: true,
+            builtin: None,
+        },
+        "ollama" => ByokSpec {
+            id: "ollama",
+            secret_name: "ollama",
+            env_name: "OLLAMA_API_KEY",
+            base_url: "http://127.0.0.1:11434/v1",
+            needs_key: false,
+            builtin: None,
+        },
+        "codex" => ByokSpec {
+            id: "codex",
+            secret_name: "codex",
+            env_name: "CODEX_API_KEY",
+            base_url: "",
+            needs_key: false,
+            builtin: Some("codex"),
+        },
+        "grok" => ByokSpec {
+            id: "grok",
+            secret_name: "grok",
+            env_name: "GROK_API_KEY",
+            base_url: "",
+            needs_key: false,
+            builtin: Some("grok"),
+        },
+        _ => return None,
+    })
+}
+
+fn write_fx_connection(
+    project: &Path,
+    spec: &ByokSpec,
+    base_url: &str,
+    secret: &str,
+) -> Result<(), String> {
+    let path = project
+        .join(".arbos")
+        .join("agents")
+        .join("main")
+        .join("fx")
+        .join("settings.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let mut root = match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => {
+            serde_json::from_str::<Value>(&text).map_err(|_| "fx settings could not be read".to_string())?
+        }
+        _ => json!({}),
+    };
+    if !root.is_object() {
+        root = json!({});
+    }
+    if let Some(builtin) = spec.builtin {
+        root["provider"] = json!(builtin);
+    } else {
+        if !valid_base_url(base_url) {
+            return Err("the base URL must be http or https".into());
+        }
+        let auth = if spec.id == "ollama" && secret.is_empty() {
+            json!({ "type": "none" })
+        } else {
+            json!({ "type": "bearer", "env": spec.env_name })
+        };
+        root["providers"][spec.id] = json!({
+            "protocol": "openai-chat-completions",
+            "base_url": base_url.trim_end_matches('/'),
+            "auth": auth,
+        });
+        root["provider"] = json!(spec.id);
+    }
+    let text = serde_json::to_string_pretty(&root).map_err(|err| err.to_string())?;
+    if !secret.is_empty() && text.contains(secret) {
+        return Err("the connection file would have contained the key".into());
+    }
+    std::fs::write(&path, text).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn valid_base_url(url: &str) -> bool {
+    let url = url.trim();
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && !url.contains(' ')
+        && !url.contains('\n')
+        && url.len() < 300
 }
 
 fn worker_model(model: &str) -> String {

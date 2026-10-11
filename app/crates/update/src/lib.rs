@@ -3,11 +3,12 @@
 //! (its own report-only checker, the "Check for Updates…" menu item, the
 //! sidebar update strip, and the desktop install paths).
 //!
-//! Release layout (see `.github/workflows/release.yml` and `edge/src/install.sh`):
-//! artifacts live in the `comet-native-releases` R2 bucket, served pre-auth at
-//! `{edge}/releases/*`. `manifest.json` carries the latest version plus a
-//! sha256 per artifact; `latest.txt` (version only) remains as the fallback for
-//! releases published before the manifest existed.
+//! Release layout: the checker reads `manifest.json` from the GitHub Release
+//! tagged `edge` (`releases/download/edge/manifest.json`). A Linux tarball may
+//! be attached there when its build is green. A Mac disk image is not
+//! published from this repo, and an unsigned Mac artifact is not uploaded.
+//! `latest.txt` (version only) remains as the fallback. A loopback `edge_url`
+//! still serves `{edge}/releases/*` so the local fixture tests can run.
 //!
 //! Install kinds and their update paths:
 //! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
@@ -82,7 +83,7 @@ const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 // Release metadata
 // ---------------------------------------------------------------------------
 
-/// `{edge}/releases/manifest.json` — written by the release workflow.
+/// GitHub Release `manifest.json` — written by the Linux tarball workflow.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: String,
@@ -317,11 +318,14 @@ fn validate_release_override(value: &str) -> anyhow::Result<String> {
 /// The project's GitHub releases page — the advisory update strip opens this
 /// for unmanaged installs (source builds, hand-copied binaries), where no
 /// updater flow exists to drive.
-pub const RELEASES_PAGE: &str = "https://github.com/zeronsh/zeron/releases";
+pub const RELEASES_PAGE: &str = "https://github.com/unarbos/arbos/releases";
 
 /// The newest release's page — the download destination offered when this
 /// installation cannot replace itself.
-pub const LATEST_RELEASE_PAGE: &str = "https://github.com/zeronsh/zeron/releases/latest";
+pub const LATEST_RELEASE_PAGE: &str = "https://github.com/unarbos/arbos/releases/latest";
+
+/// Asset base for the rolling Linux release. `manifest.json` lives here.
+pub const GITHUB_RELEASE_FEED: &str = "https://github.com/unarbos/arbos/releases/download/edge";
 
 fn release_base(edge_url: &str) -> anyhow::Result<String> {
     if let Ok(url) = std::env::var("ZERON_RELEASES_URL")
@@ -329,11 +333,22 @@ fn release_base(edge_url: &str) -> anyhow::Result<String> {
     {
         return validate_release_override(&url);
     }
+    let trimmed = edge_url.trim().trim_end_matches('/');
+    if is_loopback_feed(trimmed) {
+        return Ok(format!("{trimmed}/releases"));
+    }
     #[cfg(windows)]
     if let Some(url) = windows::release_url()? {
         return Ok(url.trim_end_matches('/').to_owned());
     }
-    Ok(format!("{}/releases", edge_url.trim_end_matches('/')))
+    Ok(GITHUB_RELEASE_FEED.to_owned())
+}
+
+fn is_loopback_feed(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,13 +1273,23 @@ impl Updater {
 
     /// One check; returns false on fetch failure (retry sooner).
     async fn check_once(&self) -> bool {
+        let feed = release_base(&self.edge_url).ok();
         match fetch_latest(&self.edge_url).await {
             Ok(manifest) => {
+                tracing::info!(
+                    feed = feed.as_deref().unwrap_or(""),
+                    version = %manifest.version,
+                    "read release manifest"
+                );
                 self.publish(manifest);
                 true
             }
             Err(err) => {
-                tracing::debug!(error = %err, "update check failed");
+                tracing::info!(
+                    feed = feed.as_deref().unwrap_or(""),
+                    error = %err,
+                    "release manifest was not read"
+                );
                 self.status_tx
                     .send_modify(|s| s.error = Some(format!("{err:#}")));
                 false

@@ -19,6 +19,7 @@ To spawn one worker: mcp_select_tool {\"name\":\"mcp_arbos_agents_spawn\"}, then
 Repeat that pair for every worker. Spawn returns at once. machine must be \"local\". \
 Start every independent worker before you wait for any of them. \
 When a worker finishes you see a Worked line. \
+A Worked line can also be a subscription wake, with no message from the person. Answer that wake in a few sentences. \
 Then summarise in a few sentences and tick the matching line in context/status.md with mcp_arbos_context_write. \
 Do not tick a line before that worker reports. \
 Read `.arbos/context/GOALS.md` first. \
@@ -132,6 +133,10 @@ pub fn ensure(project: &Path, name: Option<&str>) -> Result<(), String> {
     )?;
     write_if_missing(&root.join("context").join("research").join(".gitkeep"), "")?;
     write_if_missing(&root.join("subscriptions").join(".gitkeep"), "")?;
+    write_if_missing(
+        &root.join("subscriptions").join("morning.toml"),
+        "kind = \"timer\"\nhour = 8\nminute = 0\nprompt = \"Morning. Read context/status.md and say what is next.\"\n",
+    )?;
     let project_file = root.join("project.toml");
     if !project_file.is_file() {
         let display = name
