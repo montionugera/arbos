@@ -24,10 +24,11 @@ The app in `app/` talks to fx and opens a folder as a project. Main can spawn wo
 - A timer, a pull request, a branch's CI, and Slack are subscription files. A firing prompts Main with no typed message. The live proof was a one-minute timer, plus scratch pull request 820 on `cursor/phase4-red-ci-22f6`. The morning file is 08:00 and did not fire. Settings → Keys saved an OpenRouter connection. The key file is mode 600 and is outside the project. A rejected tool call no longer fails the next prompt, and a later successful turn clears an error card that shared a line with earlier text. See `docs/qa/2026-10-11-wakes.md`.
 - `phase5-remote` has home `arboslife`. Headless Arbos runs beside the existing processes on that machine, in its own directory, systemd units, and port. Cloudflare Access is in front. Closing the local window left the remote engine running, and reopening showed new `Worked ·` lines from a short timer. A second local install, registered as the offline MacBook `2a05bc55-df5b-4687-8b45-ac94702d71d0`, ran `remote-ship` and wrote `remote-ok`. See `docs/qa/2026-10-11-remote.md`.
 - The phone client lists `phone-demo`, follows Main, and queues a prompt on the engine RPC. The proof is `docs/qa/2026-10-11-phone.md`. There is no voice and no call screen.
+- TestFlight accepted phone build 7 for `com.unarbos.arbos.ios`, version `0.2.111`, on commit `e466af98`. The archive set `CURRENT_PROJECT_VERSION` to 7. The export log said `Uploaded Arbos` and `TestFlight upload finished.`
 
 ## Next
 
-`FINAL.md` is not written. The phone is not on TestFlight.
+`FINAL.md` is not written. Phone build 7 is uploaded to TestFlight. It is not installed on a device from this machine.
 
 ## Balance
 
@@ -51,4 +52,3 @@ unread — no balance route on the public API
 ## Blocked
 
 - engy balance stays unread until a real route exists. The public OpenAPI at `https://api.engy.ai/openapi.json` has no credits or balance route (checked 2026-10-11).
-- TestFlight rejected the phone export for `com.unarbos.arbos.ios` on commit `864f8e20`. `xcodebuild -exportArchive` printed `error: exportArchive Missing required icon file. The bundle does not contain an app icon for iPhone / iPod Touch of exactly '120x120' pixels, in .png format for iOS versions >= 10.0.` and `error: exportArchive Missing Info.plist value. A value for the Info.plist key 'CFBundleIconName' is missing in the bundle 'com.unarbos.arbos.ios'.` Then `EXPORT FAILED` and exit 70. The earlier `error: exportArchive Error Downloading App Information` was for `life.arbos.phone`. The bundle id now matches tag `legacy-2026-10`, and that id already has an App Store Connect app. The iOS job stays green after the rejection, so Linux CI is unchanged. No further upload is being retried.
