@@ -2,7 +2,7 @@
 
 ## Now
 
-The app in `app/` talks to fx. One visible harness runs `fx acp`. The window title and the about string say Arbos. The package and the binary are still named `zeron`. fx speaks engy (`https://api.engy.ai/v1`, model `glm-5.3`). The key is the `ENGY_API_KEY` environment variable. `main` holds `app/` (zeron), `fx/` (fx), `ios/` (a README; the iPhone app arrives in phase 6), and these docs.
+The app in `app/` talks to fx and opens a folder as a project. One visible harness runs `fx acp`. The window title and the about string say Arbos. The package and the binary are still named `zeron`. fx speaks engy (`https://api.engy.ai/v1`, model `glm-5.3`). The key is the `ENGY_API_KEY` environment variable. `main` holds `app/` (zeron), `fx/` (fx), `ios/` (a README; the iPhone app arrives in phase 6), and these docs.
 
 ## Done today
 
@@ -19,10 +19,11 @@ The app in `app/` talks to fx. One visible harness runs `fx acp`. The window tit
 - Root CI runs the filtered Zig behavior check for engy defaults, the effort field, home selection, and the ask tests. The independent check is `docs/qa/2026-10-11-fx-engy-check.md`.
 - A live `fx acp` turn with reasoning effort `low` answered `pong`. The gateway trace recorded `effort=low` and `reasoning=selected`. The real `~/.fx/usage.jsonl` did not change.
 - The app spawns `fx acp`, sets full-access on a fresh session, passes `ENGY_API_KEY` and `ARBOS_FX_HOME`, and sends a mid-turn steer as `session/prompt` with `_meta.fx.steer`. Hosted sync is not in this build. See `docs/qa/2026-10-11-app-fx.md`.
+- The left rail is projects. A folder gets `<folder>/.arbos/` with `project.toml`, `context/`, and a git repo that is committed after a turn. Each project has a Main tab, extra chats, and a Context tab. The checklist under Main is `context/status.md`. See `docs/qa/2026-10-11-projects.md`.
 
 ## Next
 
-Phase 2: the projects rail, the `.arbos/` layout, the Main tab, and Context.
+Phase 3: delegation. The `arbos` MCP server, `agents.spawn`, and sub-agent tabs. Not started.
 
 ## Balance
 

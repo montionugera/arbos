@@ -15,3 +15,5 @@
 - 2026-10-11: `ENGY_API_KEY` is an environment variable for this phase. The app copies it into the fx child environment. It is not written to disk, settings, logs, or the repo. Keychain storage is a later phase.
 - 2026-10-11: fx files for this process use `ARBOS_FX_HOME` when that variable is set. Otherwise they use `~/.local/share/arbos/fx`. That home is stable across a relaunch so `session/load` can find the session. Phase 2 moves homes under `.arbos/agents/<id>/fx/`.
 - 2026-10-11: The fx binary is the first `fx` on `PATH`. If PATH has none, the app uses `fx/zig-out/bin/fx` from this repo. `FX_EXECUTABLE` still overrides both.
+- 2026-10-11: The app starts in dark appearance. A settings file with no `appearance` key loads dark.
+- 2026-10-11: A project is `<folder>/.arbos/`. That directory is its own git repo. The app commits it after a turn. fx files for a chat go under `.arbos/agents/<id>/fx`.

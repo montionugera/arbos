@@ -190,6 +190,33 @@ pub(crate) fn fx_child_env(key: Option<&str>, home: &str) -> Vec<(&'static str, 
     env
 }
 
+fn fx_home_override(request: &RunRequest) -> Option<String> {
+    request
+        .model_options
+        .get("_arbosFxHome")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|home| !home.is_empty())
+        .map(str::to_owned)
+}
+
+fn fx_system_prompt(request: &RunRequest) -> Option<String> {
+    request
+        .model_options
+        .get("_arbosSystemPrompt")
+        .and_then(Value::as_str)
+        .filter(|prompt| !prompt.is_empty())
+        .map(str::to_owned)
+}
+
+fn with_system_prompt(mut params: Value, prompt: Option<&str>) -> Value {
+    if let Some(prompt) = prompt.filter(|prompt| !prompt.is_empty()) {
+        params["systemPrompt"] = json!([{ "type": "text", "text": prompt }]);
+        params["systemPromptMode"] = Value::String("append".into());
+    }
+    params
+}
+
 fn fx_process_home() -> String {
     if let Ok(home) = std::env::var("ARBOS_FX_HOME") {
         let home = home.trim();
@@ -1399,7 +1426,7 @@ impl AcpHarness {
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
         let (_scratch, mut child, _stderr, sign_in_prompted) =
-            self.spawn_agent(home.as_deref(), false, &[], None).await?;
+            self.spawn_agent(home.as_deref(), false, &[], None, None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
                 client_with_sign_in_prompt(stdin, stdout, self.spec.id, &sign_in_prompted)
@@ -1786,6 +1813,7 @@ impl AcpHarness {
         block_on_install: bool,
         extra_args: &[String],
         _mcp: Option<&zeron_proto::McpServer>,
+        fx_home: Option<&str>,
     ) -> Result<
         (
             Option<ScratchDir>,
@@ -1806,7 +1834,11 @@ impl AcpHarness {
             cmd.current_dir(cwd);
         }
         if self.spec.id == HarnessId::Fx {
-            let home = fx_process_home();
+            let home = fx_home
+                .map(str::trim)
+                .filter(|home| !home.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(fx_process_home);
             if let Err(error) = std::fs::create_dir_all(&home) {
                 tracing::warn!(%error, "fx home directory was not created");
             }
@@ -1875,7 +1907,7 @@ impl AcpHarness {
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         let (_scratch, mut child, _stderr, sign_in_prompted) = self
-            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[], None)
+            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[], None, None)
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -1947,7 +1979,7 @@ impl AcpHarness {
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         let (_scratch, mut child, stderr_tail, sign_in_prompted) =
-            self.spawn_agent(None, false, &[], None).await?;
+            self.spawn_agent(None, false, &[], None, None).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
                 client_with_sign_in_prompt(stdin, stdout, self.spec.id, &sign_in_prompted)
@@ -2510,7 +2542,13 @@ impl Harness for AcpHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let (scratch, mut child, stderr_tail, sign_in_prompted) = self
-            .spawn_agent(Some(&request.cwd), true, &[], request.mcp.as_ref())
+            .spawn_agent(
+                Some(&request.cwd),
+                true,
+                &[],
+                request.mcp.as_ref(),
+                fx_home_override(&request).as_deref(),
+            )
             .await?;
         let stdin = child
             .stdin
@@ -3991,7 +4029,7 @@ async fn run_session(session: Session) {
                     let new = new_session(
                         &client,
                         &mut incoming,
-                        session_params.clone(),
+                        with_system_prompt(session_params.clone(), fx_system_prompt(&request).as_deref()),
                         agent_name,
                         auth_method.is_some(),
                     )
@@ -4009,7 +4047,7 @@ async fn run_session(session: Session) {
             let new = new_session(
                 &client,
                 &mut incoming,
-                session_params,
+                with_system_prompt(session_params, fx_system_prompt(&request).as_deref()),
                 agent_name,
                 auth_method.is_some(),
             )

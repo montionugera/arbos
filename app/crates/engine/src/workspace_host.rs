@@ -998,25 +998,40 @@ impl WorkspaceHost {
         git_detected: bool,
     ) -> Result<(), EngineError> {
         let spaces = self.read(|doc| doc.read_spaces())?;
-        if spaces
+        let existed = spaces
             .iter()
-            .any(|s| s.id == space_id || (s.device_id == device_id && s.path == path))
-        {
-            return Ok(());
+            .any(|s| s.id == space_id || (s.device_id == device_id && s.path == path));
+        if !existed {
+            self.mutate(|doc| {
+                doc.upsert_space(&Space {
+                    id: space_id.to_string(),
+                    device_id: device_id.to_string(),
+                    path: path.to_string(),
+                    name: name.clone(),
+                    git_detected,
+                    git_checked_at: None,
+                    checkout_id: None,
+                    repository_id: None,
+                    created_at: Utc::now(),
+                })
+            })?;
         }
-        self.mutate(|doc| {
-            doc.upsert_space(&Space {
-                id: space_id.to_string(),
-                device_id: device_id.to_string(),
-                path: path.to_string(),
-                name,
-                git_detected,
-                git_checked_at: None,
-                checkout_id: None,
-                repository_id: None,
-                created_at: Utc::now(),
-            })
-        })?;
+        let folder = std::path::Path::new(path);
+        if let Err(err) = crate::arbos_layout::ensure(folder, name.as_deref()) {
+            tracing::warn!(path, error = %err, "project layout was not created");
+        }
+        if !existed {
+            let main_id = format!("{space_id}-main");
+            if let Err(err) = self.create_chat(&main_id, Some(space_id), Some(device_id), None, None)
+            {
+                tracing::warn!(path, error = %err, "main chat was not created");
+            } else if let Err(err) = self.rename_chat(&main_id, "Main") {
+                tracing::warn!(path, error = %err, "main chat was not named");
+            }
+            if let Err(err) = crate::arbos_layout::claim_main(folder, &main_id) {
+                tracing::warn!(path, error = %err, "main agent was not claimed");
+            }
+        }
         Ok(())
     }
 

@@ -2190,6 +2190,19 @@ async fn drive_run(
     if request.mcp.is_none() {
         request.mcp = inner.zeron_mcp(&chat_id);
     }
+    if harness_id == HarnessId::Fx
+        && let Some(prep) =
+            crate::arbos_layout::prepare_turn(std::path::Path::new(&request.cwd), &chat_id)
+    {
+        request.model_options.insert(
+            "_arbosFxHome".into(),
+            serde_json::Value::String(prep.fx_home),
+        );
+        request.model_options.insert(
+            "_arbosSystemPrompt".into(),
+            serde_json::Value::String(prep.system_prompt),
+        );
+    }
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside
     // the event loop) can take ownership.
@@ -3262,6 +3275,11 @@ async fn drive_run(
                 // A cleanly completed turn resets the auto-resume revival
                 // budget: only consecutive crash-revive-crash cycles spend it.
                 inner.journal.clear_resume_attempts(&chat_id);
+            }
+            if turn_was_active
+                && matches!(status, DoneStatus::Completed | DoneStatus::Interrupted)
+            {
+                crate::arbos_layout::commit_after_turn(std::path::Path::new(&run_cwd));
             }
             // Exchange completed on an untitled chat → name it (fire-and-forget;
             // interrupted/errored turns never trigger naming).

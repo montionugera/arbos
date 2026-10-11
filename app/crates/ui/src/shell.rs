@@ -72,6 +72,7 @@ mod chat_rename_tests;
 mod command_palette;
 mod file_mutations;
 mod files_panel;
+mod project_chrome;
 mod harness_updates;
 mod navigation_focus;
 #[cfg(test)]
@@ -121,6 +122,8 @@ actions!(
         ToggleCommandPalette,
         OpenModelPicker,
         NewSession,
+        OpenContext,
+        OpenProjectIcon,
         OpenSettings,
         NextSession,
         PrevSession,
@@ -464,6 +467,8 @@ pub fn apply_keymap(
             NewSession,
             None,
         ),
+        KeyBinding::new(&platform_combo("mod-shift-c"), OpenContext, None),
+        KeyBinding::new(&platform_combo("mod-shift-i"), OpenProjectIcon, None),
         KeyBinding::new(
             &valid_or_default(
                 &keymap.next_session,
@@ -2206,6 +2211,7 @@ pub struct Shell {
     debug_dialog: Option<String>,
     debug_gate: Option<GatePhase>,
     debug_upload: Option<String>,
+    project: project_chrome::ProjectChrome,
     sidebar_tween: Option<WidthTween>,
     files_tween: Option<WidthTween>,
     /// The session card's reveal (0 closed → 1 open).
@@ -2649,6 +2655,7 @@ impl Shell {
             debug_dialog,
             debug_gate,
             debug_upload,
+            project: project_chrome::ProjectChrome::default(),
             sidebar_tween: None,
             files_tween: None,
             session_info_tween: None,
@@ -3183,7 +3190,7 @@ impl Shell {
         if self.settings.sidebar_collapsed || !fit.sidebar {
             0.0
         } else {
-            fit.sidebar_limit
+            project_chrome::RAIL_WIDTH
         }
     }
 
@@ -5728,18 +5735,27 @@ impl Shell {
 
     /// Fire a Mutate op; failures surface in the sidebar notice strip.
     fn mutate(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
+        self.mutate_seq(vec![params], cx);
+    }
+
+    /// Send mutate ops in order. One task owns the sequence, so a later op
+    /// cannot cancel the earlier one.
+    fn mutate_seq(&mut self, steps: Vec<serde_json::Value>, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
             cx.notify();
             return;
         };
         self.mutate_task = Some(cx.spawn(async move |this, cx| {
-            if let Err(err) = engine.client().call(methods::MUTATE, params).await {
-                this.update(cx, |shell, cx| {
-                    shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
-                    cx.notify();
-                })
-                .ok();
+            for params in steps {
+                if let Err(err) = engine.client().call(methods::MUTATE, params).await {
+                    this.update(cx, |shell, cx| {
+                        shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
             }
         }));
     }
@@ -6159,11 +6175,7 @@ impl Shell {
     /// grouping view options permute the list, and the chip on a row must
     /// name the key that opens it.
     fn jump_to_session(&mut self, slot: usize, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.sidebar_visible_order(cx).into_iter().nth(slot) else {
-            return;
-        };
-        // Same path a click on that row takes.
-        self.open_chat(chat_id, cx);
+        self.jump_to_project(slot, cx);
     }
 
     /// Whether an overlay that owns the keyboard is up — the add-space
@@ -7270,7 +7282,7 @@ impl Shell {
                         icons::PLUS,
                         ShortcutId::NewSession.label(),
                         &theme,
-                        cx.listener(|this, _, _, cx| this.open_new_session(None, cx)),
+                        cx.listener(|this, _, _, cx| this.open_project_chat(cx)),
                     ))
             }))
             .into_any_element()
@@ -8874,7 +8886,9 @@ impl Shell {
         )
     }
 
+    #[allow(unreachable_code)]
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        return self.render_project_rail(theme, cx);
         if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
         }) {
@@ -9283,12 +9297,15 @@ impl Shell {
     /// "Star on GitHub" banner, styled like the update strip. Clicking it
     /// opens the repository; either that or the close button dismisses it for
     /// good — the choice is persisted so it never returns on the next launch.
+    #[allow(unreachable_code)]
     fn render_github_star_banner(
         &self,
         above_update_strip: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let _ = (above_update_strip, theme, cx);
+        return None;
         if self.settings.github_star_banner_dismissed {
             return None;
         }
@@ -11085,7 +11102,10 @@ impl Shell {
             self.transcript
                 .update(cx, |transcript, cx| transcript.finish_route_exit(cx));
         }
-        let outlet: AnyElement = if has_selection || departing_transcript {
+        let show_context = self.project.surface == project_chrome::Surface::Context;
+        let outlet: AnyElement = if show_context {
+            self.render_context_browser(cx)
+        } else if has_selection || departing_transcript {
             div()
                 .relative()
                 .size_full()
@@ -11245,7 +11265,7 @@ impl Shell {
                             // Fully faded BY the titlebar's bottom edge (the
                             // title text is opaque — overlap read as collision),
                             // ramping in the band just below it.
-                            .inset_top(Theme::TITLEBAR_HEIGHT)
+                            .inset_top(Theme::TITLEBAR_HEIGHT + project_chrome::TAB_HEIGHT)
                             .band_top(Theme::TRANSCRIPT_FADE_BAND)
                             .band_bottom(bottom_band),
                             terminal_geometry.clone(),
@@ -11321,7 +11341,8 @@ impl Shell {
                     )
                     .children(self.render_voice_composer_orb(composer_width, cx))
                     .child(status)
-                    .when(has_spaces || no_project || has_appshots, |el| {
+                    .child(self.render_project_checklist(cx))
+                    .when((has_spaces || no_project || has_appshots) && !show_context, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
                         el.child(
                             crate::composer_dock::docked_composer(
@@ -11348,6 +11369,8 @@ impl Shell {
                     })
                     .child(self.render_terminal_container(terminal_geometry, window, cx))
             })
+            .child(self.render_project_tabs(cx))
+            .children(self.render_icon_menu(cx))
             .child(Self::attachment_drop_overlay(theme))
             .child(Self::mention_drop_overlay(theme))
             .into_any_element()
@@ -13701,7 +13724,25 @@ impl Render for Shell {
             ))
             // New session works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
-            .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(None, cx)))
+            .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_project_chat(cx)))
+            .on_action(cx.listener(|this, _: &OpenContext, _, cx| this.show_project_context(cx)))
+            .on_action(cx.listener(|this, _: &OpenProjectIcon, _, cx| {
+                let id = this
+                    .state
+                    .read(cx)
+                    .selected_space
+                    .clone()
+                    .or_else(|| {
+                        this.state
+                            .read(cx)
+                            .spaces
+                            .first()
+                            .map(|space| space.id.clone())
+                    });
+                if let Some(id) = id {
+                    this.open_icon_menu(id, cx);
+                }
+            }))
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) toggle the modal from any section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
@@ -13818,6 +13859,7 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.open_model_menu(window, cx));
                 }
+                self.take_project_debug(cx);
                 // MessageRail width gate: hide below 48rem of main-panel width.
                 let viewport = f32::from(window.viewport_size().width);
                 self.viewport_height = f32::from(window.viewport_size().height);

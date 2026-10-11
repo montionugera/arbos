@@ -30,11 +30,12 @@ use crate::theme::{Appearance, Theme};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AppearanceMode {
-    /// Follow the OS. The default — matches every other native app on the
-    /// machine, including when the user has macOS set to switch at sunset.
-    #[default]
+    /// Follow the OS, including when the machine switches at sunset.
     System,
     Light,
+    /// Dark is the default. A new settings file and a missing `appearance`
+    /// key both land here.
+    #[default]
     Dark,
 }
 

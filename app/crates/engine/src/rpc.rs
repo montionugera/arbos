@@ -610,6 +610,16 @@ enum MutateParams {
         #[serde(default)]
         at: Option<i64>,
     },
+    /// Rail icon for the project at `path`. `emoji:`, `image:`, or `repo`.
+    #[serde(rename_all = "camelCase")]
+    SetProjectIcon { path: String, icon: String },
+    /// Write one file under `<path>/.arbos/context/`.
+    #[serde(rename_all = "camelCase")]
+    WriteContext {
+        path: String,
+        relative_path: String,
+        text: String,
+    },
 }
 
 #[derive(Clone)]
@@ -1276,6 +1286,20 @@ impl EngineRpc {
                     .map_err(failed)
                     .map(drop)
             }
+            MutateParams::SetProjectIcon { path, icon } => {
+                crate::arbos_layout::set_icon(std::path::Path::new(&path), &icon)
+                    .map_err(RpcError::Failed)
+            }
+            MutateParams::WriteContext {
+                path,
+                relative_path,
+                text,
+            } => crate::arbos_layout::write_context(
+                std::path::Path::new(&path),
+                &relative_path,
+                &text,
+            )
+            .map_err(RpcError::Failed),
         }
     }
 }

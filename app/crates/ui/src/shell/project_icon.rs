@@ -23,7 +23,7 @@ pub(super) const ICON_PATHS: &[&str] = &[
     "src/assets/icon.png",
 ];
 
-fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
+pub(crate) fn load_repo_icon(root: &std::path::Path) -> Option<MediaImage> {
     // A project can point at a subdirectory; match the remote workspace RPC's
     // checkout-root resolution, including linked worktrees with a .git file.
     let canonical = root.canonicalize().ok()?;
@@ -144,7 +144,7 @@ impl ProjectIcon {
             let load = async {
                 if context.target_device_id.is_none() {
                     let root = std::path::PathBuf::from(context.cwd);
-                    return executor.spawn(async move { load_local_icon(&root) }).await;
+                    return executor.spawn(async move { load_repo_icon(&root) }).await;
                 }
                 let client = WorkspaceFilesClient::new(engine?, context.clone());
                 for path in ICON_PATHS {

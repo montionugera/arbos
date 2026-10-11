@@ -2960,11 +2960,10 @@ mod tests {
         );
     }
 
-    /// A settings file written before light mode existed has no `appearance`
-    /// key; it must load as "follow the OS" rather than failing the whole parse
-    /// and resetting every other preference to defaults.
+    /// A settings file with no `appearance` key loads as dark. Other keys
+    /// in that file still parse.
     #[test]
-    fn settings_without_appearance_default_to_system() {
+    fn settings_without_appearance_default_to_dark() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
@@ -2972,7 +2971,7 @@ mod tests {
         )
         .unwrap();
         let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::System);
+        assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::Dark);
         assert_eq!(loaded.accent, zeron_theme::AccentSelection::ThemeDefault);
         assert_eq!(loaded.surface, zeron_theme::SurfacePreference::ThemeDefault);
         assert_eq!(loaded.sidebar_width, 300.0);
