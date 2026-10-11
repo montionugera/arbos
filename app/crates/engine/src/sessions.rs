@@ -2034,6 +2034,19 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
 }
 
 /// The persisted assistant text of a folded segment (workspace preview source).
+fn turn_replaces_error_banner(status: &DoneStatus, folded: &[MessagePart]) -> bool {
+    if *status != DoneStatus::Completed {
+        return false;
+    }
+    folded.iter().any(|part| match part {
+        MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+            !text.trim().is_empty()
+        }
+        MessagePart::Tool { .. } | MessagePart::Image { .. } | MessagePart::Input { .. } => true,
+        MessagePart::Error { .. } | MessagePart::Fork { .. } => false,
+    })
+}
+
 fn folded_text(parts: &[MessagePart]) -> String {
     parts
         .iter()
@@ -3268,6 +3281,10 @@ async fn drive_run(
                     message_status,
                 ) {
                     tracing::warn!(chat = %chat_id, error = %err, "final segment finish failed");
+                } else if turn_replaces_error_banner(status, &folded) {
+                    if let Err(err) = doc_ref.clear_error_banners(&entry_id) {
+                        tracing::warn!(chat = %chat_id, error = %err, "error banner clear failed");
+                    }
                 }
                 inner.note_message(&chat_id, &folded_text(&folded));
             }

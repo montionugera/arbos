@@ -671,6 +671,64 @@ impl SessionDoc {
         Ok(false)
     }
 
+    /// Drop earlier entries that are only an error banner. A later turn that
+    /// produced a real reply replaces that banner. `keep_entry_id` is the
+    /// turn that just finished, and it stays even when it also carries an error.
+    pub fn clear_error_banners(&self, keep_entry_id: &str) -> Result<bool, DocError> {
+        let messages = self.doc.get_list("messages");
+        let mut drop_at = Vec::new();
+        for index in 0..messages.len() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(index)
+            else {
+                continue;
+            };
+            let keep = matches!(
+                entry.get("id"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(id))) if id.as_str() == keep_entry_id
+            );
+            if keep {
+                continue;
+            }
+            let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
+                entry.get("parts")
+            else {
+                continue;
+            };
+            if parts.len() == 0 {
+                continue;
+            }
+            let mut only_errors = true;
+            for part_index in 0..parts.len() {
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
+                    parts.get(part_index)
+                else {
+                    only_errors = false;
+                    break;
+                };
+                let is_error = matches!(
+                    part.get("kind"),
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(kind))) if kind.as_str() == "error"
+                );
+                if !is_error {
+                    only_errors = false;
+                    break;
+                }
+            }
+            if only_errors {
+                drop_at.push(index);
+            }
+        }
+        if drop_at.is_empty() {
+            return Ok(false);
+        }
+        for index in drop_at.into_iter().rev() {
+            messages.delete(index, 1)?;
+        }
+        self.doc.commit();
+        Ok(true)
+    }
+
     /// Mark the input part carrying `request_id` resolved, wherever it lives
     /// (input parts store the request id as their part id). The live-run path
     /// resolves through the entry fold; this direct write is for answers to a
