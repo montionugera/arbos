@@ -27,7 +27,7 @@ The app in `app/` talks to fx and opens a folder as a project. Main can spawn wo
 
 ## Next
 
-The root README, after this phone slice is green. No voice. No `FINAL.md`.
+`FINAL.md` is not written. The phone is not on TestFlight.
 
 ## Balance
 
@@ -51,3 +51,4 @@ unread — no balance route on the public API
 ## Blocked
 
 - engy balance stays unread until a real route exists. The public OpenAPI at `https://api.engy.ai/openapi.json` has no credits or balance route (checked 2026-10-11).
+- TestFlight rejected the phone archive. `xcodebuild -exportArchive` printed `error: exportArchive Error Downloading App Information` and `EXPORT FAILED`, then exited 70. The bundle id is `life.arbos.phone`. The archive itself contains an `Arbos` executable. The iOS job stays green after that rejection, so Linux CI is unchanged.
