@@ -1,4 +1,5 @@
 const std = @import("std");
+const io_mod = @import("io.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -26,6 +27,25 @@ const managed_skills_dir_name = "skills";
 const logs_dir_name = "logs";
 const trace_log_file_name = "trace.log";
 const recordings_dir_name = "recordings";
+
+/// A trimmed non-empty override wins. Blank and missing overrides use `home`.
+pub fn selectHome(override: ?[]const u8, home: ?[]const u8) ?[]const u8 {
+    if (override) |value| {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (trimmed.len > 0) return trimmed;
+    }
+    return home;
+}
+
+/// `ARBOS_FX_HOME` when it is set and not blank. Borrows process environment storage.
+pub fn arbosFxHome() ?[]const u8 {
+    return selectHome(io_mod.getenv("ARBOS_FX_HOME"), null);
+}
+
+/// Profile home: `ARBOS_FX_HOME`, otherwise `HOME`.
+pub fn effectiveHome() ?[]const u8 {
+    return selectHome(arbosFxHome(), io_mod.getenv("HOME"));
+}
 
 pub fn rootDir(alloc: Allocator, home: []const u8) ![]u8 {
     return std.fs.path.join(alloc, &.{ home, root_dir_name });
@@ -167,4 +187,11 @@ test "profile path helpers preserve current default locations" {
     const recordings = try recordingsDir(alloc, "/tmp/fake-home");
     defer alloc.free(recordings);
     try std.testing.expectEqualStrings("/tmp/fake-home/.fx/recordings", recordings);
+}
+
+test "selectHome prefers a non-empty override" {
+    try std.testing.expectEqualStrings("/proj/.arbos", selectHome("/proj/.arbos", "/home/user").?);
+    try std.testing.expectEqualStrings("/home/user", selectHome("   ", "/home/user").?);
+    try std.testing.expectEqualStrings("/home/user", selectHome(null, "/home/user").?);
+    try std.testing.expect(selectHome(null, null) == null);
 }

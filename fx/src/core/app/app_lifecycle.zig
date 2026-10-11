@@ -546,6 +546,7 @@ pub fn loadStartupStatusWithAuthMode(
 
     const run_model = config_runtime.modelEnvOverride();
     const configured_selection = try config_runtime.selectProviderModel(default_model, settings, null, run_model);
+    const bound_provider = try configured_selection.provider.bind(settings.providers orelse .{});
     const selected_model = try loadStartupStatusModel(alloc, configured_selection.model, null);
     errdefer if (selected_model.owned) |model| alloc.free(model);
 
@@ -560,7 +561,7 @@ pub fn loadStartupStatusWithAuthMode(
         try auth_runtime.loadStatusSnapshotForProvider(
             alloc,
             secret_store,
-            configured_selection.provider,
+            bound_provider,
             settings.credential_source,
         );
     errdefer auth_status.deinit(alloc);
@@ -568,11 +569,11 @@ pub fn loadStartupStatusWithAuthMode(
     const definitions: @import("../config/configured_provider.zig").Registry = settings.providers orelse .{};
     const result = StartupStatus{
         .workspace_root = workspace_root,
-        .provider_endpoint = if (definitions.get(configured_selection.provider.label())) |definition| try alloc.dupe(u8, definition.base_url) else null,
-        .provider = configured_selection.provider,
+        .provider_endpoint = if (definitions.get(bound_provider.label())) |definition| try alloc.dupe(u8, definition.base_url) else null,
+        .provider = bound_provider,
         .selected_model = selected_model.value,
         .owned_selected_model = selected_model.owned,
-        .model_origin = ModelOrigin.of(settings, configured_selection.provider, run_model),
+        .model_origin = ModelOrigin.of(settings, bound_provider, run_model),
         .effort = settings.effort orelse .auto,
         .ultrafast_mode = detailed.ultrafast_mode_env_override orelse (settings.ultrafast_mode orelse false),
         .auth = auth_status,
@@ -721,9 +722,10 @@ fn loadStartupStateWithKeychainRead(
         null;
     const run_model = model_override orelse config_runtime.modelEnvOverride();
     const configured_selection = try config_runtime.selectProviderModel(default_model, settings, bound_override, run_model);
-    state.provider = configured_selection.provider;
+    state.provider = try configured_selection.provider.bind(settings.providers orelse .{});
     state.configured_providers = settings.providers orelse .{};
     settings.providers = null;
+    config_runtime.refreshDefaultProviderMetadata(alloc, &state.configured_providers);
     state.configured_model = try alloc.dupe(u8, configured_selection.model);
     state.model_source = if (bound_override) |override|
         detailed.sources.models.get(model_provider.NameKey.fromProvider(override))
@@ -1735,7 +1737,7 @@ test "loadStartupStatus reports where the selected model came from" {
         defer env.deinit();
         var status = try loadStartupStatusWithAuthMode(alloc, host.unavailable_secret_store, "default/model", 25, .host_managed);
         defer status.deinit(alloc);
-        try std.testing.expectEqualStrings("default/model", status.selected_model);
+        try std.testing.expectEqualStrings("glm-5.3", status.selected_model);
         try std.testing.expectEqual(ModelOrigin.default, status.model_origin);
     }
     try writeFixtureFile(tmp.dir, "home/.fx/settings.json", "{\"provider\":\"codex\",\"models\":{\"codex\":\"gpt-saved\"}}\n");
@@ -1840,11 +1842,11 @@ test "permission mode parser accepts known modes" {
     try std.testing.expect(config_runtime.parsePermissionMode("weird") == null);
 }
 
-test "permission mode loader defaults to auto" {
+test "permission mode loader defaults to full access" {
     var env = try TestEnv.install(std.testing.allocator, &.{});
     defer env.deinit();
 
-    try std.testing.expectEqual(PermissionMode.auto, loadPermissionMode(null));
+    try std.testing.expectEqual(PermissionMode.yolo, loadPermissionMode(null));
     try std.testing.expectEqual(PermissionMode.ask, loadPermissionMode(.ask));
 }
 
@@ -2517,6 +2519,7 @@ test "startup credential modes select a refresh policy, never a narrower source 
 
 test "loadStartupState applies core env overrides" {
     var env = try TestEnv.install(std.testing.allocator, &.{
+        .{ .key = "FX_PROVIDER", .value = "gateway" },
         .{ .key = "FX_MODEL", .value = "  env-model  " },
         .{ .key = "AI_GATEWAY_API_KEY", .value = "gateway-key" },
         .{ .key = "FX_PERMISSION_MODE", .value = "auto" },
@@ -2641,7 +2644,7 @@ test "loadStartupState defaults fast mode off and requires bound explicit prefer
 
     const fixture = try std.fmt.allocPrint(
         std.testing.allocator,
-        "{{\"workspaces\":{{\"{s}\":{{\"model\":\"openai/gpt-5\"}},\"{s}\":{{\"fast_mode\":false}},\"{s}\":{{\"model\":\"zai/glm-5.3\",\"fast_mode\":true}},\"{s}\":{{\"model\":\"provider/fast-toggle\",\"fast_mode\":true,\"fast_mode_model_bound\":true}},\"{s}\":{{\"provider\":\"codex\",\"codex_model\":\"gpt-5.4-mini\"}}}}}}\n",
+        "{{\"provider\":\"gateway\",\"workspaces\":{{\"{s}\":{{\"model\":\"openai/gpt-5\"}},\"{s}\":{{\"fast_mode\":false}},\"{s}\":{{\"model\":\"zai/glm-5.3\",\"fast_mode\":true}},\"{s}\":{{\"model\":\"provider/fast-toggle\",\"fast_mode\":true,\"fast_mode_model_bound\":true}},\"{s}\":{{\"provider\":\"codex\",\"codex_model\":\"gpt-5.4-mini\"}}}}}}\n",
         .{ configured_root, disabled_root, legacy_fast_root, bound_fast_root, codex_root },
     );
     defer std.testing.allocator.free(fixture);
@@ -2889,7 +2892,7 @@ test "interactive launch leaves a Keychain credential unresolved for the caller"
     // The real Keychain stays off; the fake store below reports it enabled.
     var env = try TestEnv.install(alloc, &.{
         .{ .key = "HOME", .value = home_root },
-        .{ .key = "FX_PROVIDER", .value = "" },
+        .{ .key = "FX_PROVIDER", .value = "gateway" },
         .{ .key = "FX_DISABLE_KEYCHAIN", .value = "1" },
     });
     defer env.deinit();

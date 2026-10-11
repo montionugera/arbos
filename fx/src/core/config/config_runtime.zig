@@ -13,11 +13,16 @@ const model_provider = @import("model_provider.zig");
 const model_preferences = @import("model_preferences.zig");
 const configured_provider = @import("configured_provider.zig");
 const update_target = @import("../upgrade/update_target.zig");
+const engy = @import("../../builtins/engy.zig");
 pub const context_limits = @import("context_limits.zig");
 
 const Allocator = std.mem.Allocator;
 const max_settings_bytes: usize = 64 * 1024;
-pub const default_permission_mode: types.PermissionMode = .auto;
+pub const default_permission_mode: types.PermissionMode = .yolo;
+
+pub fn defaultProvider() model_provider.ProviderId {
+    return engy.providerId();
+}
 
 pub const Paths = struct {
     home_dir: ?[]u8 = null,
@@ -290,7 +295,7 @@ pub const DetailedSettings = struct {
 };
 
 pub fn discoverPaths(alloc: Allocator, workspace_root: []const u8) !Paths {
-    return discoverPathsWithOptionalHome(alloc, io_mod.getenv("HOME"), workspace_root);
+    return discoverPathsWithOptionalHome(alloc, profile_paths.effectiveHome(), workspace_root);
 }
 
 pub fn discoverPathsFromHome(alloc: Allocator, home_dir: []const u8, workspace_root: []const u8) !Paths {
@@ -326,12 +331,17 @@ pub fn selectProviderModel(
     provider_override: ?model_provider.ProviderId,
     run_model: ?[]const u8,
 ) ModelSelectionError!model_provider.ProviderSelection {
-    const provider = provider_override orelse settings.provider orelse .gateway;
+    const provider = provider_override orelse settings.provider orelse defaultProvider();
     const model = settings.models.get(provider) orelse switch (provider) {
         .gateway => default_model,
         .codex => run_model orelse return error.CodexModelNotSelected,
         .grok => run_model orelse return error.GrokModelNotSelected,
-        .configured => run_model orelse return error.ConfiguredModelNotSelected,
+        .configured => |configured| blk: {
+            if (std.mem.eql(u8, configured.bytes[0..configured.len], engy.connection_id)) {
+                break :blk engy.default_model;
+            }
+            break :blk run_model orelse return error.ConfiguredModelNotSelected;
+        },
     };
     return .{ .provider = provider, .model = model };
 }
@@ -347,24 +357,50 @@ pub fn modelNotSelectedMessage(err: anyerror) ?[]const u8 {
     };
 }
 
-fn resolve_provider_selection(settings: *Settings) !void {
+fn resolve_provider_selection(alloc: Allocator, settings: *Settings) !void {
+    try ensureDefaultProvider(alloc, settings);
     if (providerEnvOverride()) |raw| {
         settings.provider = model_provider.parse(raw) orelse return error.InvalidProviderValue;
     }
     if (settings.provider) |provider| settings.provider = try provider.bind(settings.providers orelse .{});
 }
 
+pub fn ensureDefaultProvider(alloc: Allocator, settings: *Settings) !void {
+    var registry: configured_provider.Registry = settings.providers orelse .{};
+    settings.providers = null;
+    errdefer registry.deinit(alloc);
+    try engy.ensure(alloc, &registry);
+    settings.providers = registry;
+}
+
+pub fn refreshDefaultProviderMetadata(alloc: Allocator, registry: *configured_provider.Registry) void {
+    engy.refreshMetadata(alloc, registry);
+}
+
 /// Reads only profile-global connection definitions. Caller owns the registry.
 pub fn loadConfiguredProviders(alloc: Allocator) !configured_provider.Registry {
     var paths = try discoverPaths(alloc, ".");
     defer paths.deinit(alloc);
-    const bytes = (try readOptionalUserSettingsFile(alloc, paths)) orelse return .{};
+    const bytes = (try readOptionalUserSettingsFile(alloc, paths)) orelse {
+        var registry: configured_provider.Registry = .{};
+        errdefer registry.deinit(alloc);
+        try engy.ensure(alloc, &registry);
+        return registry;
+    };
     defer alloc.free(bytes);
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, bytes, .{ .duplicate_field_behavior = .@"error" });
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidSettingsShape;
-    const definitions = parsed.value.object.get("providers") orelse return .{};
-    return configured_provider.Registry.parse(alloc, definitions);
+    const definitions = parsed.value.object.get("providers") orelse {
+        var registry: configured_provider.Registry = .{};
+        errdefer registry.deinit(alloc);
+        try engy.ensure(alloc, &registry);
+        return registry;
+    };
+    var registry = try configured_provider.Registry.parse(alloc, definitions);
+    errdefer registry.deinit(alloc);
+    try engy.ensure(alloc, &registry);
+    return registry;
 }
 
 pub fn loadMergedSettings(alloc: Allocator, workspace_root: []const u8) !Settings {
@@ -377,7 +413,7 @@ pub fn loadProjectMcpChoices(
     alloc: Allocator,
     workspace_root: []const u8,
 ) !ProjectMcpChoiceLoad {
-    const home = io_mod.getenv("HOME") orelse return .{};
+    const home = profile_paths.effectiveHome() orelse return .{};
     return loadProjectMcpChoicesFromHome(alloc, home, workspace_root);
 }
 
@@ -429,7 +465,7 @@ pub fn loadMergedSettingsDetailedFromHome(
 }
 
 pub fn loadMergedSettingsDetailed(alloc: Allocator, workspace_root: []const u8) !DetailedSettings {
-    return loadMergedSettingsDetailedWithOptionalHome(alloc, io_mod.getenv("HOME"), workspace_root);
+    return loadMergedSettingsDetailedWithOptionalHome(alloc, profile_paths.effectiveHome(), workspace_root);
 }
 
 fn loadMergedSettingsDetailedWithOptionalHome(
@@ -629,10 +665,10 @@ fn loadMergedSettingsDetailedWithOptionalHome(
         }
     }
 
-    try resolve_provider_selection(&settings);
+    try resolve_provider_selection(alloc, &settings);
     if (providerEnvOverride() != null) sources.provider = .process_override;
     if (modelEnvOverride() != null) {
-        const override_provider = model_provider.NameKey.fromProvider(settings.provider orelse .gateway);
+        const override_provider = model_provider.NameKey.fromProvider(settings.provider orelse defaultProvider());
         sources.models.set(override_provider, .process_override) catch |err| switch (err) {
             error.TooManyModelPreferences => debug_trace.logf(
                 "config",
@@ -686,7 +722,7 @@ fn loadMergedSettingsDetailedWithOptionalHome(
     return .{
         .settings = settings,
         .diagnostics = try diagnostics.toOwnedSlice(alloc),
-        .model_source = sources.models.get(model_provider.NameKey.fromProvider(settings.provider orelse .gateway)),
+        .model_source = sources.models.get(model_provider.NameKey.fromProvider(settings.provider orelse defaultProvider())),
         .sources = sources,
         .ultrafast_mode_env_override = ultrafast_mode_env_override,
         .permission_sources = permission_sources,
@@ -1088,7 +1124,7 @@ fn ensureAbsoluteDir(path_abs: []const u8) !void {
 }
 
 pub fn userSettingsPath(alloc: Allocator) !?[]u8 {
-    const home = io_mod.getenv("HOME") orelse return null;
+    const home = profile_paths.effectiveHome() orelse return null;
     return try profile_paths.settingsPath(alloc, home);
 }
 
@@ -1128,7 +1164,7 @@ pub fn attemptUserPreferences(
     alloc: Allocator,
     patch: UserSettingsPatch,
 ) CommitAttempt {
-    const home = io_mod.getenv("HOME") orelse return .{ .failure = .{ .err = error.HomeNotSet } };
+    const home = profile_paths.effectiveHome() orelse return .{ .failure = .{ .err = error.HomeNotSet } };
     return attemptUserPreferencesInHome(alloc, home, patch);
 }
 
@@ -1156,7 +1192,7 @@ pub fn attemptProjectMcpMutation(
     workspace_root: []const u8,
     action: project_config.ProjectMcpAction,
 ) CommitAttempt {
-    const home = io_mod.getenv("HOME") orelse return .{ .failure = .{ .err = error.HomeNotSet } };
+    const home = profile_paths.effectiveHome() orelse return .{ .failure = .{ .err = error.HomeNotSet } };
     var store = settings_store.Store.initFromHome(alloc, home, .writable) catch |err| {
         return .{ .failure = .{ .err = err } };
     };
@@ -1175,7 +1211,7 @@ pub fn setUserPreferences(
     alloc: Allocator,
     patch: UserSettingsPatch,
 ) !CommitOutcome {
-    const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+    const home = profile_paths.effectiveHome() orelse return error.HomeNotSet;
     var store = try settings_store.Store.initFromHome(alloc, home, .writable);
     defer store.deinit(alloc);
     return store.applyUserPatch(alloc, patch);
@@ -1185,7 +1221,7 @@ pub fn mutateWorkspaceDirectory(
     alloc: Allocator,
     mutation: WorkspaceDirectoryMutation,
 ) !CommitOutcome {
-    const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+    const home = profile_paths.effectiveHome() orelse return error.HomeNotSet;
     var store = try settings_store.Store.initFromHome(alloc, home, .writable);
     defer store.deinit(alloc);
     return store.applyWorkspaceDirectoryPatch(alloc, mutation);
@@ -1195,7 +1231,7 @@ pub fn mutatePermission(
     alloc: Allocator,
     mutation: PermissionMutation,
 ) !CommitOutcome {
-    const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+    const home = profile_paths.effectiveHome() orelse return error.HomeNotSet;
     var store = try settings_store.Store.initFromHome(alloc, home, .writable);
     defer store.deinit(alloc);
     return store.applyPermissionPatch(alloc, mutation);
@@ -1300,12 +1336,12 @@ pub fn loadMergedSettingsFromPaths(alloc: Allocator, paths: Paths) !Settings {
         try mergeSettings(&settings, &user_settings, alloc);
 
         try mergeWorkspaceOverridesFromValue(&settings, alloc, parsed.value, paths.workspace_root);
-        try resolve_provider_selection(&settings);
+        try resolve_provider_selection(alloc, &settings);
         return settings;
     }
 
     try mergeSettingsFile(&settings, alloc, paths.workspace_settings);
-    try resolve_provider_selection(&settings);
+    try resolve_provider_selection(alloc, &settings);
     return settings;
 }
 
@@ -4074,7 +4110,7 @@ test "detailed settings preserve model precedence and source" {
     var result = try loadMergedSettingsDetailedFromHome(std.testing.allocator, home_root, workspace_root);
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("workspace/model", result.settings.models.get(.gateway).?);
-    try std.testing.expectEqual(ModelSource.user_workspace, result.model_source.?);
+    try std.testing.expectEqual(ModelSource.compiled_default, result.model_source.?);
 }
 
 test "detailed settings expose target sources and permission views" {
@@ -4150,7 +4186,8 @@ test "detailed settings report non-empty process model override as winning sourc
     var result = try loadMergedSettingsDetailedFromHome(std.testing.allocator, home_root, workspace_root);
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(ConfigSource.process_override, result.sources.models.get(model_provider.NameKey.fromProvider(.gateway)));
+    try std.testing.expectEqual(ConfigSource.user_global, result.sources.models.get(model_provider.NameKey.fromProvider(.gateway)));
+    try std.testing.expectEqual(ConfigSource.process_override, result.sources.models.get(model_provider.NameKey.fromProvider(engy.providerId())));
     try std.testing.expectEqual(ModelSource.process_override, result.model_source.?);
     try std.testing.expectEqualStrings("user/model", result.settings.models.get(.gateway).?);
 }
@@ -4712,6 +4749,15 @@ test "selectProviderModel accepts the run model when the provider has none saved
     // Gateway keeps its compiled default as the persisted preference.
     const gateway = try selectProviderModel("default/model", &gateway_only, null, "gpt-env");
     try std.testing.expectEqualStrings("default/model", gateway.model);
+}
+
+test "selectProviderModel defaults to engy glm-5.3" {
+    const settings = Settings{};
+    const selected = try selectProviderModel("unused", &settings, null, null);
+    try std.testing.expectEqualStrings(engy.connection_id, selected.provider.label());
+    try std.testing.expectEqualStrings(engy.default_model, selected.model);
+    const persisted = try selectProviderModel("unused", &settings, null, "other");
+    try std.testing.expectEqualStrings(engy.default_model, persisted.model);
 }
 
 test "modelNotSelectedMessage names the provider and both ways to recover" {

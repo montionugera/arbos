@@ -8,7 +8,7 @@ const tool_projection = @import("../core/tooling/tool_projection.zig");
 
 pub const ModeSpec = mode_contract.ModeSpec;
 pub const ToolPolicy = mode_contract.ToolPolicy;
-pub const default_mode_id = "auto";
+pub const default_mode_id = "full-access";
 
 /// The CLI's `/permissions` modes, in the order ACP lists them.
 pub const all = [_]ModeSpec{
@@ -40,7 +40,7 @@ test "built-in modes register the CLI permission modes in ACP order" {
         try std.testing.expectEqual(ToolPolicy.full, mode.tool_policy);
     }
 
-    try std.testing.expectEqualStrings("auto", default_mode_id);
+    try std.testing.expectEqualStrings("full-access", default_mode_id);
     try std.testing.expectEqualStrings(default_mode_id, registry.default_mode_id);
     try std.testing.expect(lookup("code") == null);
     try std.testing.expect(lookup("yolo") == null);

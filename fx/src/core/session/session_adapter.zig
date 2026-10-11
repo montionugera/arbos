@@ -163,7 +163,7 @@ pub const Store = struct {
 
     /// `$HOME` from the environment.
     pub fn openFromEnv(alloc: Allocator) !Store {
-        return open(alloc, io_mod.getenv("HOME") orelse return error.HomeNotSet);
+        return open(alloc, profile_paths.effectiveHome() orelse return error.HomeNotSet);
     }
 
     /// Every Session must be closed first.

@@ -31,6 +31,7 @@ const session_codec = @import("../core/session/session_codec.zig");
 const session_log = @import("../core/session/session_log.zig");
 const session_store = @import("../core/session/session_store.zig");
 const session_adapter = @import("../core/session/session_adapter.zig");
+const profile_paths = @import("../core/shared/profile_paths.zig");
 const session_runtime = @import("../core/session/session.zig");
 const session_title_generation = @import("../core/session/session_title_generation.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
@@ -908,10 +909,12 @@ pub fn run(alloc: Allocator, cfg: Config) !void {
 
 pub fn runWithTransport(
     alloc: Allocator,
-    cfg: Config,
+    cfg_in: Config,
     reader_value: jsonrpc.Reader,
     writer_value: jsonrpc.Writer,
 ) !void {
+    var cfg = cfg_in;
+    if (cfg.home_override == null) cfg.home_override = profile_paths.arbosFxHome();
     if (cfg.log_file) |path| {
         try debug_trace.configure(.{ .file_path = path });
     }

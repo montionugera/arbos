@@ -106,7 +106,7 @@ pub fn collect(
         return snapshot;
     };
     defer detailed.deinit(alloc);
-    snapshot.provider = detailed.settings.provider orelse .gateway;
+    snapshot.provider = try (detailed.settings.provider orelse config_runtime.defaultProvider()).bind(detailed.settings.providers orelse .{});
 
     snapshot.auth = try auth_runtime.loadStatusSnapshotForProvider(
         alloc,

@@ -151,6 +151,32 @@ pub const Registry = struct {
         self.* = .{};
     }
 
+    /// Appends one owned definition. On allocation failure the definition is freed.
+    pub fn append_owned(self: *Registry, alloc: Allocator, definition: Definition) Allocator.Error!void {
+        const next = alloc.alloc(Definition, self.definitions.len + 1) catch |err| {
+            definition.deinit(alloc);
+            return err;
+        };
+        @memcpy(next[0..self.definitions.len], self.definitions);
+        next[self.definitions.len] = definition;
+        const old = self.definitions;
+        self.definitions = next;
+        alloc.free(old);
+    }
+
+    /// Replaces model metadata for an owned definition. The previous slice is
+    /// left in place when the id is missing. A zero-length previous slice is
+    /// not an allocation.
+    pub fn adopt_model_metadata(self: *Registry, id: []const u8, metadata: []const ModelMetadata) error{UnknownProvider}!void {
+        const definitions: []Definition = @constCast(self.definitions);
+        for (definitions) |*definition| {
+            if (!std.mem.eql(u8, definition.id, id)) continue;
+            definition.model_metadata = metadata;
+            return;
+        }
+        return error.UnknownProvider;
+    }
+
     /// Returns a borrow valid until registry teardown. IDs are case-sensitive.
     pub fn get(self: Registry, id: []const u8) ?*const Definition {
         if (id.len > max_id_bytes) return null;

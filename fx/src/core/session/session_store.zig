@@ -546,13 +546,13 @@ pub const Store = struct {
 
     /// Opens a writable store rooted at `$HOME`, creating the layout if needed.
     pub fn init(alloc: Allocator, workspace_root: []const u8) !Store {
-        const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+        const home = profile_paths.effectiveHome() orelse return error.HomeNotSet;
         return initWithHome(alloc, home, workspace_root, true);
     }
 
     /// Opens a read-only store rooted at `$HOME`; never creates layout.
     pub fn initReadOnly(alloc: Allocator, workspace_root: []const u8) !Store {
-        const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+        const home = profile_paths.effectiveHome() orelse return error.HomeNotSet;
         return initWithHome(alloc, home, workspace_root, false);
     }
 

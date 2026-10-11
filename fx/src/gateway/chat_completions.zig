@@ -15,6 +15,7 @@ const io = @import("../core/shared/io.zig");
 const secret = @import("../core/auth/secret.zig");
 const types = @import("../core/shared/types.zig");
 const model_provider = @import("../core/config/model_provider.zig");
+const engy = @import("../builtins/engy.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const Allocator = std.mem.Allocator;
 
@@ -218,8 +219,16 @@ fn metadata_entry(metadata: definitions.ModelMetadata) catalog.ModelCatalogEntry
 }
 
 fn lookup_capabilities(raw: ?*anyopaque, model: []const u8) model_capabilities.Capabilities {
-    const metadata = definition_at(raw).model(model) orelse return .{};
-    return model_capabilities.mergeCapabilities(.{}, model_catalog_metadata.fromCatalogEntry(metadata_entry(metadata.*)));
+    const definition = definition_at(raw);
+    const metadata = definition.model(model) orelse {
+        if (!engy.isBuiltin(definition)) return .{};
+        var capabilities: model_capabilities.Capabilities = .{};
+        engy.applyEffortLadder(&capabilities);
+        return capabilities;
+    };
+    var capabilities = model_capabilities.mergeCapabilities(.{}, model_catalog_metadata.fromCatalogEntry(metadata_entry(metadata.*)));
+    if (engy.isBuiltin(definition)) engy.applyEffortLadder(&capabilities);
+    return capabilities;
 }
 
 fn fetch_catalog(raw: ?*anyopaque, alloc: Allocator, input: catalog.FetchInput) Allocator.Error!catalog.ProviderResult {
@@ -233,7 +242,17 @@ fn fetch_catalog(raw: ?*anyopaque, alloc: Allocator, input: catalog.FetchInput) 
         errdefer alloc.free(entry.id);
         entry.model_type = try alloc.dupe(u8, entry.model_type);
         errdefer alloc.free(entry.model_type);
-        try entries.append(alloc, entry);
+        if (engy.isBuiltin(definition)) {
+            entry.has_reasoning = true;
+            engy.appendReasoningEfforts(alloc, &entry.reasoning_efforts) catch |err| {
+                entry.reasoning_efforts.deinit(alloc);
+                return err;
+            };
+        }
+        entries.append(alloc, entry) catch |err| {
+            entry.reasoning_efforts.deinit(alloc);
+            return err;
+        };
     }
     return .{ .catalog = entries };
 }
