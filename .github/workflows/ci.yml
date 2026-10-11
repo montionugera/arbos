@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  layout:
+    name: Layout, licenses, and notices
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check the bootstrap tree
+        run: |
+          set -euo pipefail
+          test -f LICENSE
+          grep -q "MIT License" LICENSE
+          test -f README.md
+          grep -q "docs/design/arbos-rebuild-ideation.md" README.md
+          grep -q "docs/STATUS.md" README.md
+          test -f app/LICENSE
+          test -f app/THIRD_PARTY_NOTICES.md
+          test -f app/Cargo.toml
+          test -f app/apps/zeron/Cargo.toml
+          test -f fx/LICENSE
+          grep -q "Apache License" fx/LICENSE
+          test -f fx/THIRD_PARTY_NOTICES.md
+          test -f fx/build.zig
+          test -f fx/build.zig.zon
+          test -f ios/README.md
+          grep -q "phase 6" ios/README.md
+          test "$(find ios -type f | wc -l)" -eq 1
+          test -s docs/design/arbos-rebuild-ideation.md
+          grep -q "Arbos rebuild: fx + zeron, from scratch" docs/design/arbos-rebuild-ideation.md
+          test -f docs/STATUS.md
+          test -f docs/decisions.md
+          grep -q "does not publish a GitHub Release" docs/decisions.md
+          test ! -e .github/workflows/release.yml
+          test ! -e desktop
+          test ! -e crates
+          test ! -e www
+          test ! -e voice-server
+          test ! -e harness
+
+  app:
+    name: Compile app
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: gpui system deps
+        working-directory: .
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxcb1-dev libx11-xcb-dev \
+            libfontconfig1-dev libfreetype-dev libasound2-dev \
+            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: app
+          cache-on-failure: true
+      - name: Build zeron
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo build --locked -p zeron
+
+  fx:
+    name: Compile fx
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - name: Build fx
+        working-directory: fx
+        env:
+          AI_GATEWAY_API_KEY: ""
+          VERCEL_OIDC_TOKEN: ""
+        run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
+      - name: Smoke test the binary
+        working-directory: fx
+        env:
+          AI_GATEWAY_API_KEY: ""
+          VERCEL_OIDC_TOKEN: ""
+        run: scripts/smoke-binary.sh zig-out/bin/fx
