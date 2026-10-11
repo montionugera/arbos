@@ -78,8 +78,10 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run fx");
     run_step.dependOn(&run_cmd.step);
 
+    const test_filters = b.option([]const []const u8, "test-filter", "Run only tests whose names contain one of these substrings") orelse &.{};
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
+        .filters = test_filters,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
     run_exe_tests.step.dependOn(b.getInstallStep());
@@ -99,7 +101,9 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
-    test_step.dependOn(&run_session_manager_tests.step);
+    // A filter selects the behavior under test. The session manager suite
+    // stays on the unfiltered run.
+    if (test_filters.len == 0) test_step.dependOn(&run_session_manager_tests.step);
 
     if (wasm_surface != .none) {
         addWasmArtifact(b, wasm_surface, git_commit, app_version, update_channel);

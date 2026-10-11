@@ -101,3 +101,35 @@ jobs:
           AI_GATEWAY_API_KEY: ""
           VERCEL_OIDC_TOKEN: ""
         run: scripts/smoke-binary.sh zig-out/bin/fx
+
+  fx-behavior:
+    name: fx behavior tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - name: Test engy defaults, effort, home, and ask
+        working-directory: fx
+        env:
+          AI_GATEWAY_API_KEY: ""
+          VERCEL_OIDC_TOKEN: ""
+        run: |
+          set -euo pipefail
+          zig build test -Doptimize=ReleaseSafe -Dcpu=baseline \
+            -Dtest-filter=engy \
+            -Dtest-filter=reasoning_effort \
+            -Dtest-filter=selectHome \
+            -Dtest-filter="profile usage home" \
+            -Dtest-filter="permission mode loader defaults" \
+            -Dtest-filter="fx ask" \
+            -Dtest-filter="json run" \
+            -Dtest-filter="headless yolo" \
+            -Dtest-filter=runWithDeps \
+            -Dtest-filter="missing API key" \
+            -Dtest-filter="ask usage survives" \
+            -Dtest-filter="indeterminate saved auth" \
+            -Dtest-filter="recovery continuation checks" \
+            -Dtest-filter="quiet suppresses streaming"

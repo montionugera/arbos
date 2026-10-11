@@ -19,6 +19,7 @@ const debug_trace = @import("../shared/debug_trace.zig");
 const record_tape = @import("../workspace/record_tape.zig");
 const statusline_identity = @import("../workspace/statusline_identity.zig");
 const shared_io = @import("../shared/io.zig");
+const profile_paths = @import("../shared/profile_paths.zig");
 const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const mcp_host = @import("../mcp_host/host.zig");
 const mcp_health = @import("../mcp/health.zig");
@@ -513,7 +514,7 @@ pub fn Runtime(comptime App: type) type {
             {
                 _ = try app.session.initializeProfileUsage(
                     app.alloc,
-                    shared_io.getenv("HOME"),
+                    profile_paths.profileUsageHome(null),
                 );
             }
 

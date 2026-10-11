@@ -32,6 +32,7 @@ const image_attachments = @import("../images/image_attachments.zig");
 const hooks = @import("../hooks/hooks.zig");
 const notification_sound = @import("../notifications/sound.zig");
 const io_mod = @import("../shared/io.zig");
+const profile_paths = @import("../shared/profile_paths.zig");
 const shell_snapshot = @import("../terminal/shell_snapshot.zig");
 const session_title_generation = @import("../session/session_title_generation.zig");
 const compactor = @import("../compactor/compactor.zig");
@@ -1761,7 +1762,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     var ctx = AskContext.init(alloc, cfg, options.deps, startup.workspace_root);
     defer ctx.deinit();
     if (options.save_session) {
-        _ = try ctx.session.initializeProfileUsage(alloc, io_mod.getenv("HOME"));
+        _ = try ctx.session.initializeProfileUsage(alloc, profile_paths.profileUsageHome(null));
         ctx.session.attachProfileUsagePublisher(alloc);
     }
     ctx.use_process_interrupt_flag = options.deps.install_headless_interrupt;
@@ -4316,6 +4317,10 @@ fn parseOptionsWithStdin(alloc: Allocator, args: []const [:0]const u8, stdin: St
 }
 
 fn emitHeadlessYoloWarning(alloc: Allocator, options: RunOptions) !void {
+    // Full access still applies. The one-time acknowledgment needs a profile
+    // home. A missing home cannot store it, and that is not a failed ask.
+    if (profile_paths.effectiveHome() == null) return;
+
     if (options.color_enabled and options.deps.stderr_is_tty(options.deps.stderr_ctx)) {
         try options.deps.write_stderr(
             options.deps.stderr_ctx,
@@ -4330,6 +4335,7 @@ fn emitHeadlessYoloWarning(alloc: Allocator, options: RunOptions) !void {
     switch (attempt) {
         .outcome => {},
         .failure => |failure| {
+            if (failure.err == error.HomeNotSet) return;
             var message: std.Io.Writer.Allocating = .init(alloc);
             defer message.deinit();
             try message.writer.print(
@@ -5916,8 +5922,14 @@ test "parse options rejects invalid model effort and fast flag forms" {
     try std.testing.expectEqualStrings("--model --fast", literal.prompt);
 }
 
+fn installHeadlessYoloHome(alloc: Allocator) !*TestAskHome {
+    return TestAskHome.install(alloc, "/tmp/fx-ask-yolo-warning");
+}
+
 test "headless yolo warning reaches stderr before acknowledgment persistence" {
     const alloc = std.testing.allocator;
+    const yolo_home = try installHeadlessYoloHome(alloc);
+    defer yolo_home.deinit();
     var stdout_capture: TestCapture = .{};
     defer stdout_capture.deinit(alloc);
     var stderr_capture: TestCapture = .{};
@@ -5948,6 +5960,8 @@ test "headless yolo warning reaches stderr before acknowledgment persistence" {
 
 test "headless yolo warning precedes startup configuration diagnostics" {
     const alloc = std.testing.allocator;
+    const yolo_home = try installHeadlessYoloHome(alloc);
+    defer yolo_home.deinit();
     var stdout_capture: TestCapture = .{};
     defer stdout_capture.deinit(alloc);
     var stderr_capture: TestCapture = .{};
@@ -5977,6 +5991,8 @@ test "headless yolo warning precedes startup configuration diagnostics" {
 }
 
 test "headless yolo persistence is skipped when warning emission fails" {
+    const yolo_home = try installHeadlessYoloHome(std.testing.allocator);
+    defer yolo_home.deinit();
     TestYoloPersistence.reset();
     defer TestYoloPersistence.reset();
     var stdout_capture: TestCapture = .{};
@@ -6004,6 +6020,8 @@ test "headless yolo persistence is skipped when warning emission fails" {
 
 test "headless yolo warning respects acknowledgment and no-color" {
     const alloc = std.testing.allocator;
+    const yolo_home = try installHeadlessYoloHome(alloc);
+    defer yolo_home.deinit();
     var stdout_capture: TestCapture = .{};
     defer stdout_capture.deinit(alloc);
     var stderr_capture: TestCapture = .{};
@@ -8906,7 +8924,7 @@ test "indeterminate saved auth cleanup keeps the primary result and session id" 
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(probe.borrowers_detached);
     try std.testing.expectEqualStrings(
-        "fx ask: AI_GATEWAY_API_KEY authentication failed · HTTP 401\n",
+        permissions.yolo_warning_text ++ "\nfx ask: AI_GATEWAY_API_KEY authentication failed · HTTP 401\n",
         stderr_capture.bytes.items,
     );
     var parsed = try std.json.parseFromSlice(
@@ -9505,7 +9523,7 @@ test "recovery continuation checks local checkpoint before credentials" {
     );
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
-    try std.testing.expectEqual(@as(usize, 0), stderr_capture.bytes.items.len);
+    try std.testing.expectEqualStrings(permissions.yolo_warning_text ++ "\n", stderr_capture.bytes.items);
     var parsed = try std.json.parseFromSlice(
         std.json.Value,
         alloc,

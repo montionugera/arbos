@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const io_mod = @import("../core/shared/io.zig");
+const profile_paths = @import("../core/shared/profile_paths.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const mem_utils = @import("../core/shared/mem_utils.zig");
 const jsonrpc = @import("jsonrpc.zig");
@@ -474,7 +475,7 @@ pub fn handleNewSession(state: *server.ServerState, alloc: Allocator, msg: *json
     );
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
-    _ = try session_rt.initializeProfileUsage(alloc, io_mod.getenv("HOME"));
+    _ = try session_rt.initializeProfileUsage(alloc, profile_paths.profileUsageHome(state.cfg.home_override));
     if (writable.state.usage) |usage| {
         try session_rt.usage.restore(
             alloc,
@@ -592,7 +593,7 @@ fn startV2Session(
     );
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
-    _ = try session_rt.initializeProfileUsage(alloc, io_mod.getenv("HOME"));
+    _ = try session_rt.initializeProfileUsage(alloc, profile_paths.profileUsageHome(state.cfg.home_override));
     session_rt.usage.restoreLegacyWallDuration(io_mod.milliTimestamp());
     session_rt.configureWebFetchArtifactBlobs(alloc, try v2.childCapability(), v2.id());
     server.cancelAndReapActivePrompt(state);
@@ -1040,7 +1041,7 @@ fn handleRestoreSession(
     );
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
-    _ = try session_rt.initializeProfileUsage(alloc, io_mod.getenv("HOME"));
+    _ = try session_rt.initializeProfileUsage(alloc, profile_paths.profileUsageHome(state.cfg.home_override));
     try session_rt.restoreWithPermissionState(
         alloc,
         durable.conversation_language,

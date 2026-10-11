@@ -47,6 +47,12 @@ pub fn effectiveHome() ?[]const u8 {
     return selectHome(arbosFxHome(), io_mod.getenv("HOME"));
 }
 
+/// Home for the profile usage ledger.
+/// A non-empty override wins. Otherwise `ARBOS_FX_HOME`, then `HOME`.
+pub fn profileUsageHome(override: ?[]const u8) ?[]const u8 {
+    return selectHome(override, effectiveHome());
+}
+
 pub fn rootDir(alloc: Allocator, home: []const u8) ![]u8 {
     return std.fs.path.join(alloc, &.{ home, root_dir_name });
 }
@@ -194,4 +200,34 @@ test "selectHome prefers a non-empty override" {
     try std.testing.expectEqualStrings("/home/user", selectHome("   ", "/home/user").?);
     try std.testing.expectEqualStrings("/home/user", selectHome(null, "/home/user").?);
     try std.testing.expect(selectHome(null, null) == null);
+}
+
+test "profile usage home prefers an override, then ARBOS_FX_HOME, then HOME" {
+    const previous = io_mod.environMap();
+    var environ = std.process.Environ.Map.init(std.testing.allocator);
+    defer environ.deinit();
+    defer restoreTestEnviron(previous);
+    try environ.put("HOME", "/real/home");
+    try environ.put("ARBOS_FX_HOME", "/tmp/fx-home");
+    io_mod.setEnvironMap(&environ);
+
+    try std.testing.expectEqualStrings("/override", profileUsageHome("/override").?);
+    try std.testing.expectEqualStrings("/tmp/fx-home", profileUsageHome("  ").?);
+    try std.testing.expectEqualStrings("/tmp/fx-home", profileUsageHome(null).?);
+    try std.testing.expectEqualStrings("/tmp/fx-home", effectiveHome().?);
+
+    try environ.put("ARBOS_FX_HOME", " \t");
+    try std.testing.expectEqualStrings("/real/home", profileUsageHome(null).?);
+}
+
+fn restoreTestEnviron(previous: ?*const std.process.Environ.Map) void {
+    if (previous) |map| {
+        io_mod.setEnvironMap(map);
+        return;
+    }
+    const held = struct {
+        var map: ?std.process.Environ.Map = null;
+    };
+    if (held.map == null) held.map = std.process.Environ.Map.init(std.heap.page_allocator);
+    io_mod.setEnvironMap(&held.map.?);
 }
