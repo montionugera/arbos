@@ -1,4 +1,0 @@
-# SvelteKit content-hashes everything under here, so the URL changes whenever
-# the bytes do and the cache never needs to ask.
-/_app/immutable/*
-  Cache-Control: public, max-age=31536000, immutable
