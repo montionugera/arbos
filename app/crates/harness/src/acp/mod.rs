@@ -213,7 +213,7 @@ fn fx_static_models() -> Vec<Model> {
     vec![Model {
         id: "glm-5.3".into(),
         label: "glm-5.3".into(),
-        description: Some("engy default".into()),
+        description: None,
         reasoning_levels: Vec::new(),
         options: Vec::new(),
     }]
@@ -2096,9 +2096,23 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
         }
     };
 
-    let model_select: Vec<&Value> = config_options
+    // fx advertises the provider selector first, also with category
+    // "model" (id "provider", names like "Vercel AI Gateway"). The model
+    // catalog is the option whose id is "model". A lone category=model
+    // select (Claude, Codex) still wins when no id "model" is present.
+    let model_option = config_options
         .iter()
-        .find(|o| o.get("category").and_then(Value::as_str) == Some("model"))
+        .find(|o| o.get("id").and_then(Value::as_str) == Some("model"))
+        .or_else(|| {
+            config_options.iter().find(|o| {
+                o.get("category").and_then(Value::as_str) == Some("model")
+                    && !matches!(
+                        o.get("id").and_then(Value::as_str),
+                        Some("provider" | "fast" | "ultrafast")
+                    )
+            })
+        });
+    let model_select: Vec<&Value> = model_option
         .and_then(|o| o.get("options").and_then(Value::as_array))
         .map(|opts| opts.iter().collect())
         .unwrap_or_default();
@@ -2113,7 +2127,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
         // request). Send-side, a chat that saved `default` still matches the
         // advertised value exactly.
         let has_real = raw_ids.iter().any(|id| norm_id(id) != "default");
-        return model_select
+        let mut models: Vec<Model> = model_select
             .iter()
             .filter_map(|o| {
                 let id = o.get("value").and_then(Value::as_str)?;
@@ -2155,6 +2169,34 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 Some(build(id, name, description, options))
             })
             .collect();
+        // The provider option's currentValue is the connection that owns
+        // this session ("engy"), not the first option's display name
+        // ("Vercel AI Gateway"). Stamp it on rows that have no description
+        // of their own, and lead with the session's current model so the
+        // picker default is the model the turn actually uses.
+        if let Some(connection) = config_options.iter().find_map(|option| {
+            (option.get("id").and_then(Value::as_str) == Some("provider"))
+                .then(|| option.get("currentValue").and_then(Value::as_str))
+                .flatten()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        }) {
+            if let Some(current) = model_option
+                .and_then(|option| option.get("currentValue").and_then(Value::as_str))
+                && let Some(index) = models.iter().position(|model| model.id == current)
+                && index != 0
+            {
+                let current_model = models.remove(index);
+                models.insert(0, current_model);
+            }
+            for model in &mut models {
+                // The static fx row says "engy default". The live provider
+                // currentValue is the connection that owns the session, and
+                // it has to win so the chip does not keep the placeholder.
+                model.description = Some(connection.to_owned());
+            }
+        }
+        return models;
     }
 
     // Legacy fallback for agents predating session config options. The
@@ -2940,8 +2982,12 @@ fn config_option_sets(
             .filter_map(|o| o.get("value").and_then(Value::as_str))
             .collect();
 
-        let wanted: Option<Value> = match (kind, category) {
-            ("select", Some("model")) => model
+        let wanted: Option<Value> = match (kind, category, config_id) {
+            // fx's provider, fast, and ultrafast selects also use category
+            // "model". Only the option id "model" (or a catalog that has no
+            // separate provider select) is the model.
+            ("select", Some("model"), "provider" | "fast" | "ultrafast") => None,
+            ("select", Some("model"), _) => model
                 .and_then(|m| pick_model_value(m, &available, context_1m))
                 .map(Value::String),
             // Unattended parity with the retired custom adapters (claude
@@ -2951,7 +2997,7 @@ fn config_option_sets(
             // (approvalPolicy "never" + danger-full-access sandbox), Devin
             // `bypass`. Cursor instead exposes agent/plan/ask — those arrive
             // as a Traits "Mode" option and win when the run selected one.
-            ("select", Some("mode")) => model_options
+            ("select", Some("mode"), _) => model_options
                 .get("mode")
                 .and_then(Value::as_str)
                 .filter(|c| available.contains(c))
@@ -2970,7 +3016,7 @@ fn config_option_sets(
                     .find(|v| available.contains(v))
                     .map(|v| Value::String(v.to_owned()))
                 }),
-            ("select", Some("thought_level")) => efforts
+            ("select", Some("thought_level"), _) => efforts
                 .iter()
                 .find(|c| available.contains(*c))
                 .map(|c| Value::String((*c).to_owned())),
@@ -5841,6 +5887,81 @@ mod tests {
         );
         assert_eq!(pick_fx_binary(None, Some(monorepo.clone())), Some(monorepo));
         assert_eq!(pick_fx_binary(None, None), None);
+    }
+
+    #[test]
+    fn fx_catalog_uses_the_model_option_and_the_connection() {
+        // fx writes the provider select first, with category "model".
+        // Its first option is "Vercel AI Gateway". The session's model is
+        // the later id "model" option, and the connection is that provider
+        // option's currentValue.
+        let response = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "provider",
+                    "name": "Provider",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "engy",
+                    "options": [
+                        { "value": "gateway", "name": "Vercel AI Gateway" },
+                        { "value": "codex", "name": "Codex subscription" },
+                        { "value": "engy", "name": "engy" },
+                    ],
+                },
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "glm-5.3",
+                    "options": [
+                        { "value": "glm-5.2", "name": "glm-5.2" },
+                        { "value": "glm-5.3", "name": "glm-5.3" },
+                    ],
+                },
+                {
+                    "id": "effort",
+                    "name": "Reasoning Effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "auto",
+                    "options": [
+                        { "value": "auto", "name": "default" },
+                        { "value": "high", "name": "High" },
+                    ],
+                },
+            ],
+        });
+        let static_catalog = vec![Model {
+            id: "glm-5.3".into(),
+            label: "glm-5.3".into(),
+            description: Some("engy default".into()),
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+        }];
+        let models = models_from_session(&response, &static_catalog);
+        assert_eq!(models[0].id, "glm-5.3");
+        assert_eq!(models[0].label, "glm-5.3");
+        assert_eq!(models[0].description.as_deref(), Some("engy"));
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            vec!["glm-5.3", "glm-5.2"]
+        );
+        assert!(
+            models
+                .iter()
+                .all(|model| model.description.as_deref() == Some("engy"))
+        );
+        let sets = config_option_sets(&response, Some("glm-5.2"), &["high"], &serde_json::Map::new());
+        assert_eq!(
+            sets,
+            vec![
+                ("model".into(), json!({ "value": "glm-5.2" })),
+                ("effort".into(), json!({ "value": "high" })),
+            ]
+        );
     }
 
     #[test]

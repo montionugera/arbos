@@ -208,6 +208,22 @@ pub fn clamp_reasoning(
 // Pure: labels + traits summary
 // ---------------------------------------------------------------------------
 
+/// Composer chip for fx. The connection that owns the session (fx's
+/// provider `currentValue`, stamped on `description`) is the visible
+/// provider. The suffix is the model id. Effort stays in the popover:
+/// the default ladder's "High" is not the connection that ran the turn.
+pub fn fx_composer_chip(model: &Model) -> (String, Option<String>) {
+    let connection = model
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && !text.contains(char::is_whitespace) && *text != model.id);
+    match connection {
+        Some(connection) => (connection.to_owned(), Some(model.id.clone())),
+        None => (model.label.clone(), None),
+    }
+}
+
 pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
     match level {
         ReasoningLevel::Minimal => "Minimal",
@@ -6361,6 +6377,17 @@ impl Render for Pickers {
         // (context, fast mode, ...) live in the popover. The effort always
         // reads in the muted second tone, default or not (user request).
         let effort = self.effective_reasoning(cx);
+        let (model_label, fx_suffix) = if chip_harness == Some(HarnessId::Fx)
+            && let Some(model) = self.selected_model(cx)
+        {
+            let (label, model_id) = fx_composer_chip(model);
+            (
+                SharedString::from(label),
+                model_id.map(|id| (SharedString::from(id), None)),
+            )
+        } else {
+            (model_label, None)
+        };
         // Render the open popover's body first (mutable borrow), then the
         // chips. Branch/Checkout render in the composer FOOTER row (see
         // `render_footer`), not here.
@@ -6387,7 +6414,12 @@ impl Render for Pickers {
         // brand icon + model name, then the effort as the chip's muted second
         // tone — the ladder's level, else an effort option's choice (Cursor).
         // None for the title picker (titles always run at minimal reasoning).
-        let chip_suffix = effort
+        let chip_suffix = if chip_harness == Some(HarnessId::Fx) && self.title.is_none() {
+            // Connection, then the model id. The effort ladder's "High" is
+            // not the provider that ran the turn.
+            fx_suffix
+        } else {
+            effort
             .filter(|_| self.title.is_none())
             .map(|level| (SharedString::from(reasoning_label(level)), None))
             .or_else(|| {
@@ -6397,7 +6429,8 @@ impl Render for Pickers {
                     .flatten()
                     .and_then(|e| e.labels.get(e.selected).cloned())
                     .map(|label| (label, None))
-            });
+            })
+        };
         let fast = self.selected_model(cx).is_some_and(|model| {
             model.options.iter().any(|option| {
                 fast_mode_values(option).is_some_and(|(on, _)| {
@@ -9757,6 +9790,33 @@ mod tests {
         ];
         assert_eq!(default_model(&models).map(|m| &*m.id), Some("flagship"));
         assert!(default_model(&[]).is_none());
+    }
+
+    #[test]
+    fn fx_chip_shows_the_connection_and_the_model_id() {
+        let model = Model {
+            id: "glm-5.3".into(),
+            label: "glm-5.3".into(),
+            description: Some("engy".into()),
+            reasoning_levels: vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ],
+            options: vec![],
+        };
+        assert_eq!(
+            fx_composer_chip(&model),
+            ("engy".into(), Some("glm-5.3".into()))
+        );
+        let unnamed = Model {
+            description: Some("engy default".into()),
+            ..model.clone()
+        };
+        assert_eq!(
+            fx_composer_chip(&unnamed),
+            ("glm-5.3".into(), None)
+        );
     }
 
     #[test]

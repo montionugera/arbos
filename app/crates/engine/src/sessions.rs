@@ -3223,6 +3223,23 @@ async fn drive_run(
                     *resolved = true;
                 }
             }
+            // A user Stop that never streamed still has to read as stopped.
+            // Leaving only the user prompt makes the turn look like it is
+            // waiting on the model. A parked teardown (the idle reaper) is
+            // not a user Stop: `turn_was_active` is false there.
+            let visible_reply = folded.iter().any(|part| {
+                matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty())
+            });
+            if *status == DoneStatus::Interrupted
+                && interrupted
+                && turn_was_active
+                && !visible_reply
+            {
+                folded.push(MessagePart::Text {
+                    id: new_id(),
+                    text: "Stopped".into(),
+                });
+            }
             // A Done landing on a PARKED session with nothing streamed (the
             // idle reaper's or an interrupt's own teardown) has no entry to
             // finalize — writing one would leave an empty aborted stub.
