@@ -1,6 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const codec = @import("chat_completions_protocol.zig");
 const client_mod = @import("client.zig");
+const stream_idle = @import("stream_idle.zig");
 const definitions = @import("../core/config/configured_provider.zig");
 const streams = @import("../core/agent/stream_provider.zig");
 const provider_set = @import("../core/gateway/provider_set.zig");
@@ -163,7 +165,14 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
         return err;
     };
     watch.stop();
-    if (http.connection) |connection| try watch.start(request.cancel_flag, if (response.head.status == .ok) request.deadline else phase_deadline(30_000, request.deadline), connection.stream_writer.stream);
+    // The agent runtime sends no absolute deadline, so a provider that goes
+    // silent after `200 OK` is bounded only by the sliding idle budget.
+    var idle_budget: ?stream_idle.Budget = if (response.head.status == .ok)
+        if (streamIdleTimeoutMs()) |timeout_ms| stream_idle.Budget.init(timeout_ms) else null
+    else
+        null;
+    const idle: ?*stream_idle.Budget = if (idle_budget) |*budget| budget else null;
+    if (http.connection) |connection| try watch.startWithIdleBudget(request.cancel_flag, if (response.head.status == .ok) request.deadline else phase_deadline(30_000, request.deadline), idle, connection.stream_writer.stream);
     var retry_after: ?u64 = null;
     var headers = response.head.iterateHeaders();
     while (headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "retry-after")) {
@@ -199,8 +208,21 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
     }
     var limits: codec.Limits = .{};
     if (request.content_capture_limit) |limit| limits.content_bytes = @min(limit, limits.content_bytes);
-    return codec.consume_stream(alloc, reader, request.data(), limits, request.events, request.cancel_flag);
+    const budget = idle orelse return codec.consume_stream(alloc, reader, request.data(), limits, request.events, request.cancel_flag);
+    var activity_buffer: [16 * 1024]u8 = undefined;
+    var tracked = stream_idle.ActivityReader.init(reader, budget, &activity_buffer);
+    return codec.consume_stream(alloc, &tracked.interface, request.data(), limits, request.events, request.cancel_flag) catch |err| budget.failure(err);
 }
+
+/// Idle budget for the streaming body; tests override it to keep stalls short.
+fn streamIdleTimeoutMs() ?i64 {
+    if (builtin.is_test) {
+        if (test_stream_idle_timeout_ms) |override| return override;
+    }
+    return stream_idle.configuredTimeoutMs();
+}
+
+var test_stream_idle_timeout_ms: ??i64 = null;
 
 /// The returned entry borrows its strings; fetch_catalog replaces them with owned copies.
 fn metadata_entry(metadata: definitions.ModelMetadata) catalog.ModelCatalogEntry {

@@ -11,6 +11,7 @@ const types = @import("../core/shared/types.zig");
 const atomic_value = @import("../core/mcp/atomic_value.zig");
 const json_comparison = @import("../core/shared/json_comparison.zig");
 const sse = @import("sse.zig");
+const stream_idle = @import("stream_idle.zig");
 
 pub fn isRetryableGatewayError(err: anyerror) bool {
     return err == error.HttpConnectionClosing or
@@ -567,7 +568,7 @@ fn fetchGatewayJsonAtUrlCore(
 
     var cancel_watch_done = std.atomic.Value(bool).init(false);
     const cancel_watcher = if (req.connection) |conn|
-        try spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, null, null, null, conn.stream_writer.stream)
+        try spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, null, null, null, null, conn.stream_writer.stream)
     else
         null;
     defer {
@@ -1615,7 +1616,7 @@ fn streamGatewayCompletionCoreWithOptions(
         var connected_watch = ConnectedRequestWatch.init(core_options.response_head_timing);
         const cancel_watcher = if (watch_connected_socket)
             if (req.connection) |conn|
-                spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, &system_resumed, null, &connected_watch, conn.stream_writer.stream) catch |err| {
+                spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, &system_resumed, null, null, &connected_watch, conn.stream_writer.stream) catch |err| {
                     debug_trace.eventf("gateway", "cancel_watcher_spawn_error", trace_ctx, "attempt={d} err={s}", .{ attempt + 1, @errorName(err) });
                     return @as(anyerror!StreamResult, err);
                 }
@@ -1790,7 +1791,7 @@ fn streamGatewayCompletionCoreWithOptions(
                 .raw = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake).raw.addDuration(.fromMilliseconds(pool_drain_budget_ms)),
             };
             const drain_thread = if (req.connection) |conn|
-                spawn_gateway_cancel_watcher(&drain_watch_done, cancel_flag, null, drain_deadline, null, conn.stream_writer.stream) catch null
+                spawn_gateway_cancel_watcher(&drain_watch_done, cancel_flag, null, drain_deadline, null, null, conn.stream_writer.stream) catch null
             else
                 null;
             const drain_ok = if (body_reader.discardRemaining()) |drained_bytes| blk: {
@@ -2110,6 +2111,7 @@ const GatewayCancelWatcher = struct {
         cancel_flag: *std.atomic.Value(bool),
         system_resumed: ?*std.atomic.Value(bool),
         deadline: ?std.Io.Clock.Timestamp,
+        idle: ?*stream_idle.Budget,
         connected_watch: ?*ConnectedRequestWatch,
         stream: std.Io.net.Stream,
     ) void {
@@ -2142,6 +2144,11 @@ const GatewayCancelWatcher = struct {
                     return;
                 }
             }
+            if (idle) |budget| if (budget.expired()) {
+                budget.trip();
+                stream.shutdown(io_mod.getIo(), .both) catch {};
+                return;
+            };
             if (connected_watch) |watch| {
                 const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
                 if (watch.response_head_expired(now) and watch.win_response_head_timeout()) {
@@ -2187,7 +2194,7 @@ pub fn spawnHttpCancelWatcher(
     cancel_flag: *std.atomic.Value(bool),
     stream: std.Io.net.Stream,
 ) !std.Thread {
-    return spawn_gateway_cancel_watcher(done, cancel_flag, null, null, null, stream);
+    return spawn_gateway_cancel_watcher(done, cancel_flag, null, null, null, null, stream);
 }
 
 pub fn spawnHttpCancelWatcherBounded(
@@ -2196,7 +2203,7 @@ pub fn spawnHttpCancelWatcherBounded(
     deadline: std.Io.Clock.Timestamp,
     stream: std.Io.net.Stream,
 ) !std.Thread {
-    return spawn_gateway_cancel_watcher(done, cancel_flag, null, deadline, null, stream);
+    return spawn_gateway_cancel_watcher(done, cancel_flag, null, deadline, null, null, stream);
 }
 
 /// One shared concrete opener result so every backend reuses the same
@@ -2259,6 +2266,14 @@ pub const CancelWatch = struct {
             try spawnHttpCancelWatcher(&self.done, cancel, connection);
     }
 
+    /// Like `start`, but also closes the connection when the streaming body
+    /// stays silent past `idle` (see `stream_idle.Budget`). Whichever of the
+    /// absolute deadline and the sliding idle budget fires first wins.
+    pub fn startWithIdleBudget(self: *CancelWatch, cancel: *std.atomic.Value(bool), deadline: ?std.Io.Clock.Timestamp, idle: ?*stream_idle.Budget, connection: std.Io.net.Stream) !void {
+        self.done.store(false, .seq_cst);
+        self.thread = try spawn_gateway_cancel_watcher(&self.done, cancel, null, deadline, idle, null, connection);
+    }
+
     pub fn stop(self: *CancelWatch) void {
         self.done.store(true, .seq_cst);
         if (self.thread) |thread| thread.join();
@@ -2271,6 +2286,7 @@ fn spawn_gateway_cancel_watcher(
     cancel_flag: *std.atomic.Value(bool),
     system_resumed: ?*std.atomic.Value(bool),
     deadline: ?std.Io.Clock.Timestamp,
+    idle: ?*stream_idle.Budget,
     connected_watch: ?*ConnectedRequestWatch,
     stream: std.Io.net.Stream,
 ) !std.Thread {
@@ -2282,6 +2298,7 @@ fn spawn_gateway_cancel_watcher(
         cancel_flag,
         system_resumed,
         deadline,
+        idle,
         connected_watch,
         stream,
     });
