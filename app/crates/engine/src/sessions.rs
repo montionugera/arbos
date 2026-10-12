@@ -571,7 +571,7 @@ impl SessionsEngine {
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)
             .map_err(|error| EngineError::Other(error.to_string()))?;
-        // `/goal` updates the project and stays in the transcript.
+        // `/goal` records the goal and Main receives the spawn prompt.
         // `/skill` runs, then the agent receives the skill's steps.
         // The typed line is what the transcript keeps.
         let shown = request.prompt.clone();

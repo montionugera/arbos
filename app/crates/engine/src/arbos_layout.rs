@@ -26,6 +26,7 @@ Read `.arbos/context/GOALS.md` first. \
 Write what you learn to `.arbos/context/`. \
 Keep `status.md` current. \
 When you rewrite context/status.md, keep every checkbox line that is already there. \
+A `/goal` line already includes the workers to spawn. Send them at once. Do not wait for `/skill`. \
 An Active goal in GOALS.md stays active after a worker reports. Do not remove it.";
 
 pub const WORKER_PROMPT: &str = "\
@@ -315,7 +316,8 @@ pub fn goal_view(project: &Path) -> GoalView {
     GoalView { title, skill }
 }
 
-/// `/goal …` records the goal. `/skill …` runs that skill, then tells Main.
+/// `/goal …` records the goal and tells Main to send the workers.
+/// `/skill …` runs that skill, then tells Main.
 pub fn prepare_composer_command(project: &Path, prompt: &str) -> ComposerCommand {
     if !root_of(project).join("project.toml").is_file() {
         return ComposerCommand::Passthrough;
@@ -326,10 +328,9 @@ pub fn prepare_composer_command(project: &Path, prompt: &str) -> ComposerCommand
         if title.is_empty() {
             return ComposerCommand::Passthrough;
         }
-        return if start_goal(project, title).is_ok() {
-            ComposerCommand::Local
-        } else {
-            ComposerCommand::Passthrough
+        return match begin_goal(project, title) {
+            Ok(prompt) => ComposerCommand::Model(prompt),
+            Err(_) => ComposerCommand::Passthrough,
         };
     }
     if let Some(rest) = trimmed.strip_prefix("/skill ") {
@@ -344,19 +345,26 @@ pub fn prepare_composer_command(project: &Path, prompt: &str) -> ComposerCommand
     ComposerCommand::Passthrough
 }
 
-fn start_goal(project: &Path, title: &str) -> Result<(), String> {
+/// Record the goal, run the split skill, and hand Main the spawn prompt.
+/// The transcript keeps the typed `/goal` line. No second command is required.
+fn begin_goal(project: &Path, title: &str) -> Result<String, String> {
     let _guard = layout_lock();
     if !root_of(project).join("project.toml").is_file() {
         return Err("not a project".into());
     }
-    write_goals(project, title, None)?;
-    if let Ok(spec) = load_skill(project, "split") {
-        ensure_step(project, &skill_step(&spec.name), false)?;
-        for (_, _, line) in &spec.workers {
-            ensure_step(project, line, false)?;
-        }
+    let spec = load_skill(project, "split")?;
+    let path = context_file(project, &spec.write_path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    fs::write(&path, format!("{}\n", spec.write_line)).map_err(|e| e.to_string())?;
+    write_goals(project, title, Some(&spec.name))?;
+    ensure_step(project, &skill_step(&spec.name), true)?;
+    for (_, _, line) in &spec.workers {
+        // A new goal opens these steps again so the checklist can advance.
+        set_step(project, line, false)?;
+    }
+    Ok(skill_prompt(&spec, Some(title)))
 }
 
 fn run_skill(project: &Path, name: &str) -> Result<String, String> {
@@ -393,7 +401,10 @@ fn skill_prompt(spec: &SkillSpec, goal: Option<&str>) -> String {
     ));
     prompt.push_str("The goal stays active. Do not edit GOALS.md.\n");
     prompt.push_str(
-        "Spawn these workers at once, before you wait for any of them. Do not write their files yourself.\n",
+        "The person already started the goal. Do not wait for another command.\n",
+    );
+    prompt.push_str(
+        "Spawn these workers at once, before you wait for any of them, even if their files already exist. Do not write their files yourself.\n",
     );
     for (name, file, line) in &spec.workers {
         prompt.push_str(&format!(
@@ -497,6 +508,15 @@ fn goal_title_unlocked(project: &Path) -> Option<String> {
 }
 
 fn ensure_step(project: &Path, text: &str, done: bool) -> Result<(), String> {
+    set_step_inner(project, text, done, false)
+}
+
+/// Set a checklist line, including opening one that was already done.
+fn set_step(project: &Path, text: &str, done: bool) -> Result<(), String> {
+    set_step_inner(project, text, done, true)
+}
+
+fn set_step_inner(project: &Path, text: &str, done: bool, force: bool) -> Result<(), String> {
     let path = root_of(project).join("context").join("status.md");
     let mut current = fs::read_to_string(&path).unwrap_or_else(|_| "# Status\n".to_owned());
     let mark = if done { "- [x]" } else { "- [ ]" };
@@ -509,7 +529,7 @@ fn ensure_step(project: &Path, text: &str, done: bool) -> Result<(), String> {
             .or_else(|| trimmed.strip_prefix("- [x]"))
             .or_else(|| trimmed.strip_prefix("- [X]"));
         if rest.is_some_and(|rest| rest.trim() == text) {
-            if done {
+            if done || force {
                 *line = format!("{mark} {text}");
             }
             found = true;
