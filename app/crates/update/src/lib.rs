@@ -43,6 +43,10 @@ use tokio::sync::watch;
 #[cfg(windows)]
 pub mod windows;
 
+/// Ed25519 signing and verification, and the public half compiled into the
+/// build (`update-key.pub` beside this crate).
+pub mod sign;
+
 /// The version compiled into this binary (the workspace version).
 pub const fn current_version() -> &'static str {
     env!("ARBOS_VERSION")

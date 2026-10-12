@@ -5,8 +5,16 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# The tool CI signs and publishes with. The library is what the app verifies
+# with, so both sides of an update agree on the signature by sharing this
+# crate rather than by agreeing to write the same base64 twice.
+[[bin]]
+name = "arbos-updatectl"
+path = "src/bin/updatectl.rs"
+
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -14,6 +22,10 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# Ed25519 and SHA-256 for the update signature. Apple is not in this path at
+# all, which is the point: a payload verifies on a Mac with no Developer ID
+# anywhere near it.
+ring = "0.17"
 
 [dev-dependencies]
 tempfile.workspace = true
