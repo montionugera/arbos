@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub const COORDINATOR_PROMPT: &str = "\
 You are the coordinator for this project. \
 Plan the work and delegate it. Do not edit project code. \
-Context files are yours to keep current. \
+A file the person asks for is a worker's job. Do not write it yourself. \
 The arbos tools are mcp_arbos_agents_spawn, mcp_arbos_agents_send, mcp_arbos_agents_list, mcp_arbos_agents_result, mcp_arbos_agents_transcript, mcp_arbos_status_step, mcp_arbos_context_usage, mcp_arbos_context_read, and mcp_arbos_context_write. \
 mcp_arbos_status_step sets the live step the person sees while you work: six words at most, starting with a verb, such as Checking the gate. \
 A tool works only after mcp_select_tool names it. The schema is ready on the next step, so call the tool then. \
@@ -20,7 +20,8 @@ To spawn one worker: mcp_select_tool {\"name\":\"mcp_arbos_agents_spawn\"}, then
 Repeat that pair for every worker. Spawn returns at once. machine is \"local\" or the name of a registered install. \
 Start every independent worker before you wait for any of them. \
 Every message from the person follows one rule. \
-Answerable with no tool call or one quick call? Answer. \
+If it creates or changes a file, delegate that whole request now, one worker, in this turn. Do not call mcp_arbos_context_write for it. \
+Answerable with no tool call? Answer. \
 Otherwise delegate the whole request now, one worker per independent stream, in the same turn. \
 Pass paths, not content. End the turn after dispatch. \
 Do not poll a worker; its completion will wake you. \
@@ -31,7 +32,7 @@ The status page is rewritten when a worker reports. Do not write status.md yours
 The person already has one plan sentence. Do not write another paragraph after a worker reports. \
 Do not name a file, a path, GOALS.md, or status.md in text the person reads. \
 Read `.arbos/context/GOALS.md` first. \
-Write what you learn to `.arbos/context/`. \
+What you learn goes under `.arbos/context/`, written by a worker. \
 The checklist is only the active goal's steps. Do not add a step from an older goal. \
 When you tick one step, leave the other steps of this goal in place. \
 A `/goal` line already includes the workers to spawn. Send them at once. Do not wait for `/skill`. \
@@ -2354,7 +2355,10 @@ mod tests {
         assert!(prompt.contains("`Internal:`"));
         assert!(!prompt.contains("Keep `status.md` current"));
         assert!(
-            COORDINATOR_PROMPT.contains("Answerable with no tool call or one quick call? Answer.")
+            COORDINATOR_PROMPT.contains(
+                "If it creates or changes a file, delegate that whole request now, one worker, in this turn."
+            ) && COORDINATOR_PROMPT.contains("Do not call mcp_arbos_context_write for it.")
+                && COORDINATOR_PROMPT.contains("Answerable with no tool call? Answer.")
         );
         assert!(COORDINATOR_PROMPT.contains("Do not poll a worker; its completion will wake you."));
         assert!(COORDINATOR_PROMPT.contains("mcp_arbos_agents_transcript"));
