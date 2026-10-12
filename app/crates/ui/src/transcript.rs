@@ -1306,6 +1306,95 @@ thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { s
 /// into ONE collapsed [`RowKind::ToolGroup`], so only the reply text (the
 /// trailing run of text parts) stays a visible row.
 
+/// A sentence the person can read. File paths and status-file names stay off Main.
+fn mentions_file_name(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains(".md") || lower.contains(".arbos") || text.contains('/')
+}
+
+fn first_clean_sentence(text: &str) -> Option<String> {
+    for raw in text.split('\n') {
+        let line = raw
+            .trim()
+            .trim_start_matches(|c: char| matches!(c, '-' | '*' | '>' | '#'))
+            .trim();
+        if line.len() < 12 || mentions_file_name(line) {
+            continue;
+        }
+        let sentence = line.split(". ").next().unwrap_or(line).trim();
+        if sentence.len() < 12 || mentions_file_name(sentence) || sentence.chars().count() > 160
+        {
+            continue;
+        }
+        let mut out = sentence.to_owned();
+        if !out.ends_with('.') && !out.ends_with('!') && !out.ends_with('?') {
+            out.push('.');
+        }
+        return Some(out);
+    }
+    None
+}
+
+/// Main shows one plan sentence. A paragraph that names a file is not shown.
+fn plan_entry(entry: &SessionMessageEntry) -> SessionMessageEntry {
+    let mut copy = entry.clone();
+    let sentence = copy.parts.iter().find_map(|part| match part {
+        MessagePart::Text { text, .. } => first_clean_sentence(text),
+        _ => None,
+    });
+    let mut placed = false;
+    copy.parts = copy
+        .parts
+        .into_iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { id, .. } => {
+                if placed {
+                    return None;
+                }
+                placed = true;
+                sentence
+                    .clone()
+                    .map(|text| MessagePart::Text { id, text })
+            }
+            other => Some(other),
+        })
+        .collect();
+    copy
+}
+
+fn user_plain_text(entry: &SessionMessageEntry) -> String {
+    entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The current goal turn. Older turns stay above it and do not push this line off.
+fn goal_turn_start(entries: &[SessionMessageEntry]) -> usize {
+    entries
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, entry)| {
+            if entry.role != MessageRole::User {
+                return None;
+            }
+            let trimmed = user_plain_text(entry);
+            let trimmed = trimmed.trim();
+            if trimmed.starts_with("/goal ") || trimmed == "/goal" {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
+}
+
 fn worker_report_line(entry: &SessionMessageEntry) -> bool {
     entry.role == MessageRole::System
         && entry.parts.iter().any(|part| match part {
@@ -4830,12 +4919,23 @@ impl Transcript {
                 .chat_id
                 .as_deref()
                 .is_some_and(|id| id.ends_with("-main"));
-            // Main keeps the plan on screen after the workers report.
-            // Each Worked line stays the short first line.
+            // The current /goal turn stays in view. Main shows one plan sentence
+            // with the short Worked lines. A file-path paragraph is left out.
+            let turn_at = if main_chat {
+                goal_turn_start(entries)
+            } else {
+                0
+            };
+            let entries = &entries[turn_at..];
             for entry in entries.iter() {
+                let planned = (main_chat && entry.role == MessageRole::Assistant)
+                    .then(|| plan_entry(entry));
                 let shortened = (main_chat && worker_report_line(entry))
                     .then(|| shorten_worker_report(entry));
-                let entry = shortened.as_ref().unwrap_or(entry);
+                let entry = planned
+                    .as_ref()
+                    .or(shortened.as_ref())
+                    .unwrap_or(entry);
                 if shortened.is_none()
                     && !self.compact_mode
                     && let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id))

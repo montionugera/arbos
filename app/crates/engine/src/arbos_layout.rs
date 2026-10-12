@@ -19,9 +19,11 @@ To spawn one worker: mcp_select_tool {\"name\":\"mcp_arbos_agents_spawn\"}, then
 Repeat that pair for every worker. Spawn returns at once. machine is \"local\" or the name of a registered install. \
 Start every independent worker before you wait for any of them. \
 When a worker finishes you see a Worked line. \
-A Worked line can also be a subscription wake, with no message from the person. Answer that wake in a few sentences. \
-Then summarise in a few sentences and tick the matching line in context/status.md with mcp_arbos_context_write. \
+A Worked line can also be a subscription wake, with no message from the person. Answer that wake in one sentence. \
+Tick the matching line in context/status.md with mcp_arbos_context_write. \
 Do not tick a line before that worker reports. \
+The person already has one plan sentence. Do not write another paragraph after a worker reports. \
+Do not name a file, a path, GOALS.md, or status.md in text the person reads. \
 Read `.arbos/context/GOALS.md` first. \
 Write what you learn to `.arbos/context/`. \
 Keep `status.md` current. \
@@ -418,7 +420,40 @@ fn skill_prompt(spec: &SkillSpec, goal: Option<&str>) -> String {
         prompt.push_str(&spec.body);
         prompt.push('\n');
     }
+    let sentence = worker_plan_sentence(&spec.workers);
+    prompt.push_str(&format!(
+        "The only sentence the person reads from you is: {sentence}\n"
+    ));
+    prompt.push_str(
+        "Write that sentence once. Do not write a second sentence. Do not name a file, a path, GOALS.md, or status.md.\n",
+    );
     prompt
+}
+
+fn worker_plan_sentence(workers: &[(String, String, String)]) -> String {
+    let names: Vec<String> = workers
+        .iter()
+        .filter_map(|(name, _, _)| {
+            let name = name.trim();
+            let mut chars = name.chars();
+            let first = chars.next()?;
+            Some(first.to_uppercase().collect::<String>() + chars.as_str())
+        })
+        .collect();
+    match names.as_slice() {
+        [] => "The workers are on this goal.".to_owned(),
+        [one] => format!("{one} is on this goal."),
+        [first, second] => format!("{first} and {} are on this goal.", second.to_lowercase()),
+        [first, rest @ ..] => {
+            let mut middle: Vec<String> = rest[..rest.len() - 1]
+                .iter()
+                .map(|name| name.to_lowercase())
+                .collect();
+            middle.insert(0, first.clone());
+            let last = rest[rest.len() - 1].to_lowercase();
+            format!("{} and {last} are on this goal.", middle.join(", "))
+        }
+    }
 }
 
 struct SkillSpec {
