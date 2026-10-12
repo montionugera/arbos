@@ -1070,11 +1070,13 @@ impl Shell {
                     row.child(
                         div()
                             .absolute()
-                            .top(px(-1.0))
-                            .right(px(-6.0))
-                            .size(px(8.0))
+                            .top(px(0.0))
+                            .right(px(0.0))
+                            .size(px(9.0))
                             .rounded_full()
-                            .bg(theme.accent),
+                            .border_1()
+                            .border_color(theme.background)
+                            .bg(theme.warning),
                     )
                 }),
             )
