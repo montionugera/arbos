@@ -9619,15 +9619,14 @@ impl Shell {
     }
 
     /// The "Check for Updates…" dialog: checking, then the outcome, which
-    /// stays live (download progress, ready to restart) while it is open.
-    #[allow(unreachable_code)]
+    /// stays live (download progress, ready to update) while it is open.
+    /// Revived beside the footer's Update chip: the dialog is the verbose
+    /// surface, the chip is the one-press surface.
     fn render_update_prompt(
         &mut self,
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let _ = (viewport, cx);
-        return None;
         use crate::app_update::{AppUpdate, Flow, Prompt};
         let update = AppUpdate::global(cx)?;
         let theme = Theme::of(cx).for_popup();

@@ -1,6 +1,7 @@
 //! Desktop self-update: the app's own release checker plus the download /
-//! install lifecycle behind the sidebar update strip, "Check for Updates…"
-//! (macOS app menu; the account menu elsewhere) and install-on-quit.
+//! install lifecycle behind the project window's footer Update chip (beside
+//! the branch and pull-request pills), "Check for Updates…" (macOS app menu;
+//! the account menu elsewhere) and install-on-quit.
 //!
 //! The checker runs in this process against this binary's version. The
 //! engine keeps its own checker for daemons and remote reporting, but the UI
@@ -19,9 +20,15 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{App, AppContext as _, Context, Entity, Global, SharedString, Task};
+use gpui::prelude::*;
+use gpui::{
+    AnyElement, App, AppContext as _, Context, Entity, Global, IntoElement, SharedString,
+    Styled as _, Task, div, px,
+};
 use gpui_tokio::Tokio;
 use zeron_update::{InstallKind, UpdateBlocker, UpdateStatus, Updater};
+
+use crate::theme::Theme;
 
 /// Download/install lifecycle of the newest release in this process.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,9 +78,7 @@ pub enum StripAction {
     /// Explain why this install can't update itself (dialog).
     Explain,
     /// Advisory installs: open the releases page (unmanaged) and dismiss.
-    Advise {
-        open_releases: bool,
-    },
+    Advise { open_releases: bool },
 }
 
 /// What one press of the strip's Update button does, state by state.
@@ -278,8 +283,7 @@ impl AppUpdate {
         };
         // (bytes moved, total when known) as the staging path reports it. A
         // watch rather than a queue: only the newest report renders.
-        let (progress_tx, mut progress_rx) =
-            tokio::sync::watch::channel((0u64, None::<u64>));
+        let (progress_tx, mut progress_rx) = tokio::sync::watch::channel((0u64, None::<u64>));
         let sink: zeron_update::ProgressFn = {
             let progress_tx = progress_tx.clone();
             std::sync::Arc::new(move |moved: u64, total: Option<u64>| {
@@ -499,6 +503,29 @@ impl AppUpdate {
             latest,
         ))
     }
+
+    /// Test-only: as if the checker had found `version` and its download
+    /// verified and staged — the state the footer chip and the prompt render
+    /// from. The install is an app bundle, so the desktop update path (and
+    /// the footer chip with it) is in play.
+    #[cfg(test)]
+    pub(crate) fn stage_for_test(&mut self, version: &str) {
+        self.install = InstallKind::MacApp {
+            bundle: PathBuf::from("/Applications/Arbos.app"),
+        };
+        self.blocker = None;
+        self.status = Some(UpdateStatus {
+            current_version: zeron_update::current_version().to_string(),
+            latest_version: Some(version.to_owned()),
+            update_available: true,
+            checked_at: None,
+            error: None,
+        });
+        self.flow = Flow::Ready {
+            version: version.to_owned(),
+            staged: PathBuf::from("/tmp/Arbos.app"),
+        };
+    }
 }
 
 /// Label + click action of the strip. Self-updating installs have one
@@ -578,6 +605,128 @@ fn progress_text(moved: u64, total: Option<u64>) -> String {
         Some(total) => format!("{} of {}", human_bytes(moved), human_bytes(total)),
         None => human_bytes(moved),
     }
+}
+
+/// What the footer bar's Update chip shows for `flow`, with the newest
+/// release named `latest`. Every state that can install names the version it
+/// installs; a failure keeps the verdict and its one-sentence reason.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FooterChip {
+    pub label: SharedString,
+    /// The failure tone (danger instead of accent).
+    pub failed: bool,
+    /// Whether a press does something; false only while relaunching.
+    pub pressable: bool,
+}
+
+pub fn footer_chip(flow: &Flow, latest: &str) -> FooterChip {
+    match flow {
+        Flow::Idle => FooterChip {
+            label: format!("Update to {latest}").into(),
+            failed: false,
+            pressable: true,
+        },
+        Flow::Downloading {
+            version,
+            moved,
+            total,
+            relaunch,
+        } => {
+            // The progress a person reads is in the chip itself; the press
+            // stays live so one more click makes the finished download
+            // restart the app.
+            let mut label = format!("Updating to {version}…");
+            if let Some(moved) = moved {
+                label.push(' ');
+                label.push_str(&progress_text(*moved, *total));
+            }
+            if *relaunch {
+                label.push_str(" — restarts when done");
+            }
+            FooterChip {
+                label: label.into(),
+                failed: false,
+                pressable: true,
+            }
+        }
+        Flow::Ready { version, .. } => FooterChip {
+            label: format!("Update to {version} — restarts Arbos").into(),
+            failed: false,
+            pressable: true,
+        },
+        Flow::Failed { message, .. } => FooterChip {
+            label: format!("Update failed: {message}").into(),
+            failed: true,
+            pressable: true,
+        },
+        Flow::Installed => FooterChip {
+            label: "Restarting…".into(),
+            failed: false,
+            pressable: false,
+        },
+    }
+}
+
+/// The Update chip the project window's footer bar renders beside the branch
+/// and pull-request pills: one press runs the whole lifecycle
+/// ([`update_click`]), with the download's progress in the chip itself.
+/// Hidden while this install can't update itself, while no newer release is
+/// known, or while the running version is already the newest.
+pub fn footer_update_chip(theme: &Theme, cx: &mut App) -> Option<AnyElement> {
+    let update = AppUpdate::global(cx)?;
+    // Read in a block so the entity borrow ends before any later `cx` use.
+    let (flow, latest) = {
+        let this = update.read(cx);
+        if !this.self_updating() {
+            return None;
+        }
+        let latest = this.available()?.to_owned();
+        (this.flow().clone(), latest)
+    };
+    let chip = footer_chip(&flow, &latest);
+    // Follow the selected spectrum with a low-emphasis glass tint rather
+    // than painting the bright text accent as a solid slab — the same tones
+    // the sidebar strip used, sized to sit beside the footer's pills.
+    let (tone, wash, wash_hover) = if chip.failed {
+        (
+            theme.danger,
+            theme.danger.opacity(0.14),
+            theme.danger.opacity(0.22),
+        )
+    } else {
+        (theme.accent, theme.accent_wash, theme.accent.opacity(0.16))
+    };
+    let button = div()
+        .id("update-now-button")
+        .debug_selector(|| "update-now-button".into())
+        .flex_none()
+        .max_w(px(320.0))
+        .h(px(20.0))
+        .px(px(8.0))
+        .rounded(px(6.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .text_size(crate::typography::ui_rems(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(tone)
+        .bg(wash)
+        .overflow_hidden()
+        .child(div().min_w_0().truncate().child(chip.label));
+    let button = if chip.pressable {
+        let update = update.clone();
+        button
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label("Update Arbos")
+            .hover(move |s| s.bg(wash_hover))
+            .on_click(move |_, _, cx| {
+                update.update(cx, |update, cx| update.update_now(cx));
+            })
+    } else {
+        button
+    };
+    Some(button.into_any_element())
 }
 
 /// Bytes as a person reads them: `812 B`, `4 KB`, `34.2 MB`, `91 MB`, `1.4 GB`.
@@ -755,13 +904,86 @@ mod tests {
         assert_eq!(human_bytes(34 * 1024 * 1024), "34 MB");
         assert_eq!(human_bytes(91 * 1024 * 1024), "91 MB");
         assert_eq!(human_bytes(36071014), "34.4 MB");
-        assert_eq!(human_bytes((1.4 * 1024.0 * 1024.0 * 1024.0) as u64), "1.4 GB");
+        assert_eq!(
+            human_bytes((1.4 * 1024.0 * 1024.0 * 1024.0) as u64),
+            "1.4 GB"
+        );
         assert_eq!(
             progress_text(34 * 1024 * 1024, Some(91 * 1024 * 1024)),
             "34 MB of 91 MB"
         );
         // A stream nobody sized still shows how much has arrived.
         assert_eq!(progress_text(34 * 1024 * 1024, None), "34 MB");
+    }
+
+    #[test]
+    fn footer_chip_names_the_version_it_installs_in_every_state() {
+        // The state the person saw: staged, one press installs it.
+        let ready = Flow::Ready {
+            version: "0.2.112.2621".into(),
+            staged: PathBuf::from("/tmp/Arbos.app"),
+        };
+        assert_eq!(
+            footer_chip(&ready, "0.2.112.2621"),
+            FooterChip {
+                label: SharedString::from("Update to 0.2.112.2621 — restarts Arbos"),
+                failed: false,
+                pressable: true,
+            }
+        );
+        // Found but not started: the press names where it goes.
+        assert_eq!(
+            footer_chip(&Flow::Idle, "0.2.112.2621").label,
+            SharedString::from("Update to 0.2.112.2621")
+        );
+        // Streaming: the version stays, the progress rides along.
+        let mid = Flow::Downloading {
+            version: "0.2.112.2621".into(),
+            moved: Some(34 * 1024 * 1024),
+            total: Some(91 * 1024 * 1024),
+            relaunch: false,
+        };
+        assert_eq!(
+            footer_chip(&mid, "0.2.112.2621").label,
+            SharedString::from("Updating to 0.2.112.2621… 34 MB of 91 MB")
+        );
+        let relaunching = Flow::Downloading {
+            version: "0.2.112.2621".into(),
+            moved: Some(34 * 1024 * 1024),
+            total: Some(91 * 1024 * 1024),
+            relaunch: true,
+        };
+        assert_eq!(
+            footer_chip(&relaunching, "0.2.112.2621").label,
+            SharedString::from("Updating to 0.2.112.2621… 34 MB of 91 MB — restarts when done")
+        );
+        // A refusal or failure keeps its one sentence and reads as danger;
+        // the press retries.
+        let failed = Flow::Failed {
+            version: "0.2.112.2621".into(),
+            message: "the update is not signed by Arbos: arbos-0.2.112.2621-macos-arm64-app.tar.gz"
+                .into(),
+        };
+        assert_eq!(
+            footer_chip(&failed, "0.2.112.2621"),
+            FooterChip {
+                label: SharedString::from(
+                    "Update failed: the update is not signed by Arbos: \
+                     arbos-0.2.112.2621-macos-arm64-app.tar.gz"
+                ),
+                failed: true,
+                pressable: true,
+            }
+        );
+        // On its way out there is nothing left to press.
+        assert_eq!(
+            footer_chip(&Flow::Installed, "0.2.112.2621"),
+            FooterChip {
+                label: SharedString::from("Restarting…"),
+                failed: false,
+                pressable: false,
+            }
+        );
     }
 
     #[test]

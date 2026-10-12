@@ -393,3 +393,82 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
         expect(settled(&shell, cx), landed.widths);
     }
 }
+
+/// The project window's footer shows the one-press Update button beside the
+/// branch and pull-request pills the moment a release is staged. The bug was
+/// exactly this state with no button anywhere: "update available" and
+/// "update staged" in the log, while the strip the button used to live in
+/// was never rendered.
+#[gpui::test]
+fn the_footer_update_button_renders_when_a_release_is_staged(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        // The update entity's checker task needs a runtime; its first check
+        // is 2s out, so a dead edge URL never fires inside the test.
+        gpui_tokio::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+        crate::history::init(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            cx,
+        );
+        settings::init(UiSettings::default(), dir.path(), cx);
+        // The global the footer chip reads: an app-bundle install with
+        // 0.2.112.2621 already found and staged.
+        crate::app_update::AppUpdate::init("http://127.0.0.1:9/".into(), dir.path().into(), cx);
+        let update =
+            crate::app_update::AppUpdate::global(cx).expect("AppUpdate::init sets the global");
+        update.update(cx, |update, _| update.stage_for_test("0.2.112.2621"));
+    });
+    let (shell, cx) = cx.add_window_view(|_, cx| {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.no_project = true;
+            state.selected_chat = Some("a".into());
+            state.chats = ["a"]
+                .into_iter()
+                .map(|id| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "title": id, "deviceId": "local", "archived": false,
+                        "createdAt": Utc::now(),
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            state
+        });
+        let mut shell = Shell::new(
+            state,
+            EngineBootConfig {
+                data_dir: dir.path().into(),
+                ipc_port: 0,
+                edge_url: String::new(),
+                edge_token: None,
+                org_id: None,
+                workos_client_id: None,
+                default_harness: zeron_proto::HarnessId::Mock,
+            },
+            cx,
+        );
+        shell.debug_gate = Some(GatePhase::Ready);
+        shell.splash = SplashPhase::Gone;
+        shell.active_chat = "a".into();
+        shell.sidebar_opened_at = 1;
+        shell.panel_open_sequence = 1;
+        shell.test_time = Some(std::time::Instant::now());
+        shell
+    });
+    cx.simulate_resize(gpui::size(px(WINDOW), px(900.0)));
+    // Let the session footer's reveal settle, then look for the button.
+    draw(&shell, cx, 250);
+    draw(&shell, cx, 250);
+    let button = cx.debug_bounds("update-now-button");
+    assert!(
+        button.is_some(),
+        "a staged release must render the footer's Update button"
+    );
+}

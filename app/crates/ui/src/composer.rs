@@ -6149,6 +6149,9 @@ pub struct Composer {
     account_usage: Entity<crate::account_usage::AccountUsage>,
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
+    /// The footer's Update chip renders from the global update entity; every
+    /// change there (a progress tick, a stage landing) repaints the composer.
+    _update_observe: Option<Subscription>,
     _picker_focus: Subscription,
     _input_events: Subscription,
     _dictation_events: Subscription,
@@ -6248,6 +6251,11 @@ impl Composer {
             },
         );
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
+        // The footer's Update chip renders from the global update entity, so
+        // its changes (a progress tick, a stage landing) must repaint the
+        // composer too. Absent in tests that never call AppUpdate::init.
+        let _update_observe = crate::app_update::AppUpdate::global(cx)
+            .map(|update| cx.observe(&update, |_, _, cx| cx.notify()));
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.on_submit(cx),
             ComposerInputEvent::ModifiedSubmitted => this.on_modified_submit(cx),
@@ -6404,6 +6412,7 @@ impl Composer {
             _pickers_observe: pickers_observe,
             account_usage,
             side_chat: false,
+            _update_observe,
             _picker_focus: picker_focus,
             _input_events: input_events,
             _dictation_events: dictation_events,
@@ -11591,6 +11600,14 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
+            // The app's own Update chip: beside the branch and pull-request
+            // pills, before the rings, shown whenever the session footer is.
+            let update_chip = (session_chrome_opacity > 0.0 && !self.side_chat)
+                .then(|| {
+                    let theme = Theme::of(cx).clone();
+                    crate::app_update::footer_update_chip(&theme, cx)
+                })
+                .flatten();
             if session_chrome_opacity > 0.0 {
                 let harness = (!self.side_chat)
                     .then(|| self.pickers.read(cx).resolved(cx).harness)
@@ -11646,6 +11663,7 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
+                                .when_some(update_chip, |el, chip| el.child(chip))
                                 .child(
                                     // The footer row's own 4px gap: the PR badge
                                     // ends flush with the row, so the rings keep
