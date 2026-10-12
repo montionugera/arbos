@@ -158,6 +158,17 @@ fn no_extra_paths() -> Vec<PathBuf> {
     Vec::new()
 }
 
+fn fx_install_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.to_path_buf());
+        }
+    }
+    paths
+}
+
+
 /// Repo-relative fallback. The harness crate lives at `app/crates/harness`.
 fn monorepo_fx_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fx/zig-out/bin/fx")
@@ -255,9 +266,9 @@ fn fx_spec() -> AcpAgentSpec {
         args: &["acp"],
         npm_package: None,
         archive: None,
-        extra_paths: no_extra_paths,
+        extra_paths: fx_install_paths,
         cli_executable: "fx",
-        cli_extra_paths: no_extra_paths,
+        cli_extra_paths: fx_install_paths,
         install_hint: "fx (searched PATH, then fx/zig-out/bin/fx in this repo; \
              set FX_EXECUTABLE to override)",
         models: fx_static_models,

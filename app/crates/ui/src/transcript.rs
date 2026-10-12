@@ -1305,6 +1305,15 @@ thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { s
 /// turn — tool calls, thoughts, and the narration text between them — folds
 /// into ONE collapsed [`RowKind::ToolGroup`], so only the reply text (the
 /// trailing run of text parts) stays a visible row.
+
+fn worker_report_line(entry: &SessionMessageEntry) -> bool {
+    entry.role == MessageRole::System
+        && entry.parts.iter().any(|part| match part {
+            MessagePart::Text { text, .. } => text.trim_start().starts_with("Worked ·"),
+            _ => false,
+        })
+}
+
 pub fn rows_for_entry(
     entry: &SessionMessageEntry,
     pending: bool,
@@ -4790,7 +4799,23 @@ impl Transcript {
                 .chat_id
                 .as_ref()
                 .and_then(|id| state.prepared_transcripts.get(id));
+            let main_chat = self
+                .chat_id
+                .as_deref()
+                .is_some_and(|id| id.ends_with("-main"));
+            let mut after_worker_report = false;
             for entry in entries {
+                if main_chat {
+                    if worker_report_line(entry) {
+                        after_worker_report = true;
+                    } else if entry.role == MessageRole::User {
+                        after_worker_report = false;
+                    } else if after_worker_report && entry.role == MessageRole::Assistant {
+                        // The worker tab holds the detail. Main keeps the
+                        // Worked line and the checklist.
+                        continue;
+                    }
+                }
                 if !self.compact_mode
                     && let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id))
                 {
@@ -10029,8 +10054,8 @@ impl Render for Transcript {
             .retain_rows(&self.rendered_rows);
         self.rendered_rows.clear();
         let mut compact_mode = crate::settings::transcript_compact_mode(cx);
-        // Main is the coordinator. Its transcript is Project style: a folded
-        // Worked line, the reply, and no tool cards. Other chats stay classic.
+        // Main is the coordinator. Its transcript is Project style: the Worked
+        // line and no tool cards. The worker tab holds the detail.
         if self
             .chat_id
             .as_deref()
