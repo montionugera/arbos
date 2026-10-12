@@ -14,6 +14,7 @@ use gpui::{
 use crate::composer::ComposerInput;
 use crate::image_media::{decode_project_icon, MediaImage};
 use crate::theme::Theme;
+use zeron_engine::arbos_layout::status_is_live;
 
 use super::listening_pill::{listening_rows, ListeningRow};
 use super::Shell;
@@ -53,6 +54,9 @@ pub(super) struct ProjectChrome {
     pub unread: bool,
     /// The live step while Main is working. Empty when Main is idle.
     pub step: String,
+    /// Each worker's live line, by chat id, while its model is being
+    /// retried or has paused. A worker whose model answers is not listed.
+    pub worker_steps: HashMap<String, String>,
     /// What Main waits on now: the rows of the Listening pill.
     pub listening: Vec<ListeningRow>,
     /// The pill was clicked open; it stays open until clicked again.
@@ -85,6 +89,7 @@ impl Default for ProjectChrome {
             skill: None,
             unread: false,
             step: String::new(),
+            worker_steps: HashMap::new(),
             listening: Vec::new(),
             listening_open: false,
             listening_hover: false,
@@ -111,8 +116,31 @@ struct ChatTab {
     title: String,
     main: bool,
     worker: bool,
-    /// `working`, `done`, `error`, `stopped`, or empty.
+    /// `working`, `waiting`, `done`, `error`, `stopped`, or empty.
     status: String,
+}
+
+/// The tab strip's status word for a chat: the engine's `waiting` wins over
+/// a running indicator, since the session is still up while the model is
+/// being retried; else a running chat or a stored `working` reads `working`.
+fn tab_status(indicator_working: bool, stored: &str) -> String {
+    if stored == "waiting" {
+        "waiting".into()
+    } else if indicator_working || stored == "working" {
+        "working".into()
+    } else {
+        stored.to_owned()
+    }
+}
+
+/// Each live worker's step, keyed by chat id, for the title of its tab.
+fn worker_steps(agents: &[zeron_engine::arbos_layout::AgentView]) -> HashMap<String, String> {
+    agents
+        .iter()
+        .filter(|agent| agent.role == "worker" && status_is_live(&agent.status))
+        .filter(|agent| !agent.step.trim().is_empty())
+        .map(|agent| (agent.chat_id.clone(), agent.step.trim().to_owned()))
+        .collect()
 }
 
 impl Shell {
@@ -1051,6 +1079,7 @@ impl Shell {
         self.project.listening_hover = false;
         let subscriptions = zeron_engine::arbos_wakes::subscriptions(Path::new(&project));
         let agents = zeron_engine::arbos_layout::agents(Path::new(&project));
+        self.project.worker_steps = worker_steps(&agents);
         self.project.listening = self.listening_rows_now(&subscriptions, &agents, cx);
         self.project.watch = Some(cx.spawn(async move |this, cx| {
             let root = PathBuf::from(&project).join(".arbos").join("context");
@@ -1093,6 +1122,7 @@ impl Shell {
                     shell.project.skill = view.skill;
                     shell.project.unread = unread;
                     shell.project.step = step;
+                    shell.project.worker_steps = worker_steps(&agents);
                     shell.project.listening =
                         shell.listening_rows_now(&subscriptions, &agents, cx);
                     cx.notify();
@@ -1174,7 +1204,7 @@ impl Shell {
             let rank = |id: &str| {
                 let agent = agents.iter().find(|agent| agent.chat_id == id);
                 let worker = agent.is_some_and(|agent| agent.role == "worker");
-                let working = agent.is_some_and(|agent| agent.status == "working");
+                let working = agent.is_some_and(|agent| status_is_live(&agent.status));
                 (worker, working)
             };
             rank(&right.id)
@@ -1190,11 +1220,7 @@ impl Shell {
                     crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
                 );
                 let stored = agent.map(|agent| agent.status.as_str()).unwrap_or("");
-                let status = if working || stored == "working" {
-                    "working".into()
-                } else {
-                    stored.to_owned()
-                };
+                let status = tab_status(working, stored);
                 ChatTab {
                     main: chat.id.ends_with("-main"),
                     worker: agent.is_some_and(|agent| agent.role == "worker"),
@@ -1371,9 +1397,16 @@ impl Shell {
             label = label.child("⚙");
         }
         label = label.child(tab.title.clone());
-        if tab.worker && tab.status == "working" {
+        if tab.worker && status_is_live(&tab.status) {
+            // The same pulse while the worker goes; amber while it waits on
+            // its model.
+            let dot_color = if tab.status == "waiting" {
+                theme.warning
+            } else {
+                theme.accent
+            };
             let pulse_id = SharedString::from(format!("worker-pulse-{}", tab.id));
-            label = label.child(div().text_color(theme.accent).child("●").with_animation(
+            label = label.child(div().text_color(dot_color).child("●").with_animation(
                 pulse_id,
                 Animation::new(Duration::from_millis(900)).repeat(),
                 |dot, t| {
@@ -1781,4 +1814,51 @@ fn load_media(project: &Path, icon: &str) -> Option<MediaImage> {
         "image/png"
     };
     decode_project_icon(mime, bytes).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use zeron_engine::arbos_layout::AgentView;
+
+    use super::*;
+
+    fn agent(id: &str, status: &str, step: &str) -> AgentView {
+        AgentView {
+            id: id.into(),
+            name: id.into(),
+            role: "worker".into(),
+            chat_id: format!("space-w-{id}"),
+            status: status.into(),
+            brief: String::new(),
+            result: String::new(),
+            machine: "local".into(),
+            model: String::new(),
+            step: step.into(),
+        }
+    }
+
+    #[test]
+    fn a_waiting_worker_reads_waiting_even_while_its_session_runs() {
+        assert_eq!(tab_status(true, "waiting"), "waiting");
+        assert_eq!(tab_status(false, "waiting"), "waiting");
+        assert_eq!(tab_status(true, "done"), "working");
+        assert_eq!(tab_status(false, "working"), "working");
+        assert_eq!(tab_status(false, "error"), "error");
+        assert_eq!(tab_status(false, ""), "");
+    }
+
+    #[test]
+    fn worker_steps_keep_only_live_workers_with_a_line() {
+        let steps = worker_steps(&[
+            agent("a", "waiting", " Waiting on the model — try 3 of 8, next in 32 s "),
+            agent("b", "working", ""),
+            agent("c", "error", "The model gave up: no reason given"),
+        ]);
+        assert_eq!(
+            steps.get("space-w-a").map(String::as_str),
+            Some("Waiting on the model — try 3 of 8, next in 32 s")
+        );
+        assert!(!steps.contains_key("space-w-b"));
+        assert!(!steps.contains_key("space-w-c"));
+    }
 }
