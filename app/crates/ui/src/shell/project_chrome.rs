@@ -647,14 +647,17 @@ impl Shell {
             .cloned()
             .collect();
         chats.sort_by(|left, right| {
-            let worker = |id: &str| {
-                agents
-                    .iter()
-                    .any(|agent| agent.chat_id == id && agent.role == "worker")
+            // Workers sit ahead of other chats. A worker that is still going,
+            // then the newest chat, takes the two visible slots.
+            let rank = |id: &str| {
+                let agent = agents.iter().find(|agent| agent.chat_id == id);
+                let worker = agent.is_some_and(|agent| agent.role == "worker");
+                let working = agent.is_some_and(|agent| agent.status == "working");
+                (worker, working)
             };
-            worker(&right.id)
-                .cmp(&worker(&left.id))
-                .then(left.created_at.cmp(&right.created_at))
+            rank(&right.id)
+                .cmp(&rank(&left.id))
+                .then(right.created_at.cmp(&left.created_at))
         });
         chats
             .into_iter()
