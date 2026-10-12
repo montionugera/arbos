@@ -4241,6 +4241,9 @@ mod tests {
         cx.run_until_parked();
         let scroll = page.read_with(cx, |page, _| page.repository_scroll.scroll.clone());
         assert!(scroll.max_offset().y > px(0.0));
+        // The first layout can sit a half pixel off. Draw once so the sample
+        // and the post-scroll sample share a settled frame.
+        cx.update(|window, cx| window.draw(cx).clear());
         let input = cx.debug_bounds("pr-repository-load").unwrap();
         scroll.set_offset(gpui::point(px(0.0), -scroll.max_offset().y));
         cx.update(|window, cx| window.draw(cx).clear());
