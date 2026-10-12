@@ -73,7 +73,7 @@ printf '     0 valid identities found\n' >"$STUB_STATE/identities"
 if run_import; then fail "a certificate without a Developer ID identity must be rejected"; fi
 grep -q "no valid Developer ID Application identity" "$work/import.out" || fail "wrong message for a missing identity"
 
-if CERT_PASSWORD= SIGNING_KEYCHAIN="$work/k" "$ci/macos-signing-keychain.sh" import "$work/cert.p12" 2>/dev/null; then
+if CERT_PASSWORD='' SIGNING_KEYCHAIN="$work/k" "$ci/macos-signing-keychain.sh" import "$work/cert.p12" 2>/dev/null; then
   fail "an empty CERT_PASSWORD must be rejected"
 fi
 

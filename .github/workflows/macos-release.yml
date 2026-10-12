@@ -1,0 +1,125 @@
+name: macOS release
+
+# Every green push to main publishes a signed, notarized Apple silicon build
+# of the Arbos app to the GitHub Release tagged `edge`, next to the Linux
+# tarball. The running app's updater reads manifest.json there and downloads
+# the app tarball named in it.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+# Two releases must never run at once: each one reads the manifest, merges its
+# files in, and uploads it back. A queued run waits for the running one.
+concurrency:
+  group: edge-release
+  cancel-in-progress: false
+
+env:
+  # The Developer ID Application certificate lives in the 1Password vault
+  # "Arbos", item phsrnmu3qfpqx6lbumafjo3uom, and is read with the service
+  # account token in the OP_SERVICE_ACCOUNT_TOKEN secret. The field names
+  # below are to be confirmed: open the item in 1Password, note the name of
+  # the .p12 file field and of the password field, and change the last path
+  # segment of each reference to match.
+  APPLE_CERT_P12_REF: op://Arbos/phsrnmu3qfpqx6lbumafjo3uom/certificate.p12
+  APPLE_CERT_PASSWORD_REF: op://Arbos/phsrnmu3qfpqx6lbumafjo3uom/password
+
+jobs:
+  publish:
+    name: Publish the signed Mac app
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Require the signing secrets
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          for name in OP_SERVICE_ACCOUNT_TOKEN AC_API_KEY_P8 AC_API_KEY_ID AC_API_ISSUER_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "The Mac release needs OP_SERVICE_ACCOUNT_TOKEN and the App Store Connect key secrets; nothing was published."
+              exit 1
+            fi
+          done
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # The build number is the commit count.
+          fetch-depth: 0
+      - name: Rust toolchain
+        working-directory: app
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: app
+          shared-key: macos-release
+          cache-on-failure: true
+      - uses: 1password/install-cli-action@143a85f84a90555d121cde2ff5872e393a47ab9f # v1.0.0
+      - name: Import the signing certificate
+        working-directory: app
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ARBOS_APPLE_TEAM_ID: ${{ secrets.ARBOS_APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          op read "$APPLE_CERT_P12_REF" --out-file "$RUNNER_TEMP/cert.p12"
+          # The password goes from `op read` into the script's environment and
+          # from there onto `security import -P`; it is never printed.
+          CERT_PASSWORD="$(op read "$APPLE_CERT_PASSWORD_REF")" \
+            scripts/ci/macos-signing-keychain.sh import "$RUNNER_TEMP/cert.p12"
+      - name: Write the notarization key
+        env:
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$AC_API_KEY_P8" > "$key_path"
+          chmod 600 "$key_path"
+          echo "NOTARY_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+      - name: Build, sign, and notarize the Mac app
+        working-directory: app
+        env:
+          NOTARY_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$CODESIGN_IDENTITY"
+          # The fourth version component is the commit count, the same number
+          # the Linux job computes for this commit, so both platform files of
+          # one build share one manifest version.
+          ARBOS_BUILD="$(git rev-list --count HEAD)"
+          export ARBOS_BUILD
+          scripts/package-macos.sh
+          ls -la target/package
+      - name: Verify the signature and the notarization ticket
+        working-directory: app
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(target/package/*-macos-*.dmg)
+          scripts/ci/macos-verify-signed.sh target/package/*.app ${dmgs[@]+"${dmgs[@]}"}
+      - name: Publish to the edge release
+        working-directory: app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/publish-edge-macos.sh target/package "${{ github.event.workflow_run.head_sha }}"
+      - name: Remove the signing material
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -x app/scripts/ci/macos-signing-keychain.sh ]; then
+            app/scripts/ci/macos-signing-keychain.sh remove
+          fi
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/AuthKey.p8"
