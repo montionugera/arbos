@@ -3281,6 +3281,18 @@ impl ComposerInput {
         self.select_all_text(cx);
     }
 
+    /// Open a document on its first line, with the caret there.
+    pub fn show_from_start(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.scroll_top = 0.0;
+        self.scroll_left = 0.0;
+        self.follow_cursor = true;
+        self.preferred_column = None;
+        self.needs_measure = true;
+        cx.notify();
+    }
+
     /// Select the whole draft — an inline rename opens with its name selected.
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
         self.move_to(0, cx);

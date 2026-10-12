@@ -21,6 +21,8 @@ pub(super) const RAIL_WIDTH: f32 = 88.0;
 /// The project file list beside Main. A new chat hides it, so that chat
 /// stays centered.
 pub(super) const PROJECT_FILES_WIDTH: f32 = 252.0;
+/// Tall enough to read a file, short enough that the file list stays on screen.
+const SIDE_FILE_EDITOR_HEIGHT: f32 = 300.0;
 #[allow(dead_code)]
 pub(super) const TAB_HEIGHT: f32 = 36.0;
 const EXTRA_VISIBLE: usize = 2;
@@ -521,7 +523,7 @@ impl Shell {
                     div()
                         .id("side-file-editor")
                         .flex_none()
-                        .h(px(88.0))
+                        .h(px(SIDE_FILE_EDITOR_HEIGHT))
                         .mt(px(4.0))
                         .px(px(8.0))
                         .py(px(6.0))
@@ -559,9 +561,9 @@ impl Shell {
             .unwrap_or_default();
         let editor = cx.new(|cx| {
             let mut input = ComposerInput::with_context("", "ProjectContext", cx)
-                .with_viewport_height(72.0);
+                .with_viewport_height(SIDE_FILE_EDITOR_HEIGHT - 12.0);
             input.set_text(text, cx);
-            input.select_all_text(cx);
+            input.show_from_start(cx);
             input
         });
         window.focus(&editor.focus_handle(cx), cx);
