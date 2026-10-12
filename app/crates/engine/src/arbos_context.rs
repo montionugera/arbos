@@ -1,16 +1,22 @@
 //! What fills Main's context window, read from fx's session log.
 //!
-//! fx records the input tokens of every turn in `turn_completed`. It does not
-//! record how those tokens split. The split here is an estimate: the texts
+//! fx writes a `context_sections` frame just before each turn it commits:
+//! the sizes of that turn's last model request by section (system prompt,
+//! tools, rules, skills, summarized conversation, conversation) and the
+//! request as a whole, all in fx's own token estimate. When the log has one,
+//! the view is built from it and marked `measured`.
+//!
+//! Older logs have no such frame. Then the split is an estimate: the texts
 //! fx logged (conversation, summary) and the files fx loads (rules, skills)
-//! are counted at four bytes a token; the Arbos prompt and fx's own base
-//! prompt make the system prompt; whatever the measured first turn had on
-//! top of that is the tool catalog.
+//! are counted at four bytes a token, and the Arbos prompt plus fx's own
+//! base prompt make the system prompt. The tool catalog is unknown without
+//! fx's measurement and reads as zero. `turn_completed` only counts the
+//! prompt text the user submitted, so it never stands in for the request.
 
 use std::fs;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::arbos_layout;
@@ -28,7 +34,8 @@ pub struct Bucket {
     pub tokens: u64,
 }
 
-/// Input and output tokens of one completed turn.
+/// What fx counted for one completed turn: the prompt text the user
+/// submitted and the output the model produced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnTokens {
@@ -41,17 +48,59 @@ pub struct TurnTokens {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageView {
-    /// Tokens the last completed turn sent, or the bucket sum when fx has
-    /// not recorded a turn yet.
+    /// fx's estimate of the last request when measured, else the bucket sum.
     pub used: u64,
     pub window: Option<u64>,
     /// `used / window`, rounded, when the window is known.
     pub percent: Option<u64>,
-    /// `used` comes from fx's count rather than the estimate.
+    /// The buckets are fx's own section sizes rather than the estimate.
     pub measured: bool,
     pub turns: usize,
     pub buckets: Vec<Bucket>,
     pub history: Vec<TurnTokens>,
+}
+
+/// One `context_sections` frame, as fx writes it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+struct Sections {
+    system_prompt: u64,
+    tools: u64,
+    rules: u64,
+    skills: u64,
+    summarized_conversation: u64,
+    conversation: u64,
+    request: u64,
+}
+
+impl Sections {
+    fn buckets(self) -> Vec<Bucket> {
+        bucket_list([
+            self.system_prompt,
+            self.tools,
+            self.rules,
+            self.skills,
+            self.summarized_conversation,
+            self.conversation,
+        ])
+    }
+}
+
+const BUCKET_NAMES: [&str; 6] = [
+    "system prompt",
+    "tools",
+    "rules",
+    "skills",
+    "summarized conversation",
+    "conversation",
+];
+
+fn bucket_list(tokens: [u64; 6]) -> Vec<Bucket> {
+    BUCKET_NAMES
+        .iter()
+        .zip(tokens)
+        .map(|(name, tokens)| Bucket { name, tokens })
+        .collect()
 }
 
 /// Inputs that do not come from the log.
@@ -131,14 +180,12 @@ fn tokens(bytes: u64) -> u64 {
 struct Scan {
     /// Conversation tokens after the last checkpoint.
     conversation: u64,
-    /// Conversation tokens since the last checkpoint, at the point the
-    /// first measured turn completed.
-    first_turn_conversation: u64,
     summary: u64,
     history: Vec<TurnTokens>,
     turns: usize,
-    first_measured: Option<u64>,
-    last_measured: Option<(u64, bool)>,
+    /// The last `context_sections` frame, which fx writes just before the
+    /// turn it describes.
+    sections: Option<Sections>,
 }
 
 /// Read one fx `events.jsonl`. Lines that do not parse are skipped.
@@ -181,6 +228,11 @@ pub fn parse_usage(log: &str, fixed: &Fixed, window: Option<u64>) -> UsageView {
                 scan.summary = tokens(text_len("summary"));
                 scan.conversation = 0;
             }
+            "context_sections" => {
+                if let Ok(sections) = serde_json::from_value::<Sections>(payload.clone()) {
+                    scan.sections = Some(sections);
+                }
+            }
             "turn_completed" => {
                 scan.turns += 1;
                 let progress = payload
@@ -204,52 +256,28 @@ pub fn parse_usage(log: &str, fixed: &Fixed, window: Option<u64>) -> UsageView {
                     output_tokens: output,
                     exact,
                 });
-                if input > 0 {
-                    if scan.first_measured.is_none() {
-                        scan.first_measured = Some(input);
-                        scan.first_turn_conversation = scan.conversation + scan.summary;
-                    }
-                    scan.last_measured = Some((input, exact));
-                }
             }
             _ => {}
         }
     }
-    let fixed_known = fixed.system_prompt_tokens + fixed.rules_tokens + fixed.skills_tokens;
-    let tools = scan
-        .first_measured
-        .map(|first| first.saturating_sub(fixed_known + scan.first_turn_conversation))
-        .unwrap_or(0);
-    let buckets = vec![
-        Bucket {
-            name: "system prompt",
-            tokens: fixed.system_prompt_tokens,
-        },
-        Bucket {
-            name: "tools",
-            tokens: tools,
-        },
-        Bucket {
-            name: "rules",
-            tokens: fixed.rules_tokens,
-        },
-        Bucket {
-            name: "skills",
-            tokens: fixed.skills_tokens,
-        },
-        Bucket {
-            name: "summarized conversation",
-            tokens: scan.summary,
-        },
-        Bucket {
-            name: "conversation",
-            tokens: scan.conversation,
-        },
-    ];
-    let estimate: u64 = buckets.iter().map(|bucket| bucket.tokens).sum();
-    let (used, measured) = match scan.last_measured {
-        Some((input, _)) => (input, true),
-        None => (estimate, false),
+    let (buckets, measured) = match scan.sections {
+        Some(sections) => (sections.buckets(), true),
+        None => (
+            bucket_list([
+                fixed.system_prompt_tokens,
+                0,
+                fixed.rules_tokens,
+                fixed.skills_tokens,
+                scan.summary,
+                scan.conversation,
+            ]),
+            false,
+        ),
+    };
+    let sum: u64 = buckets.iter().map(|bucket| bucket.tokens).sum();
+    let used = match scan.sections {
+        Some(sections) if sections.request > 0 => sections.request,
+        _ => sum,
     };
     let percent = window
         .filter(|window| *window > 0)
@@ -302,8 +330,83 @@ mod tests {
         }
     }
 
+    fn sections(system_prompt: u64, tools: u64, conversation: u64, request: u64) -> Value {
+        serde_json::json!({ "context_sections": {
+            "system_prompt": system_prompt, "tools": tools, "rules": 310, "skills": 45,
+            "summarized_conversation": 900, "conversation": conversation,
+            "request": request
+        }})
+    }
+
+    fn bucket(view: &UsageView, name: &str) -> u64 {
+        view.buckets
+            .iter()
+            .find(|bucket| bucket.name == name)
+            .map(|bucket| bucket.tokens)
+            .unwrap()
+    }
+
     #[test]
-    fn the_breakdown_comes_from_the_turns_fx_logged() {
+    fn logged_sections_fill_the_buckets_and_the_latest_turn_wins() {
+        let log = [
+            frame(1, sections(1_400, 3_900, 200, 6_800)),
+            frame(
+                2,
+                serde_json::json!({ "user": { "text": "x".repeat(400) } }),
+            ),
+            frame(
+                3,
+                serde_json::json!({ "assistant": { "text": "z".repeat(200) } }),
+            ),
+            frame(4, turn(100, 60, true)),
+            frame(5, sections(1_400, 3_900, 2_600, 9_200)),
+            frame(6, serde_json::json!({ "user": { "text": "w".repeat(40) } })),
+            frame(7, turn(10, 20, true)),
+            "not json at all".to_owned(),
+        ]
+        .join("\n");
+        let view = parse_usage(&log, &fixed(), Some(128_000));
+        assert_eq!(view.turns, 2);
+        assert!(view.measured);
+        assert_eq!(view.used, 9_200);
+        assert_eq!(view.window, Some(128_000));
+        assert_eq!(view.percent, Some(8));
+        assert_eq!(bucket(&view, "system prompt"), 1_400);
+        assert_eq!(bucket(&view, "tools"), 3_900);
+        assert_eq!(bucket(&view, "rules"), 310);
+        assert_eq!(bucket(&view, "skills"), 45);
+        assert_eq!(bucket(&view, "summarized conversation"), 900);
+        assert_eq!(bucket(&view, "conversation"), 2_600);
+        assert_eq!(
+            view.buckets.iter().map(|b| b.name).collect::<Vec<_>>(),
+            BUCKET_NAMES
+        );
+        assert_eq!(view.history.len(), 2);
+        assert_eq!(view.history[1].input_tokens, 10);
+        assert_eq!(view.history[1].output_tokens, 20);
+        assert!(view.history[1].exact);
+    }
+
+    #[test]
+    fn sections_without_a_request_total_sum_their_buckets() {
+        let log = [
+            frame(
+                1,
+                serde_json::json!({ "context_sections": { "system_prompt": 1_000, "tools": 500 } }),
+            ),
+            frame(2, serde_json::json!({ "user": { "text": "hello" } })),
+            frame(3, turn(2, 1, true)),
+        ]
+        .join("\n");
+        let view = parse_usage(&log, &fixed(), Some(3_000));
+        assert!(view.measured);
+        assert_eq!(view.used, 1_500);
+        assert_eq!(view.percent, Some(50));
+        assert_eq!(bucket(&view, "conversation"), 0);
+    }
+
+    #[test]
+    fn a_log_without_sections_falls_back_to_the_estimate() {
         let log = [
             frame(
                 1,
@@ -327,48 +430,26 @@ mod tests {
                 4,
                 serde_json::json!({ "assistant": { "text": "z".repeat(200) } }),
             ),
-            frame(5, turn(8_000, 60, true)),
+            frame(5, turn(100, 60, true)),
             frame(6, serde_json::json!({ "user": { "text": "w".repeat(40) } })),
-            frame(7, turn(8_400, 20, true)),
-            "not json at all".to_owned(),
+            frame(7, turn(10, 20, true)),
         ]
         .join("\n");
         let view = parse_usage(&log, &fixed(), Some(128_000));
-        // First turn: 100 user + 25 shell + 1 name + 200 output + 50 reply = 376.
-        let first_conversation = 100 + 25 + 1 + 200 + 50;
+        // 100 user + 25 shell + 1 name + 200 output + 50 reply + 10 user = 386.
+        let conversation = 100 + 25 + 1 + 200 + 50 + 10;
         assert_eq!(view.turns, 2);
-        assert!(view.measured);
-        assert_eq!(view.used, 8_400);
-        assert_eq!(view.window, Some(128_000));
-        assert_eq!(view.percent, Some(7));
-        let bucket = |name: &str| {
-            view.buckets
-                .iter()
-                .find(|bucket| bucket.name == name)
-                .map(|bucket| bucket.tokens)
-                .unwrap()
-        };
-        assert_eq!(bucket("system prompt"), 2_000);
-        assert_eq!(bucket("rules"), 300);
-        assert_eq!(bucket("skills"), 50);
-        assert_eq!(bucket("tools"), 8_000 - 2_350 - first_conversation);
-        assert_eq!(bucket("summarized conversation"), 0);
-        assert_eq!(bucket("conversation"), first_conversation + 10);
-        assert_eq!(
-            view.buckets.iter().map(|b| b.name).collect::<Vec<_>>(),
-            [
-                "system prompt",
-                "tools",
-                "rules",
-                "skills",
-                "summarized conversation",
-                "conversation"
-            ]
-        );
+        assert!(!view.measured);
+        assert_eq!(bucket(&view, "system prompt"), 2_000);
+        assert_eq!(bucket(&view, "tools"), 0);
+        assert_eq!(bucket(&view, "rules"), 300);
+        assert_eq!(bucket(&view, "skills"), 50);
+        assert_eq!(bucket(&view, "summarized conversation"), 0);
+        assert_eq!(bucket(&view, "conversation"), conversation);
+        assert_eq!(view.used, 2_350 + conversation);
+        assert_eq!(view.percent, Some(3));
         assert_eq!(view.history.len(), 2);
-        assert_eq!(view.history[1].input_tokens, 8_400);
-        assert_eq!(view.history[1].output_tokens, 20);
-        assert!(view.history[1].exact);
+        assert_eq!(view.history[0].input_tokens, 100);
     }
 
     #[test]
@@ -397,17 +478,10 @@ mod tests {
         ]
         .join("\n");
         let view = parse_usage(&log, &fixed(), None);
-        let bucket = |name: &str| {
-            view.buckets
-                .iter()
-                .find(|bucket| bucket.name == name)
-                .map(|bucket| bucket.tokens)
-                .unwrap()
-        };
-        assert_eq!(bucket("summarized conversation"), 300);
-        assert_eq!(bucket("conversation"), 10);
-        assert_eq!(bucket("tools"), 5_000 - 2_350 - 2_000);
-        assert_eq!(view.used, 4_000);
+        assert_eq!(bucket(&view, "summarized conversation"), 300);
+        assert_eq!(bucket(&view, "conversation"), 10);
+        assert!(!view.measured);
+        assert_eq!(view.used, 2_350 + 300 + 10);
         assert_eq!(view.percent, None);
         assert!(!view.history[1].exact);
     }

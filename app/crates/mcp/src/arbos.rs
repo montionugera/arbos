@@ -146,7 +146,7 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
             ),
             tool(
                 "context.usage",
-                "How full your context window is: percent used, tokens per bucket (system prompt, tools, rules, skills, summarized conversation, conversation), and the input tokens of recent turns.",
+                "How full your context window is: percent used, tokens per bucket (system prompt, tools, rules, skills, summarized conversation, conversation), whether the buckets are fx's own measurement, and the tokens of recent turns.",
                 no_args(),
             ),
         ]);
