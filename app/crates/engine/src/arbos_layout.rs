@@ -959,6 +959,37 @@ fn reconcile_done_workers(project: &Path) {
 const SUMMARY_NOTICE: &str = "Summarized conversation.";
 const SUMMARY_PATHS: &str = "Goals: `.arbos/context/GOALS.md`. Status: `.arbos/context/status.md`. Read them before acting.";
 
+/// How full the window must be before Main summarizes on its own.
+/// This is the `auto_compact_percent` value in the fx settings file.
+/// A missing or out-of-range value stays at 80, the same default fx uses.
+pub fn auto_compact_percent(project: &Path) -> u8 {
+    let path = root_of(project)
+        .join("agents")
+        .join("main")
+        .join("fx")
+        .join(".fx")
+        .join("settings.json");
+    let Ok(text) = fs::read_to_string(path) else {
+        return 80;
+    };
+    parse_auto_compact_percent(&text).unwrap_or(80)
+}
+
+fn parse_auto_compact_percent(text: &str) -> Option<u8> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let number = value.get("auto_compact_percent")?.as_u64()?;
+    if (10..=80).contains(&number) {
+        Some(number as u8)
+    } else {
+        None
+    }
+}
+
+/// A failed summary must not drop the fx session. Only a written summary does.
+pub fn tombstone_after_summary(result: &Result<String, String>) -> bool {
+    result.is_ok()
+}
+
 /// `/summarize` and `/compact` on idle Main.
 pub fn is_summarize_command(shown: &str) -> bool {
     let shown = shown.trim();
@@ -1490,4 +1521,65 @@ fn git_clean(root: &Path) -> bool {
         return true;
     };
     output.stdout.iter().all(|byte| byte.is_ascii_whitespace())
+}
+
+#[cfg(test)]
+mod summary_failure_tests {
+    use super::{
+        auto_compact_percent, ensure, main_chat_id, parse_auto_compact_percent,
+        tombstone_after_summary, write_conversation_summary,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_failed_summary_does_not_tombstone_and_leaves_the_file() {
+        let err: Result<String, String> = Err("rename failed".into());
+        assert!(!tombstone_after_summary(&err));
+        let ok: Result<String, String> = Ok("Summarized conversation.".into());
+        assert!(tombstone_after_summary(&ok));
+
+        let root = std::env::temp_dir().join(format!("arbos-summary-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        ensure(&root, Some("Summary")).unwrap();
+        let chat = main_chat_id(&root);
+        write_conversation_summary(&root, &chat, &["/goal Clear the gate.".into()]).unwrap();
+        let path = root.join(".arbos").join("runtime").join("main-summary.md");
+        let before = fs::read(&path).unwrap();
+        let failed = write_conversation_summary(&root, "not-main", &["/goal Other.".into()]);
+        assert!(failed.is_err());
+        assert!(!tombstone_after_summary(&failed));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_compact_percent_reads_the_settings_file() {
+        assert_eq!(parse_auto_compact_percent(r#"{"auto_compact_percent":10}"#), Some(10));
+        assert_eq!(parse_auto_compact_percent(r#"{"auto_compact_percent":80}"#), Some(80));
+        assert_eq!(parse_auto_compact_percent(r#"{"auto_compact_percent":4}"#), None);
+        assert_eq!(parse_auto_compact_percent(r#"{"auto_compact_percent":90}"#), None);
+        assert_eq!(parse_auto_compact_percent("{}"), None);
+
+        let root = std::env::temp_dir().join(format!("arbos-compact-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        ensure(&root, Some("Compact")).unwrap();
+        assert_eq!(auto_compact_percent(&root), 80);
+        let settings = root
+            .join(".arbos")
+            .join("agents")
+            .join("main")
+            .join("fx")
+            .join(".fx");
+        fs::create_dir_all(&settings).unwrap();
+        fs::write(
+            settings.join("settings.json"),
+            r#"{"permission_mode":"yolo","auto_compact_percent":10}"#,
+        )
+        .unwrap();
+        assert_eq!(auto_compact_percent(&root), 10);
+        let _ = fs::remove_dir_all(PathBuf::from(&root));
+    }
 }

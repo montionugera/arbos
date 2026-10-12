@@ -621,26 +621,31 @@ impl SessionsEngine {
                 return Ok(String::new());
             }
             let lines = handle.conversation_lines().unwrap_or_default();
-            match crate::arbos_layout::write_conversation_summary(
+            let result = crate::arbos_layout::write_conversation_summary(
                 std::path::Path::new(&request.cwd),
                 chat_id,
                 &lines,
-            ) {
-                Ok(notice) => {
-                    self.inner.drop_harness_resume(chat_id, &request.cwd);
-                    let _ = handle.write_system_message(
-                        &format!("summarize-{}", new_id()),
-                        &notice,
-                        now_ms(),
-                    );
-                }
-                Err(_) => {
-                    let _ = handle.write_system_message(
-                        &format!("summarize-failed-{}", new_id()),
-                        "Summarize failed. The thread is unchanged.",
-                        now_ms(),
-                    );
-                }
+            );
+            if crate::arbos_layout::tombstone_after_summary(&result) {
+                let notice = result.expect("a written summary");
+                self.inner.drop_harness_resume(chat_id, &request.cwd);
+                let _ = handle.write_system_message(
+                    &format!("summarize-{}", new_id()),
+                    &notice,
+                    now_ms(),
+                );
+            } else {
+                let err = result.err().unwrap_or_default();
+                tracing::info!(
+                    chat = %chat_id,
+                    error = %err,
+                    "summarize failed; the thread is unchanged"
+                );
+                let _ = handle.write_system_message(
+                    &format!("summarize-failed-{}", new_id()),
+                    "Summarize failed. The thread is unchanged.",
+                    now_ms(),
+                );
             }
             return Ok(String::new());
         }
@@ -2386,6 +2391,107 @@ fn cursor_unstarted_history(
     ))
 }
 
+fn entry_text(entry: &SessionMessageEntry) -> String {
+    entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn summary_already_applied(entries: &[SessionMessageEntry]) -> bool {
+    for entry in entries.iter().rev() {
+        let text = entry_text(entry);
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        match entry.role {
+            MessageRole::User => return false,
+            MessageRole::System if text == "Summarized conversation." => return true,
+            MessageRole::System | MessageRole::Assistant => {}
+        }
+    }
+    false
+}
+
+/// When the window crosses `auto_compact_percent`, summarize Main the same
+/// way `/summarize` does. A failure leaves the fx session in place.
+fn maybe_auto_summarize(
+    inner: &Inner,
+    doc: &SessionDoc,
+    chat_id: &str,
+    cwd: &str,
+    tokens: Option<u64>,
+    window: Option<u64>,
+    done: &mut bool,
+) {
+    if *done {
+        return;
+    }
+    let (Some(tokens), Some(window)) = (tokens, window) else {
+        return;
+    };
+    if window == 0 {
+        return;
+    }
+    let percent = tokens.saturating_mul(100) / window;
+    let project = std::path::Path::new(cwd);
+    let threshold = crate::arbos_layout::auto_compact_percent(project);
+    if percent < u64::from(threshold) {
+        return;
+    }
+    if crate::arbos_layout::main_chat_id(project) != chat_id {
+        return;
+    }
+    let Ok(entries) = doc.read_entries() else {
+        return;
+    };
+    if summary_already_applied(&entries) {
+        *done = true;
+        return;
+    }
+    let Some(host) = inner.doc_host() else {
+        return;
+    };
+    let Ok(handle) = host.open(chat_id) else {
+        return;
+    };
+    let lines = handle.conversation_lines().unwrap_or_default();
+    if lines.is_empty() {
+        return;
+    }
+    *done = true;
+    let result = crate::arbos_layout::write_conversation_summary(project, chat_id, &lines);
+    if crate::arbos_layout::tombstone_after_summary(&result) {
+        let notice = result.expect("a written summary");
+        inner.drop_harness_resume(chat_id, cwd);
+        let _ = handle.write_system_message(
+            &format!("summarize-auto-{}", new_id()),
+            &notice,
+            now_ms(),
+        );
+        let _ = doc.clear_context_usage();
+        tracing::info!(
+            chat = %chat_id,
+            percent,
+            threshold,
+            "auto summarized conversation"
+        );
+    } else {
+        let err = result.err().unwrap_or_default();
+        tracing::info!(
+            chat = %chat_id,
+            error = %err,
+            "summarize failed; the thread is unchanged"
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_run(
     inner: Arc<Inner>,
@@ -2636,6 +2742,7 @@ async fn drive_run(
     let subagent_silence = session_idle * 8;
     let mut idle_since: Option<tokio::time::Instant> =
         resume_state.idle.then(tokio::time::Instant::now);
+    let mut auto_summary_done = false;
     // A parked runtime whose agent reports background work (see
     // `TurnControl::background_live`) is not idle: reaping it killed that
     // work. The reaper re-checks a full idle window later instead.
@@ -3162,6 +3269,17 @@ async fn drive_run(
             if let Err(err) = doc_ref.update_context_usage(*tokens, *window) {
                 tracing::warn!(%chat_id, error = %err, "context usage write failed");
             }
+            if idle_since.is_some() {
+                maybe_auto_summarize(
+                    &inner,
+                    doc_ref,
+                    &chat_id,
+                    &run_cwd,
+                    *tokens,
+                    *window,
+                    &mut auto_summary_done,
+                );
+            }
             continue;
         }
         // PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT
@@ -3219,6 +3337,7 @@ async fn drive_run(
                         if resume_state.idle && !saw_session_started => {}
                     AgentEvent::Steered { .. } => {
                         idle_since = None;
+                        auto_summary_done = false;
                         inner.set_status(&chat_id, SessionStatus::Working, true);
                     }
                     AgentEvent::Done { .. } => {
@@ -3575,6 +3694,18 @@ async fn drive_run(
                     false,
                     completed_turn,
                 );
+                if !pending_steer {
+                    let usage = doc_ref.context_usage();
+                    maybe_auto_summarize(
+                        &inner,
+                        doc_ref,
+                        &chat_id,
+                        &run_cwd,
+                        usage.and_then(|usage| usage.tokens),
+                        usage.and_then(|usage| usage.window),
+                        &mut auto_summary_done,
+                    );
+                }
                 continue;
             }
             final_completed_turn = completed_turn;
