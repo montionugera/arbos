@@ -4830,40 +4830,9 @@ impl Transcript {
                 .chat_id
                 .as_deref()
                 .is_some_and(|id| id.ends_with("-main"));
-            // A worker report replaces the coordinator's prose around it.
-            // Main keeps the person's prompt, one Worked line, and the checklist.
-            let mut hide_assistant = vec![false; entries.len()];
-            if main_chat {
-                for (index, entry) in entries.iter().enumerate() {
-                    if !worker_report_line(entry) {
-                        continue;
-                    }
-                    let mut earlier = index;
-                    while earlier > 0 {
-                        earlier -= 1;
-                        if entries[earlier].role == MessageRole::User {
-                            break;
-                        }
-                        if entries[earlier].role == MessageRole::Assistant {
-                            hide_assistant[earlier] = true;
-                        }
-                    }
-                    let mut later = index + 1;
-                    while later < entries.len() {
-                        if entries[later].role == MessageRole::User {
-                            break;
-                        }
-                        if entries[later].role == MessageRole::Assistant {
-                            hide_assistant[later] = true;
-                        }
-                        later += 1;
-                    }
-                }
-            }
-            for (index, entry) in entries.iter().enumerate() {
-                if hide_assistant[index] {
-                    continue;
-                }
+            // Main keeps the plan on screen after the workers report.
+            // Each Worked line stays the short first line.
+            for entry in entries.iter() {
                 let shortened = (main_chat && worker_report_line(entry))
                     .then(|| shorten_worker_report(entry));
                 let entry = shortened.as_ref().unwrap_or(entry);
@@ -10106,8 +10075,8 @@ impl Render for Transcript {
             .retain_rows(&self.rendered_rows);
         self.rendered_rows.clear();
         let mut compact_mode = crate::settings::transcript_compact_mode(cx);
-        // Main is the coordinator. Its transcript is the short Worked line
-        // and the checklist. The worker tab holds the detail.
+        // Main is the coordinator. The plan stays with the short Worked lines.
+        // The worker tab holds the detail.
         if self
             .chat_id
             .as_deref()
