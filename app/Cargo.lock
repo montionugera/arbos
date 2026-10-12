@@ -13888,8 +13888,10 @@ name = "zeron-update"
 version = "0.2.112"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "futures",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

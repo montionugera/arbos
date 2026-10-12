@@ -5,9 +5,21 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# The tool "Release main" signs and publishes with. The library is what the
+# app reads the manifest with, so both sides of an update agree on the format
+# by sharing the types rather than by writing the same JSON twice.
+[[bin]]
+name = "arbos-updatectl"
+path = "src/bin/updatectl.rs"
+
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 futures.workspace = true
+# Ed25519 over a payload's bytes. Already in the lock (rustls pulls it in), so
+# the signature costs a dependency line and no new build. Apple is not in this
+# path at all: a payload verifies on a Mac with no Developer ID anywhere near it.
+ring = "0.17"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
