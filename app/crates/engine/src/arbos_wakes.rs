@@ -128,6 +128,8 @@ pub struct SubscriptionView {
     pub expires: String,
     pub expired: bool,
     pub last_fired: String,
+    /// RFC 3339, UTC. Known for timers only; polled kinds leave it empty.
+    pub next_wake: String,
 }
 
 /// Poll open projects. One task, started with the engine.
@@ -462,6 +464,10 @@ pub fn subscriptions(project: &Path) -> Vec<SubscriptionView> {
             let text = fs::read_to_string(&path).ok()?;
             let sub: Subscription = toml::from_str(&text).ok()?;
             let expires = expires_at(&sub.created, &path);
+            let slot = state.get(&name);
+            let next_wake = next_wake_of(&sub, slot, chrono::Local::now())
+                .map(|time| time.to_rfc3339())
+                .unwrap_or_default();
             Some(SubscriptionView {
                 id,
                 label: label_of(&sub),
@@ -469,13 +475,62 @@ pub fn subscriptions(project: &Path) -> Vec<SubscriptionView> {
                 created: sub.created.trim().to_owned(),
                 expires: expires.map(|time| time.to_rfc3339()).unwrap_or_default(),
                 expired: is_expired(expires, now),
-                last_fired: state
-                    .get(&name)
-                    .map(|slot| slot.last_fired.clone())
-                    .unwrap_or_default(),
+                last_fired: slot.map(|slot| slot.last_fired.clone()).unwrap_or_default(),
+                next_wake,
             })
         })
         .collect()
+}
+
+/// When a timer fires next. An interval timer reads its armed deadline; a
+/// daily timer is the next `hour:minute` in local time that has not fired.
+/// Polled kinds have no known time.
+fn next_wake_of(
+    sub: &Subscription,
+    slot: Option<&WakeState>,
+    now: DateTime<chrono::Local>,
+) -> Option<DateTime<Utc>> {
+    if sub.kind != "timer" {
+        return None;
+    }
+    if sub.every_seconds > 0 {
+        let next = slot.filter(|slot| slot.armed).map(|slot| slot.next_unix)?;
+        return DateTime::<Utc>::from_timestamp(next, 0);
+    }
+    let fired_today = slot.is_some_and(|slot| slot.last_key == now.format("%Y-%m-%d").to_string());
+    next_daily(
+        sub.hour.unwrap_or(8),
+        sub.minute.unwrap_or(0),
+        fired_today,
+        now,
+    )
+    .map(|time| time.with_timezone(&Utc))
+}
+
+/// Today's `hour:minute` if it is still ahead and has not fired, else
+/// tomorrow's.
+pub fn next_daily(
+    hour: u32,
+    minute: u32,
+    fired_today: bool,
+    now: DateTime<chrono::Local>,
+) -> Option<DateTime<chrono::Local>> {
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    let today = now
+        .date_naive()
+        .and_hms_opt(hour, minute, 0)?
+        .and_local_timezone(chrono::Local)
+        .single()?;
+    if today > now && !fired_today {
+        return Some(today);
+    }
+    now.date_naive()
+        .succ_opt()?
+        .and_hms_opt(hour, minute, 0)?
+        .and_local_timezone(chrono::Local)
+        .single()
 }
 
 fn label_of(sub: &Subscription) -> String {
@@ -844,6 +899,8 @@ fn write_runtime<T: Serialize>(cwd: &str, name: &str, value: &T) -> Result<(), S
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
@@ -973,6 +1030,60 @@ mod tests {
     }
 
     #[test]
+    fn a_daily_timer_names_its_next_time() {
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 10, 12, 7, 0, 0)
+            .single()
+            .unwrap();
+        let later_today = next_daily(8, 30, false, now).unwrap();
+        assert_eq!(
+            later_today.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-10-12 08:30"
+        );
+        let fired = next_daily(8, 30, true, now).unwrap();
+        assert_eq!(
+            fired.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-10-13 08:30"
+        );
+        let passed = next_daily(6, 0, false, now).unwrap();
+        assert_eq!(
+            passed.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-10-13 06:00"
+        );
+        assert!(next_daily(24, 0, false, now).is_none());
+    }
+
+    #[test]
+    fn an_interval_timer_reads_its_armed_deadline() {
+        let root = scratch("interval");
+        let dir = root.join(".arbos").join("subscriptions");
+        fs::write(
+            dir.join("tick.toml"),
+            "kind = \"timer\"\nevery_seconds = 600\n",
+        )
+        .unwrap();
+        assert!(
+            subscriptions(&root)[0].next_wake.is_empty(),
+            "not armed until the first tick"
+        );
+        let mut state = BTreeMap::new();
+        state.insert(
+            "tick.toml".to_owned(),
+            WakeState {
+                armed: true,
+                next_unix: 1_791_000_000,
+                ..WakeState::default()
+            },
+        );
+        write_state(&root.display().to_string(), &state).unwrap();
+        assert_eq!(
+            subscriptions(&root)[0].next_wake,
+            "2026-10-03T04:00:00+00:00"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn the_list_shows_each_file_and_remove_deletes_one() {
         let root = scratch("list");
         let dir = root.join(".arbos").join("subscriptions");
@@ -1007,6 +1118,16 @@ mod tests {
             !rows[2].expires.is_empty(),
             "the file time stands in for created"
         );
+
+        assert!(
+            rows[0].next_wake.is_empty(),
+            "CI is polled; no time is known"
+        );
+        assert!(
+            !rows[1].next_wake.is_empty(),
+            "a daily timer knows its next time"
+        );
+        assert!(rows[2].next_wake.is_empty(), "a pull request is polled");
 
         remove_subscription(&root, "morning").unwrap();
         assert!(!dir.join("morning.toml").exists());
