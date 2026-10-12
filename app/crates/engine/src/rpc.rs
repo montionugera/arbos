@@ -2542,7 +2542,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.harness_updates()?.set_policy(p.harness, p.policy))
             }
             methods::ARBOS_CALL => {
-                let value = self.arbos_call(params).map_err(RpcError::Failed)?;
+                let value = self.arbos_call(params).await.map_err(RpcError::Failed)?;
                 RpcReply::value(&value)
             }
             methods::MUTATE => {

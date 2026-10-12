@@ -81,6 +81,19 @@ pub(crate) async fn list_with_lease(
     force: bool,
     lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
 ) -> Result<Vec<Model>, HarnessError> {
+    catalog_with_lease(root, harness, force, lease)
+        .await
+        .map(|catalog| catalog.models)
+}
+
+/// Like [`list_with_lease`], keeping the catalog's source: `live`, `cache`
+/// (the last fetched list), or `static` (the built-in rows, nothing fetched).
+pub(crate) async fn catalog_with_lease(
+    root: &Path,
+    harness: Arc<dyn Harness>,
+    force: bool,
+    lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+) -> Result<ModelCatalog, HarnessError> {
     let root = root.to_path_buf();
     tokio::spawn(async move {
         let _lease = lease.clone();
@@ -88,6 +101,23 @@ pub(crate) async fn list_with_lease(
     })
     .await
     .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
+}
+
+/// The model ids the provider offers: the live list, else the last fetched
+/// one. An error when neither is available, so a caller never checks a slug
+/// against the built-in rows.
+pub(crate) async fn fetched_model_ids(
+    root: &Path,
+    harness: Arc<dyn Harness>,
+    lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+) -> Result<Vec<String>, String> {
+    let catalog = catalog_with_lease(root, harness, true, lease)
+        .await
+        .map_err(|error| error.to_string())?;
+    if catalog.source == "static" {
+        return Err("the model list could not be fetched".into());
+    }
+    Ok(catalog.models.into_iter().map(|model| model.id).collect())
 }
 
 #[cfg(test)]
@@ -104,16 +134,13 @@ async fn list_inner(
     harness: Arc<dyn Harness>,
     force: bool,
     lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
-) -> Result<Vec<Model>, HarnessError> {
+) -> Result<ModelCatalog, HarnessError> {
     let Some(context) = harness.model_context().map_err(|error| {
         let failure = CatalogFailure::from(error);
         tracing::warn!(code = %failure.code, error = %failure, "Model discovery context unavailable");
         HarnessError::from(failure)
     })? else {
-        return harness
-            .model_catalog(force)
-            .await
-            .map(|catalog| catalog.models);
+        return harness.model_catalog(force).await;
     };
     let path = location(root, harness.as_ref(), &context);
     let disk = read(&path, &context);
@@ -203,7 +230,7 @@ async fn list_inner(
         }
     };
     tracing::info!(harness = ?harness.id(), source = catalog.source, binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, model_count = catalog.models.len(), "Model discovery");
-    Ok(catalog.models)
+    Ok(catalog)
 }
 
 #[cfg(test)]
@@ -418,6 +445,35 @@ mod tests {
         );
         assert!(!dir.path().join("model-catalogs/codex/2.json").exists());
     }
+    #[tokio::test]
+    async fn fetched_ids_come_live_then_from_the_last_fetch_and_never_from_static_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Probe::new();
+        // Nothing fetched yet and the fetch fails: no list, not the static row.
+        probe.fail.store(true, SeqCst);
+        let error = fetched_model_ids(dir.path(), probe.clone(), None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("could not be fetched"), "{error}");
+        // A live fetch gives the live ids and is kept on disk.
+        probe.fail.store(false, SeqCst);
+        assert_eq!(
+            fetched_model_ids(dir.path(), probe.clone(), None)
+                .await
+                .unwrap(),
+            vec!["live".to_owned()]
+        );
+        // After a restart the fetch fails again: the last fetched list is used.
+        let restarted = Probe::new();
+        restarted.fail.store(true, SeqCst);
+        assert_eq!(
+            fetched_model_ids(dir.path(), restarted, None)
+                .await
+                .unwrap(),
+            vec!["live".to_owned()]
+        );
+    }
+
     #[tokio::test]
     async fn slow_live_probe_returns_disk_and_finishes_in_background() {
         let dir = tempfile::tempdir().unwrap();

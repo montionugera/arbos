@@ -48,14 +48,14 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
             ),
             tool(
                 "agents.send",
-                "Steer a running worker, or send a new prompt when it is idle. rename changes the worker's display name at once. model applies from the worker's next turn. text is optional when rename or model is given.",
+                "Steer a running worker, or send a new prompt when it is idle. rename changes the worker's display name at once. model applies from the worker's next turn and must be a model the provider offers; an unknown model is refused and the refusal lists the models on offer, so pick from that list. text is optional when rename or model is given.",
                 json!({
                     "type": "object",
                     "properties": {
                         "name": { "type": "string" },
                         "text": { "type": "string", "description": "The message. Steers a running turn, else becomes the next prompt." },
                         "rename": { "type": "string", "description": "New display name for the worker's tab." },
-                        "model": { "type": "string", "description": "Model id for the worker's next turn." }
+                        "model": { "type": "string", "description": "Model id for the worker's next turn, exactly as the provider lists it. Do not guess a slug; pick one from the list you are given." }
                     },
                     "required": ["name"]
                 }),

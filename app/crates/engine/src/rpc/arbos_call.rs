@@ -14,7 +14,7 @@ use crate::{new_id, now_ms};
 use crate::{arbos_context, arbos_live, arbos_wakes};
 
 impl EngineRpc {
-    pub(super) fn arbos_call(&self, params: Value) -> Result<Value, String> {
+    pub(super) async fn arbos_call(&self, params: Value) -> Result<Value, String> {
         let op = params
             .get("op")
             .and_then(Value::as_str)
@@ -35,7 +35,13 @@ impl EngineRpc {
         }
         match op.as_str() {
             "spawn" => self.spawn_worker(project_path, &params),
-            "send" => self.send_worker(project_path, &params),
+            "send" => {
+                if let Some(model) = text_field(&params, "model") {
+                    let offered = self.offered_worker_models().await?;
+                    check_worker_model(&model, &offered)?;
+                }
+                self.send_worker(project_path, &params)
+            }
             "list" => Ok(json!({ "agents": agent_rows(&arbos_layout::agents(project_path)) })),
             "result" => {
                 let name = text_field(&params, "name").ok_or_else(|| "name the worker".to_string())?;
@@ -146,6 +152,19 @@ impl EngineRpc {
             }
             _ => Err("unknown arbos op".into()),
         }
+    }
+
+    /// The model ids the worker harness offers right now, or the last list it
+    /// fetched. A worker's model is checked against this before it changes.
+    async fn offered_worker_models(&self) -> Result<Vec<String>, String> {
+        let lease = std::sync::Arc::new(self.registry.execution_lease(HarnessId::Fx).await);
+        let harness = self
+            .registry
+            .resolve(HarnessId::Fx)
+            .map_err(|err| err.to_string())?;
+        crate::model_catalogs::fetched_model_ids(self.repos.data_dir(), harness, Some(lease))
+            .await
+            .map_err(|err| format!("{err}, so the model was not changed; try again later"))
     }
 
     fn require_coordinator(&self, project: &Path, params: &Value) -> Result<(), String> {
@@ -560,6 +579,19 @@ fn origin_worker(project: &Path, params: &Value) -> Option<String> {
         .map(|agent| agent.id)
 }
 
+/// A worker's new model must be one the provider offers. The refusal names
+/// the models on offer so Main can pick from them.
+fn check_worker_model(requested: &str, offered: &[String]) -> Result<(), String> {
+    let requested = requested.trim();
+    if offered.iter().any(|id| id == requested) {
+        return Ok(());
+    }
+    Err(format!(
+        "the model {requested} is not on offer; pick one of: {}",
+        offered.join(", ")
+    ))
+}
+
 fn worker_model(model: &str) -> String {
     let model = model.trim();
     if model.is_empty() {
@@ -672,5 +704,30 @@ mod tests {
         })
         .unwrap();
         assert_eq!(done.state, GoalState::Complete);
+    }
+
+    fn offered() -> Vec<String> {
+        ["glm-5.3", "glm-5.2", "kimi-k2"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn a_model_on_offer_is_accepted() {
+        assert_eq!(check_worker_model("glm-5.2", &offered()), Ok(()));
+        assert_eq!(check_worker_model("  kimi-k2 ", &offered()), Ok(()));
+    }
+
+    #[test]
+    fn a_model_not_on_offer_is_refused_with_the_list() {
+        let err = check_worker_model("glm-4.7", &offered()).unwrap_err();
+        assert_eq!(
+            err,
+            "the model glm-4.7 is not on offer; pick one of: glm-5.3, glm-5.2, kimi-k2"
+        );
+        // Close is not the same model.
+        assert!(check_worker_model("glm-5", &offered()).is_err());
+        assert!(check_worker_model("GLM-5.3", &offered()).is_err());
     }
 }
