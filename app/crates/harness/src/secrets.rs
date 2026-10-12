@@ -1,4 +1,4 @@
-//! Provider keys for the fx child.
+//! Provider and tool keys for the fx child.
 //!
 //! macOS stores each key in the login keychain under the service `arbos`.
 //! Linux stores each key in a mode 600 file outside the project. The value is
@@ -22,13 +22,22 @@ pub const PROVIDERS: &[(&str, &str)] = &[
     ("grok", "GROK_API_KEY"),
 ];
 
+/// Secret name and the environment variable a worker's tools read. `gh`
+/// reads `GH_TOKEN` itself; `op` reads the service account token.
+pub const TOOLS: &[(&str, &str)] = &[
+    ("github", "GH_TOKEN"),
+    ("onepassword", "OP_SERVICE_ACCOUNT_TOKEN"),
+];
+
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "arbos";
 
-fn provider_env(name: &str) -> Option<&'static str> {
+/// The variable for a provider or tool secret name.
+fn secret_env(name: &str) -> Option<&'static str> {
     PROVIDERS
         .iter()
-        .find(|(provider, _)| *provider == name)
+        .chain(TOOLS)
+        .find(|(secret, _)| *secret == name)
         .map(|(_, env)| *env)
 }
 
@@ -61,8 +70,8 @@ fn reject_project_path(path: &Path) -> Result<(), String> {
 }
 
 /// Copy a key that is already in the process environment into the store when
-/// the store does not have it yet, then fill any empty provider variable from
-/// the store. The value is never logged.
+/// the store does not have it yet, then fill any empty provider or tool
+/// variable from the store. The value is never logged.
 pub fn install_process_env() {
     if let Ok(value) = std::env::var("ENGY_API_KEY") {
         let value = value.trim();
@@ -70,7 +79,7 @@ pub fn install_process_env() {
             let _ = write("engy", value);
         }
     }
-    for (name, var_name) in PROVIDERS {
+    for (name, var_name) in PROVIDERS.iter().chain(TOOLS) {
         if env_present(var_name) {
             continue;
         }
@@ -97,8 +106,18 @@ pub fn provider_env_pairs() -> Vec<(&'static str, String)> {
         .collect()
 }
 
+/// Stored tool variables for the fx child. A variable already set on this
+/// process is left to be inherited.
+pub fn tool_env_pairs() -> Vec<(&'static str, String)> {
+    TOOLS
+        .iter()
+        .filter(|(_, var_name)| !env_present(var_name))
+        .filter_map(|(name, var_name)| read(name).map(|value| (*var_name, value)))
+        .collect()
+}
+
 pub fn read(name: &str) -> Option<String> {
-    if provider_env(name).is_none() {
+    if secret_env(name).is_none() {
         return None;
     }
     let value = read_raw(name)?;
@@ -107,7 +126,7 @@ pub fn read(name: &str) -> Option<String> {
 }
 
 pub fn write(name: &str, value: &str) -> Result<(), String> {
-    if provider_env(name).is_none() {
+    if secret_env(name).is_none() {
         return Err("unknown provider".into());
     }
     let value = value.trim();
@@ -240,4 +259,37 @@ fn read_raw(_name: &str) -> Option<String> {
 #[cfg(not(unix))]
 fn write_raw(_name: &str, _value: &str) -> Result<(), String> {
     Err("key storage is not available on this system".into())
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stored_github_token_reaches_the_tool_env_and_an_unknown_name_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        // Tests share one process; no other test in this crate reads these.
+        unsafe {
+            std::env::set_var("ARBOS_SECRETS_DIR", dir.path());
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("OP_SERVICE_ACCOUNT_TOKEN");
+        }
+
+        write("github", "test-token-not-real").unwrap();
+        assert_eq!(read("github").as_deref(), Some("test-token-not-real"));
+        let pairs = tool_env_pairs();
+        assert_eq!(pairs, vec![("GH_TOKEN", "test-token-not-real".to_owned())]);
+        assert!(
+            provider_env_pairs()
+                .iter()
+                .all(|(name, _)| *name != "GH_TOKEN")
+        );
+
+        assert_eq!(
+            write("nonsense", "test-token-not-real"),
+            Err("unknown provider".to_owned())
+        );
+        assert!(read("nonsense").is_none());
+        assert!(!dir.path().join("nonsense").exists());
+    }
 }

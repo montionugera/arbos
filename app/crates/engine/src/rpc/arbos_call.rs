@@ -424,15 +424,22 @@ fn complete_goal(
 
 /// Settings → Keys. Writes the fx connection into the main agent's home and
 /// the secret into the keychain or the mode 600 file. The secret is not
-/// copied into the connection file or the reply.
+/// copied into the connection file or the reply. A tool key (GitHub,
+/// 1Password) goes to the store only; it has no fx connection.
 fn save_byok(project: &Path, params: &Value) -> Result<Value, String> {
     let provider = text_field(params, "provider").ok_or_else(|| "name the provider".to_string())?;
-    let spec = byok_spec(&provider).ok_or_else(|| "unknown provider".to_string())?;
     let secret = params
         .get("secret")
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or("");
+    if let Some((name, var_name)) = zeron_harness::secrets::TOOLS
+        .iter()
+        .find(|(name, _)| *name == provider)
+    {
+        return save_tool_key(name, var_name, secret);
+    }
+    let spec = byok_spec(&provider).ok_or_else(|| "unknown provider".to_string())?;
     let base_url = text_field(params, "baseUrl").unwrap_or_else(|| spec.base_url.to_owned());
     if spec.needs_key && secret.is_empty() {
         return Err("that provider needs a key".into());
@@ -453,6 +460,27 @@ fn save_byok(project: &Path, params: &Value) -> Result<Value, String> {
         "ok": true,
         "provider": spec.id,
         "stored": !secret.is_empty(),
+        "place": zeron_harness::secrets::place(),
+    }))
+}
+
+/// A worker tool token. The fx child reads it from its environment; `gh` and
+/// `op` read the variable themselves. The value is not logged.
+fn save_tool_key(
+    name: &'static str,
+    var_name: &'static str,
+    secret: &str,
+) -> Result<Value, String> {
+    if secret.is_empty() {
+        return Err("that tool needs a token".into());
+    }
+    zeron_harness::secrets::write(name, secret)?;
+    // The next fx child inherits this. The value is not logged.
+    unsafe { std::env::set_var(var_name, secret) };
+    Ok(json!({
+        "ok": true,
+        "provider": name,
+        "stored": true,
         "place": zeron_harness::secrets::place(),
     }))
 }
