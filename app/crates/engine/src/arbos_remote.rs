@@ -114,7 +114,7 @@ pub fn owns_project(project: &Path) -> bool {
     home == this_machine()
 }
 
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ARBOS_CONFIG_DIR") {
         let dir = dir.trim();
         if !dir.is_empty() {

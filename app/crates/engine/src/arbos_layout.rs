@@ -13,12 +13,18 @@ pub const COORDINATOR_PROMPT: &str = "\
 You are the coordinator for this project. \
 Plan the work and delegate it. Do not edit project code. \
 Context files are yours to keep current. \
-The arbos tools are mcp_arbos_agents_spawn, mcp_arbos_agents_send, mcp_arbos_agents_list, mcp_arbos_agents_result, mcp_arbos_status_step, mcp_arbos_context_read, and mcp_arbos_context_write. \
+The arbos tools are mcp_arbos_agents_spawn, mcp_arbos_agents_send, mcp_arbos_agents_list, mcp_arbos_agents_result, mcp_arbos_agents_transcript, mcp_arbos_status_step, mcp_arbos_context_usage, mcp_arbos_context_read, and mcp_arbos_context_write. \
 mcp_arbos_status_step sets the live step the person sees while you work: six words at most, starting with a verb, such as Checking the gate. \
 A tool works only after mcp_select_tool names it. The schema is ready on the next step, so call the tool then. \
 To spawn one worker: mcp_select_tool {\"name\":\"mcp_arbos_agents_spawn\"}, then mcp_arbos_agents_spawn. \
 Repeat that pair for every worker. Spawn returns at once. machine is \"local\" or the name of a registered install. \
 Start every independent worker before you wait for any of them. \
+Every message from the person follows one rule. \
+Answerable with no tool call or one quick call? Answer. \
+Otherwise delegate the whole request now, one worker per independent stream, in the same turn. \
+Pass paths, not content. End the turn after dispatch. \
+Do not poll a worker; its completion will wake you. \
+mcp_arbos_agents_transcript shows a worker's last few turns. Look once, with a small tail, and do not read a worker's files to follow it. \
 When a worker finishes you see a Worked line. \
 A Worked line can also be a subscription wake, with no message from the person. Answer that wake in one sentence. \
 The status page is rewritten when a worker reports. Do not write status.md yourself. \
@@ -31,17 +37,120 @@ The checklist is only the active goal's steps. Do not add a step from an older g
 When you tick one step, leave the other steps of this goal in place. \
 A `/goal` line already includes the workers to spawn. Send them at once. Do not wait for `/skill`. \
 An Active goal in GOALS.md stays active after a worker reports. Do not remove it. \
-Goals: `.arbos/context/GOALS.md`. Status: `.arbos/context/status.md`. Read them before acting.";
+Goals: `.arbos/context/GOALS.md`. Status: `.arbos/context/status.md`. Read them before acting. \
+The goal tools are mcp_arbos_goal_show, mcp_arbos_goal_schedule, mcp_arbos_goal_pause, mcp_arbos_goal_resume, mcp_arbos_goal_complete, and mcp_arbos_goal_clear. \
+A goal wake is a Worked line that carries <system_notification source=\"goal\">. It is not a message from the person. \
+On a goal wake, make progress or end the turn quietly. Call mcp_arbos_goal_complete only when the objective is proven. \
+Call mcp_arbos_goal_schedule with seconds to choose how long to wait before the next wake. \
+Stop ends the turn only; the goal stays until it is cleared or complete. \
+mcp_arbos_preferences_write saves one dated line about how the person wants work done, across every project. \
+Use it only when the person states a preference, corrects you, or repeats the same request.";
+
+/// Main's full system prompt. `preferences` is the text of
+/// `~/.arbos/preferences.md`; an empty string adds nothing.
+pub fn coordinator_prompt(preferences: &str) -> String {
+    let preferences = preferences.trim();
+    if preferences.is_empty() {
+        return COORDINATOR_PROMPT.to_owned();
+    }
+    format!(
+        "{COORDINATOR_PROMPT}\nHow the person wants work done, across every project:\n{preferences}"
+    )
+}
+
+/// Longest preference line `preferences.write` keeps.
+const PREFERENCE_CHARS: usize = 300;
+
+/// `~/.arbos/preferences.md`, the user-scope store. `ARBOS_CONFIG_DIR`
+/// moves it, as it moves every other user file.
+pub fn user_preferences_path() -> PathBuf {
+    crate::arbos_remote::config_dir().join("preferences.md")
+}
+
+/// The saved preference lines, one per line, for Main's prompt. Missing
+/// file: empty string.
+pub fn read_user_preferences() -> String {
+    read_preferences_at(&user_preferences_path())
+}
+
+/// `preferences.write { text }`: append one dated line. Returns the line.
+pub fn append_user_preference(text: &str) -> Result<String, String> {
+    append_preference_at(
+        &user_preferences_path(),
+        text,
+        chrono::Local::now().date_naive(),
+    )
+}
+
+fn read_preferences_at(path: &Path) -> String {
+    let Ok(text) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("- "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn append_preference_at(
+    path: &Path,
+    text: &str,
+    date: chrono::NaiveDate,
+) -> Result<String, String> {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return Err("the preference is empty".into());
+    }
+    if text.chars().count() > PREFERENCE_CHARS {
+        return Err(format!(
+            "keep a preference under {PREFERENCE_CHARS} characters"
+        ));
+    }
+    let line = format!("- {}: {text}", date.format("%Y-%m-%d"));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut body = fs::read_to_string(path).unwrap_or_else(|_| {
+        "# Preferences\n\nHow work should be done, in every project.\n".to_owned()
+    });
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&line);
+    body.push('\n');
+    fs::write(path, body).map_err(|e| e.to_string())?;
+    Ok(line)
+}
 
 pub const WORKER_PROMPT: &str = "\
 You are a worker. Do the brief. Do not spawn agents and do not edit project code. \
 Write the requested file with mcp_arbos_context_write. \
 Before that call, call mcp_select_tool with name mcp_arbos_context_write. \
-The path is relative to context, for example research/note.md. \
+The path is relative to context, for example internal/note.md. \
 Then reply with that path and stop. \
 Read `.arbos/context/GOALS.md` first. \
-Write what you learn to `.arbos/context/`. \
-Keep `status.md` current.";
+Write what you learn to `.arbos/context/`.";
+
+/// The house rules every worker gets after [`WORKER_PROMPT`]. `{id}` is the
+/// worker's agent id. [`worker_prompt`] fills it in.
+pub const WORKER_HOUSE_RULES: &str = "\
+You are a worker, not Main. Main owns `status.md` and `preferences.md`; do not edit them. \
+Write a deliverable to the exact path the brief assigns under `context/docs/`. \
+Write media under `context/media/`. \
+Write everything else, such as notes, evidence, and working files, under `context/internal/`. \
+Start every report under `docs/` or `internal/` with this frontmatter and nothing before it:\n\
+---\narbos:\n  agentId: \"{id}\"\n---\n\
+Edit only a report whose frontmatter carries your own agentId. Otherwise write a new file and link the old one. \
+End your reply with the outcome, the links, the blockers, and one line that starts with `Internal:` naming the files you wrote under `internal/`.";
+
+/// The full worker system prompt for one agent id.
+pub fn worker_prompt(agent_id: &str) -> String {
+    format!(
+        "{WORKER_PROMPT} {}",
+        WORKER_HOUSE_RULES.replace("{id}", agent_id)
+    )
+}
 
 pub const CHAT_PROMPT: &str = "\
 Read `.arbos/context/GOALS.md` first. \
@@ -49,6 +158,22 @@ Write what you learn to `.arbos/context/`. \
 Keep `status.md` current.";
 
 const GITIGNORE: &str = "runtime/\n";
+
+/// Folders under `context/`. `docs/` holds deliverables, `media/` holds
+/// stills and recordings, `internal/` holds everything else a worker writes.
+/// `research/` stays for the split skill.
+pub const CONTEXT_DIRS: [&str; 4] = ["docs", "internal", "media", "research"];
+
+/// Folders whose files are reports: a worker's write there must carry its
+/// own `arbos: agentId` frontmatter.
+const REPORT_DIRS: [&str; 2] = ["docs", "internal"];
+
+/// The fewest turns `agents.transcript` returns, the default, and the most.
+pub const TRANSCRIPT_TAIL_MIN: usize = 1;
+pub const TRANSCRIPT_TAIL_DEFAULT: usize = 10;
+pub const TRANSCRIPT_TAIL_MAX: usize = 50;
+/// Longest text kept per transcript field. The rest is replaced with `…`.
+const TRANSCRIPT_TEXT_BYTES: usize = 2000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectFile {
@@ -78,18 +203,24 @@ struct AgentFile {
     /// `local`, or the install name that runs this worker.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     machine: String,
+    /// Display name set by `agents.send { rename }`. Empty means the id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    name: String,
 }
 
 /// One row of `agents/*/agent.toml` for the tab strip and the list tool.
 #[derive(Debug, Clone)]
 pub struct AgentView {
     pub id: String,
+    /// The display name: the rename when there is one, else the id.
+    pub name: String,
     pub role: String,
     pub chat_id: String,
     pub status: String,
     pub brief: String,
     pub result: String,
     pub machine: String,
+    pub model: String,
 }
 
 /// A worker turn just ended. `main_chat_id` is the coordinator to wake.
@@ -108,12 +239,12 @@ pub struct TurnPrep {
     pub role: String,
 }
 
-fn layout_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn layout_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-fn root_of(project: &Path) -> PathBuf {
+pub(crate) fn root_of(project: &Path) -> PathBuf {
     project.join(".arbos")
 }
 
@@ -125,7 +256,7 @@ pub fn ensure(project: &Path, name: Option<&str>) -> Result<(), String> {
         return Err("project folder is missing".into());
     }
     let root = root_of(project);
-    fs::create_dir_all(root.join("context").join("research")).map_err(|e| e.to_string())?;
+    ensure_context_dirs(&root)?;
     fs::create_dir_all(root.join("subscriptions")).map_err(|e| e.to_string())?;
     fs::create_dir_all(root.join("agents").join("main").join("fx")).map_err(|e| e.to_string())?;
     fs::create_dir_all(root.join("runtime")).map_err(|e| e.to_string())?;
@@ -142,7 +273,6 @@ pub fn ensure(project: &Path, name: Option<&str>) -> Result<(), String> {
         &root.join("context").join("preferences.md"),
         "# Preferences\n\nHow work should be done in this project.\n",
     )?;
-    write_if_missing(&root.join("context").join("research").join(".gitkeep"), "")?;
     write_if_missing(&root.join("subscriptions").join(".gitkeep"), "")?;
     write_if_missing(
         &root.join("subscriptions").join("morning.toml"),
@@ -241,19 +371,169 @@ pub fn set_icon(project: &Path, icon: &str) -> Result<(), String> {
     write_toml(&path, &file)
 }
 
+/// Create every folder in [`CONTEXT_DIRS`] under `root/context`, each with a
+/// `.gitkeep` so an empty folder is still committed. Existing files stay.
+fn ensure_context_dirs(root: &Path) -> Result<(), String> {
+    let context = root.join("context");
+    for dir in CONTEXT_DIRS {
+        let path = context.join(dir);
+        fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+        write_if_missing(&path.join(".gitkeep"), "")?;
+    }
+    Ok(())
+}
+
 /// Write one file under `.arbos/context/`. The relative path cannot leave
 /// that directory.
 pub fn write_context(project: &Path, relative: &str, text: &str) -> Result<(), String> {
     let _guard = layout_lock();
     let relative = relative.trim();
+    engine_owned(relative)?;
+    write_context_unlocked(project, relative, text)
+}
+
+/// Files under `context/` that only the engine writes.
+fn engine_owned(relative: &str) -> Result<(), String> {
     if relative == "status.md" || relative == "archived.md" {
         return Err("Main writes the status page".into());
     }
+    if relative == "goal.toml" {
+        return Err("the goal tools write the goal record".into());
+    }
+    Ok(())
+}
+
+/// A worker's write. A report under `docs/` or `internal/` must start with
+/// the worker's own `arbos: agentId` frontmatter, and the worker cannot
+/// replace a report that another agent wrote.
+pub fn write_worker_context(
+    project: &Path,
+    agent_id: &str,
+    relative: &str,
+    text: &str,
+) -> Result<(), String> {
+    let _guard = layout_lock();
+    let relative = relative.trim();
+    engine_owned(relative)?;
+    let path = context_file(project, relative)?;
+    let existing = fs::read_to_string(&path).ok();
+    check_worker_report(relative, agent_id, text, existing.as_deref())?;
+    write_context_unlocked(project, relative, text)
+}
+
+fn write_context_unlocked(project: &Path, relative: &str, text: &str) -> Result<(), String> {
     let path = context_file(project, relative)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     fs::write(&path, text).map_err(|e| e.to_string())
+}
+
+/// The frontmatter rule for one worker write. `existing` is the file that is
+/// there now, if any. A path outside the report folders always passes.
+pub fn check_worker_report(
+    relative: &str,
+    agent_id: &str,
+    text: &str,
+    existing: Option<&str>,
+) -> Result<(), String> {
+    if !is_report_path(relative) {
+        return Ok(());
+    }
+    let claimed = report_agent_id(text).ok_or_else(|| {
+        format!("a report must start with frontmatter: ---, arbos:, agentId: \"{agent_id}\", ---")
+    })?;
+    if claimed != agent_id {
+        return Err(format!(
+            "the frontmatter names {claimed}; this worker is {agent_id}"
+        ));
+    }
+    if let Some(existing) = existing {
+        match report_agent_id(existing) {
+            Some(owner) if owner == agent_id => {}
+            Some(owner) => {
+                return Err(format!(
+                    "that report belongs to {owner}; write a new file and link this one"
+                ));
+            }
+            None => {
+                return Err(
+                    "that file is not a worker report; write a new file and link this one".into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_report_path(relative: &str) -> bool {
+    let relative = relative.trim().trim_start_matches('/');
+    let first = Path::new(relative)
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str());
+    let Some(first) = first else {
+        return false;
+    };
+    REPORT_DIRS.contains(&first) && Path::new(relative).components().count() > 1
+}
+
+/// The agent id a report claims in its leading frontmatter:
+///
+/// ```text
+/// ---
+/// arbos:
+///   agentId: "oak"
+/// ---
+/// ```
+///
+/// Nothing may come before the first `---`. Quotes around the id are
+/// optional. A one-line `arbos: agentId: "oak"` is accepted too.
+pub fn report_agent_id(text: &str) -> Option<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = text.lines();
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    let mut in_arbos = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            return None;
+        }
+        if let Some(rest) = trimmed.strip_prefix("arbos:") {
+            in_arbos = true;
+            if let Some(id) = frontmatter_value(rest.trim(), "agentId:") {
+                return Some(id);
+            }
+            continue;
+        }
+        if !line.starts_with([' ', '\t']) {
+            in_arbos = false;
+        }
+        if in_arbos && let Some(id) = frontmatter_value(trimmed, "agentId:") {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn frontmatter_value(line: &str, key: &str) -> Option<String> {
+    let value = line.strip_prefix(key)?.trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|rest| rest.strip_suffix('\''))
+        })
+        .unwrap_or(value)
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 pub fn read_context(project: &Path, relative: &str) -> Result<String, String> {
@@ -368,6 +648,7 @@ fn begin_goal(project: &Path, title: &str) -> Result<String, String> {
     fs::write(&path, format!("{}\n", spec.write_line)).map_err(|e| e.to_string())?;
     write_goals(project, title, Some(&spec.name))?;
     install_goal_steps(project, &spec)?;
+    crate::arbos_goal::start_goal_unlocked(project, title)?;
     Ok(skill_prompt(&spec, Some(title)))
 }
 
@@ -401,9 +682,7 @@ fn skill_prompt(spec: &SkillSpec, goal: Option<&str>) -> String {
         spec.name, spec.write_path, spec.write_line
     ));
     prompt.push_str("The goal stays active. Do not edit GOALS.md.\n");
-    prompt.push_str(
-        "The person already started the goal. Do not wait for another command.\n",
-    );
+    prompt.push_str("The person already started the goal. Do not wait for another command.\n");
     prompt.push_str(
         "Spawn these workers at once, before you wait for any of them, even if their files already exist. Do not write their files yourself.\n",
     );
@@ -804,7 +1083,10 @@ fn append_archived(project: &Path, section: &str, lines: &[String]) -> Result<()
     if !body.contains("# Archived") {
         body = format!("# Archived\n\n{body}");
     }
-    let fresh: Vec<&String> = lines.iter().filter(|line| !body.contains(line.as_str())).collect();
+    let fresh: Vec<&String> = lines
+        .iter()
+        .filter(|line| !body.contains(line.as_str()))
+        .collect();
     if fresh.is_empty() {
         return Ok(());
     }
@@ -884,7 +1166,11 @@ fn publish_status_page_unlocked(project: &Path) -> Result<(), String> {
         let target = format!("research/{}.md", agent.id);
         let rank = file_rank(&root.join("agents").join(&agent.id).join("agent.toml"));
         let readout = context_first_line(project, &target).unwrap_or_else(|| {
-            let line = agent.result.lines().map(str::trim).find(|line| !line.is_empty());
+            let line = agent
+                .result
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty());
             match line {
                 Some(line) if !line.contains('/') && line.chars().count() <= 72 => {
                     let mut text = line.trim_end_matches('.').to_owned();
@@ -1111,13 +1397,13 @@ pub fn prepare_turn(project: &Path, chat_id: &str) -> Option<TurnPrep> {
     let fx = root.join("agents").join(&agent.id).join("fx");
     fs::create_dir_all(&fx).ok()?;
     let system_prompt = match agent.role.as_str() {
-        "coordinator" => COORDINATOR_PROMPT,
-        "worker" => WORKER_PROMPT,
-        _ => CHAT_PROMPT,
+        "coordinator" => coordinator_prompt(&read_user_preferences()),
+        "worker" => worker_prompt(&agent.id),
+        _ => CHAT_PROMPT.to_owned(),
     };
     Some(TurnPrep {
         fx_home: fx.display().to_string(),
-        system_prompt: system_prompt.to_owned(),
+        system_prompt,
         agent_id: agent.id,
         role: agent.role,
     })
@@ -1169,6 +1455,7 @@ fn coordinator_agent() -> AgentFile {
         status: String::new(),
         result: String::new(),
         machine: String::new(),
+        name: String::new(),
     }
 }
 
@@ -1224,6 +1511,7 @@ pub fn reserve_worker(
         status: String::new(),
         result: String::new(),
         machine: String::new(),
+        name: String::new(),
     });
     if agent.role == "coordinator" {
         return Err("main is the coordinator".into());
@@ -1304,16 +1592,248 @@ pub fn worker_result(project: &Path, name: &str) -> Result<AgentView, String> {
         .ok_or_else(|| "no such worker".to_string())
 }
 
+/// One turn of a worker's fx conversation, as `agents.transcript` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TranscriptTurn {
+    /// 1-based position in the whole conversation.
+    pub index: usize,
+    pub user: String,
+    pub reply: String,
+    pub tools: Vec<String>,
+    /// `completed`, `interrupted`, or `open` for a turn still running.
+    pub ended: String,
+}
+
+/// The last few turns of one agent's conversation.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptView {
+    pub name: String,
+    pub total_turns: usize,
+    pub turns: Vec<TranscriptTurn>,
+}
+
+/// The last `tail` turns of a worker's fx `events.jsonl`. `tail` is clamped
+/// to [`TRANSCRIPT_TAIL_MIN`]..=[`TRANSCRIPT_TAIL_MAX`]; `None` means
+/// [`TRANSCRIPT_TAIL_DEFAULT`]. Reads one file; the rest of the log stays out
+/// of Main's context.
+pub fn worker_transcript(
+    project: &Path,
+    name: &str,
+    tail: Option<usize>,
+) -> Result<TranscriptView, String> {
+    let id = slug(name);
+    if id.is_empty() {
+        return Err("name the worker".into());
+    }
+    let dir = root_of(project).join("agents").join(&id);
+    if !dir.join("agent.toml").is_file() {
+        return Err("no such worker".into());
+    }
+    let tail = clamp_tail(tail);
+    let Some(log) = latest_events_log(&dir.join("fx")) else {
+        return Ok(TranscriptView {
+            name: id,
+            total_turns: 0,
+            turns: Vec::new(),
+        });
+    };
+    let text = fs::read_to_string(&log).map_err(|e| e.to_string())?;
+    let turns = parse_transcript(&text);
+    let total_turns = turns.len();
+    let skip = total_turns.saturating_sub(tail);
+    Ok(TranscriptView {
+        name: id,
+        total_turns,
+        turns: turns.into_iter().skip(skip).collect(),
+    })
+}
+
+fn clamp_tail(tail: Option<usize>) -> usize {
+    tail.unwrap_or(TRANSCRIPT_TAIL_DEFAULT)
+        .clamp(TRANSCRIPT_TAIL_MIN, TRANSCRIPT_TAIL_MAX)
+}
+
+/// fx keeps `<home>/.fx/sessions/<session>/events.jsonl`. A worker normally
+/// has one session; when it has more, the newest log wins.
+pub(crate) fn latest_events_log(fx_home: &Path) -> Option<PathBuf> {
+    let sessions = fs::read_dir(fx_home.join(".fx").join("sessions")).ok()?;
+    sessions
+        .flatten()
+        .map(|entry| entry.path().join("events.jsonl"))
+        .filter(|path| path.is_file())
+        .max_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
+}
+
+/// Group fx conversation frames into turns. A turn opens on `user` and
+/// closes on `turn_completed` or `interrupted`. Lines that do not parse are
+/// skipped; fx guards its own log.
+fn parse_transcript(text: &str) -> Vec<TranscriptTurn> {
+    let mut turns: Vec<TranscriptTurn> = Vec::new();
+    let mut open: Option<TranscriptTurn> = None;
+    for line in text.lines() {
+        let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(event) = frame.get("event").and_then(|event| event.as_object()) else {
+            continue;
+        };
+        let Some((kind, payload)) = event.iter().next() else {
+            continue;
+        };
+        let string = |key: &str| {
+            payload
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        };
+        match kind.as_str() {
+            "user" => {
+                if let Some(turn) = open.take() {
+                    turns.push(close_turn(turn, "open"));
+                }
+                open = Some(TranscriptTurn {
+                    index: turns.len() + 1,
+                    user: clip_text(&string("text")),
+                    reply: String::new(),
+                    tools: Vec::new(),
+                    ended: "open".into(),
+                });
+            }
+            "assistant" => {
+                if let Some(turn) = open.as_mut() {
+                    let text = string("text");
+                    if !text.trim().is_empty() {
+                        if !turn.reply.is_empty() {
+                            turn.reply.push('\n');
+                        }
+                        turn.reply.push_str(&text);
+                    }
+                }
+            }
+            "tool_call" => {
+                if let Some(turn) = open.as_mut() {
+                    let name = string("tool_name");
+                    if !name.is_empty() {
+                        turn.tools.push(name);
+                    }
+                }
+            }
+            "turn_completed" => {
+                if let Some(turn) = open.take() {
+                    turns.push(close_turn(turn, "completed"));
+                }
+            }
+            "interrupted" => {
+                if let Some(turn) = open.take() {
+                    turns.push(close_turn(turn, "interrupted"));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(turn) = open {
+        turns.push(close_turn(turn, "open"));
+    }
+    turns
+}
+
+fn close_turn(mut turn: TranscriptTurn, ended: &str) -> TranscriptTurn {
+    turn.reply = clip_text(&turn.reply);
+    turn.ended = ended.to_owned();
+    turn
+}
+
+fn clip_text(text: &str) -> String {
+    let text = text.trim();
+    if text.len() <= TRANSCRIPT_TEXT_BYTES {
+        return text.to_owned();
+    }
+    let mut end = TRANSCRIPT_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
 fn agent_view(agent: AgentFile) -> AgentView {
+    let name = if agent.name.trim().is_empty() {
+        agent.id.clone()
+    } else {
+        agent.name.trim().to_owned()
+    };
     AgentView {
         id: agent.id,
+        name,
         role: agent.role,
         chat_id: agent.chat_id,
         status: agent.status,
         brief: agent.brief,
         result: agent.result,
         machine: agent.machine,
+        model: agent.model,
     }
+}
+
+/// Longest display name `agents.send { rename }` keeps.
+const AGENT_NAME_CHARS: usize = 40;
+
+/// `agents.send { rename }`: change a worker's display name. The id, the
+/// folder, and the chat id stay the same.
+pub fn rename_worker(project: &Path, worker_id: &str, name: &str) -> Result<AgentView, String> {
+    let _guard = layout_lock();
+    let name: String = name.trim().chars().take(AGENT_NAME_CHARS).collect();
+    let name = name.trim().to_owned();
+    if name.is_empty() || name.contains(['\n', '\r']) {
+        return Err("the new name is empty".into());
+    }
+    update_worker(project, worker_id, |agent| {
+        agent.name = name;
+        Ok(())
+    })
+}
+
+/// `agents.send { model }`: the model a worker uses from its next turn. A
+/// running turn keeps the model it started with.
+pub fn set_worker_model(project: &Path, worker_id: &str, model: &str) -> Result<AgentView, String> {
+    let _guard = layout_lock();
+    let model = model.trim().to_owned();
+    if model.is_empty() || model.contains(char::is_whitespace) {
+        return Err("name one model".into());
+    }
+    update_worker(project, worker_id, |agent| {
+        agent.model = model;
+        Ok(())
+    })
+}
+
+/// A new prompt goes to an idle worker. Its status returns to `working`, so
+/// the end of that turn wakes Main again.
+pub fn restart_worker(project: &Path, worker_id: &str) -> Result<AgentView, String> {
+    let _guard = layout_lock();
+    update_worker(project, worker_id, |agent| {
+        agent.status = "working".into();
+        agent.result.clear();
+        Ok(())
+    })
+}
+
+fn update_worker<F>(project: &Path, worker_id: &str, change: F) -> Result<AgentView, String>
+where
+    F: FnOnce(&mut AgentFile) -> Result<(), String>,
+{
+    let id = slug(worker_id);
+    if id.is_empty() {
+        return Err("name the worker".into());
+    }
+    let path = root_of(project).join("agents").join(&id).join("agent.toml");
+    let mut agent = read_agent(&path).ok_or_else(|| "no such worker".to_string())?;
+    if agent.role != "worker" {
+        return Err("only a worker can be renamed or re-modeled".into());
+    }
+    change(&mut agent)?;
+    write_toml(&path, &agent)?;
+    Ok(agent_view(agent))
 }
 
 fn worker_id(project: &Path, name: &str) -> Result<String, String> {
@@ -1401,6 +1921,7 @@ fn bind_agent(root: &Path, chat_id: &str) -> Result<AgentFile, String> {
                 status: String::new(),
                 result: String::new(),
                 machine: String::new(),
+                name: String::new(),
             };
             let dir = root.join("agents").join(&id);
             fs::create_dir_all(dir.join("fx")).map_err(|e| e.to_string())?;
@@ -1582,5 +2103,462 @@ mod summary_failure_tests {
         .unwrap();
         assert_eq!(auto_compact_percent(&root), 10);
         let _ = fs::remove_dir_all(PathBuf::from(&root));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OAK_REPORT: &str = "---\narbos:\n  agentId: \"oak\"\n---\n# Note\n";
+
+    #[test]
+    fn context_layout_has_docs_internal_media_and_research() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".arbos");
+        ensure_context_dirs(&root).unwrap();
+        for name in CONTEXT_DIRS {
+            let path = root.join("context").join(name);
+            assert!(path.is_dir(), "{name} is missing");
+            assert!(path.join(".gitkeep").is_file(), "{name} has no .gitkeep");
+        }
+        assert!(root.join("context").join("internal").is_dir());
+        // A second call leaves an existing file alone.
+        fs::write(root.join("context").join("internal").join("a.md"), "kept").unwrap();
+        ensure_context_dirs(&root).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("context").join("internal").join("a.md")).unwrap(),
+            "kept"
+        );
+    }
+
+    #[test]
+    fn worker_prompt_carries_the_house_rules_and_the_id() {
+        let prompt = worker_prompt("oak");
+        assert!(prompt.starts_with(WORKER_PROMPT));
+        assert!(prompt.contains("You are a worker, not Main."));
+        assert!(prompt.contains("Main owns `status.md` and `preferences.md`"));
+        assert!(prompt.contains("Read `.arbos/context/GOALS.md` first."));
+        assert!(prompt.contains("context/docs/"));
+        assert!(prompt.contains("context/media/"));
+        assert!(prompt.contains("context/internal/"));
+        assert!(prompt.contains("---\narbos:\n  agentId: \"oak\"\n---"));
+        assert!(!prompt.contains("{id}"));
+        assert!(prompt.contains("`Internal:`"));
+        assert!(!prompt.contains("Keep `status.md` current"));
+        assert!(
+            COORDINATOR_PROMPT.contains("Answerable with no tool call or one quick call? Answer.")
+        );
+        assert!(COORDINATOR_PROMPT.contains("Do not poll a worker; its completion will wake you."));
+        assert!(COORDINATOR_PROMPT.contains("mcp_arbos_agents_transcript"));
+    }
+
+    #[test]
+    fn frontmatter_names_the_agent() {
+        assert_eq!(report_agent_id(OAK_REPORT).as_deref(), Some("oak"));
+        assert_eq!(
+            report_agent_id("---\narbos:\n  agentId: pine\n---\n").as_deref(),
+            Some("pine")
+        );
+        assert_eq!(
+            report_agent_id("---\narbos: agentId: 'elm'\n---\nbody").as_deref(),
+            Some("elm")
+        );
+        assert_eq!(
+            report_agent_id("\u{feff}---\ntitle: x\narbos:\n  agentId: \"oak\"\n---\n").as_deref(),
+            Some("oak")
+        );
+        // Text before the first fence, no fence, a closed block without the
+        // key, or a key outside the arbos map all fail.
+        assert_eq!(
+            report_agent_id("# Note\n---\narbos:\n  agentId: \"oak\"\n---\n"),
+            None
+        );
+        assert_eq!(report_agent_id("arbos:\n  agentId: \"oak\"\n"), None);
+        assert_eq!(
+            report_agent_id("---\ntitle: x\n---\narbos:\n  agentId: \"oak\"\n"),
+            None
+        );
+        assert_eq!(
+            report_agent_id("---\nother:\n  agentId: \"oak\"\n---\n"),
+            None
+        );
+        assert_eq!(report_agent_id("---\narbos:\n  agentId: \"\"\n---\n"), None);
+        assert_eq!(report_agent_id(""), None);
+    }
+
+    #[test]
+    fn worker_reports_need_their_own_frontmatter() {
+        // Outside docs/ and internal/ nothing is checked.
+        assert!(check_worker_report("research/oak.md", "oak", "one line", None).is_ok());
+        assert!(check_worker_report("status.md", "oak", "# Status", None).is_ok());
+        // A report needs frontmatter with this worker's id.
+        assert!(check_worker_report("internal/note.md", "oak", "# Note", None).is_err());
+        assert!(check_worker_report("docs/note.md", "oak", "# Note", None).is_err());
+        let pine = OAK_REPORT.replace("oak", "pine");
+        assert!(check_worker_report("internal/note.md", "oak", &pine, None).is_err());
+        assert!(check_worker_report("internal/note.md", "oak", OAK_REPORT, None).is_ok());
+        assert!(check_worker_report("docs/deep/er/note.md", "oak", OAK_REPORT, None).is_ok());
+        // An existing report: only the owner may replace it.
+        assert!(
+            check_worker_report("internal/note.md", "oak", OAK_REPORT, Some(OAK_REPORT)).is_ok()
+        );
+        assert!(check_worker_report("internal/note.md", "oak", OAK_REPORT, Some(&pine)).is_err());
+        assert!(
+            check_worker_report("internal/note.md", "oak", OAK_REPORT, Some("# Main's doc"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn worker_write_enforces_the_frontmatter_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        fs::create_dir_all(root_of(project).join("context")).unwrap();
+        assert!(write_worker_context(project, "oak", "internal/note.md", "# Note").is_err());
+        assert!(
+            !root_of(project)
+                .join("context")
+                .join("internal")
+                .join("note.md")
+                .exists()
+        );
+        write_worker_context(project, "oak", "internal/note.md", OAK_REPORT).unwrap();
+        assert_eq!(
+            read_context(project, "internal/note.md").unwrap(),
+            OAK_REPORT
+        );
+        let pine = OAK_REPORT.replace("oak", "pine");
+        assert!(write_worker_context(project, "pine", "internal/note.md", &pine).is_err());
+        assert_eq!(
+            read_context(project, "internal/note.md").unwrap(),
+            OAK_REPORT
+        );
+        write_worker_context(project, "pine", "internal/pine.md", &pine).unwrap();
+        // Main's own writes are not checked.
+        write_context(project, "docs/plan.md", "# Plan").unwrap();
+        write_worker_context(project, "oak", "research/oak.md", "Oak is ready.").unwrap();
+    }
+
+    fn frame(seq: usize, kind: &str, payload: serde_json::Value) -> String {
+        let mut event = serde_json::Map::new();
+        event.insert(kind.to_owned(), payload);
+        serde_json::json!({
+            "schema_version": 3,
+            "seq": seq,
+            "timestamp_ms": 1_700_000_000_000u64 + seq as u64,
+            "event": event,
+        })
+        .to_string()
+    }
+
+    /// `turns` completed turns, each with one tool call, then one open turn.
+    fn events_log(turns: usize) -> String {
+        let mut seq = 0;
+        let mut lines = Vec::new();
+        let mut next = |kind: &str, payload: serde_json::Value| {
+            seq += 1;
+            lines.push(frame(seq, kind, payload));
+        };
+        for n in 1..=turns {
+            next(
+                "user",
+                serde_json::json!({ "text": format!("ask {n}"), "images": [], "work_id": null }),
+            );
+            next(
+                "tool_call",
+                serde_json::json!({ "call_id": format!("c{n}"), "tool_name": "read_file", "arguments_json": "{}" }),
+            );
+            next(
+                "tool_result",
+                serde_json::json!({ "call_id": format!("c{n}"), "tool_name": "read_file", "status": "ok" }),
+            );
+            next(
+                "assistant",
+                serde_json::json!({ "text": format!("part {n}") }),
+            );
+            next(
+                "assistant",
+                serde_json::json!({ "text": format!("reply {n}") }),
+            );
+            next("turn_completed", serde_json::json!({ "files": [] }));
+        }
+        next("user", serde_json::json!({ "text": "still going" }));
+        next("assistant", serde_json::json!({ "text": "" }));
+        lines.push("not json".into());
+        lines.join("\n") + "\n"
+    }
+
+    fn worker_with_log(project: &Path, id: &str, log: &str) {
+        let dir = root_of(project).join("agents").join(id);
+        let session = dir.join("fx").join(".fx").join("sessions").join("S1");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("events.jsonl"), log).unwrap();
+        write_toml(
+            &dir.join("agent.toml"),
+            &AgentFile {
+                id: id.into(),
+                role: "worker".into(),
+                chat_id: "chat".into(),
+                model: "m".into(),
+                parent: "main".into(),
+                brief: "b".into(),
+                status: "working".into(),
+                result: String::new(),
+                machine: "local".into(),
+                name: String::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn transcript_groups_frames_into_turns() {
+        let turns = parse_transcript(&events_log(2));
+        assert_eq!(turns.len(), 3);
+        assert_eq!(
+            turns[0],
+            TranscriptTurn {
+                index: 1,
+                user: "ask 1".into(),
+                reply: "part 1\nreply 1".into(),
+                tools: vec!["read_file".into()],
+                ended: "completed".into(),
+            }
+        );
+        assert_eq!(turns[1].index, 2);
+        assert_eq!(turns[2].user, "still going");
+        assert_eq!(turns[2].reply, "");
+        assert_eq!(turns[2].ended, "open");
+        let interrupted = [
+            frame(1, "user", serde_json::json!({ "text": "go" })),
+            frame(2, "interrupted", serde_json::json!({ "reason": "user" })),
+        ]
+        .join("\n");
+        assert_eq!(parse_transcript(&interrupted)[0].ended, "interrupted");
+        let long = "x".repeat(TRANSCRIPT_TEXT_BYTES + 50);
+        let clipped = parse_transcript(&frame(1, "user", serde_json::json!({ "text": long })));
+        assert_eq!(clipped[0].user.chars().count(), TRANSCRIPT_TEXT_BYTES + 1);
+        assert!(clipped[0].user.ends_with('…'));
+    }
+
+    #[test]
+    fn transcript_tail_is_bounded() {
+        assert_eq!(clamp_tail(None), TRANSCRIPT_TAIL_DEFAULT);
+        assert_eq!(clamp_tail(Some(0)), TRANSCRIPT_TAIL_MIN);
+        assert_eq!(clamp_tail(Some(3)), 3);
+        assert_eq!(clamp_tail(Some(usize::MAX)), TRANSCRIPT_TAIL_MAX);
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        // 60 completed turns plus one open turn: more than the largest tail.
+        worker_with_log(project, "oak", &events_log(60));
+
+        let view = worker_transcript(project, "oak", Some(3)).unwrap();
+        assert_eq!(view.name, "oak");
+        assert_eq!(view.total_turns, 61);
+        assert_eq!(view.turns.len(), 3);
+        assert_eq!(view.turns[0].index, 59);
+        assert_eq!(view.turns[0].user, "ask 59");
+        assert_eq!(view.turns[2].index, 61);
+        assert_eq!(view.turns[2].ended, "open");
+
+        let default = worker_transcript(project, "Oak", None).unwrap();
+        assert_eq!(default.turns.len(), TRANSCRIPT_TAIL_DEFAULT);
+        assert_eq!(default.turns[0].index, 61 - TRANSCRIPT_TAIL_DEFAULT + 1);
+
+        let most = worker_transcript(project, "oak", Some(10_000)).unwrap();
+        assert_eq!(most.turns.len(), TRANSCRIPT_TAIL_MAX);
+        assert_eq!(most.turns.last().unwrap().index, 61);
+
+        let least = worker_transcript(project, "oak", Some(0)).unwrap();
+        assert_eq!(least.turns.len(), 1);
+
+        // A short log returns everything it has.
+        worker_with_log(project, "pine", &events_log(2));
+        let short = worker_transcript(project, "pine", Some(10)).unwrap();
+        assert_eq!(short.total_turns, 3);
+        assert_eq!(short.turns.len(), 3);
+
+        // A worker with no fx session yet, and a worker that does not exist.
+        let dir = root_of(project).join("agents").join("elm");
+        fs::create_dir_all(dir.join("fx")).unwrap();
+        fs::copy(
+            root_of(project)
+                .join("agents")
+                .join("pine")
+                .join("agent.toml"),
+            dir.join("agent.toml"),
+        )
+        .unwrap();
+        let empty = worker_transcript(project, "elm", None).unwrap();
+        assert_eq!(empty.total_turns, 0);
+        assert!(empty.turns.is_empty());
+        assert!(worker_transcript(project, "ash", None).is_err());
+        assert!(worker_transcript(project, "", None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod goal_tests {
+    use super::*;
+    use crate::arbos_goal::{self, GoalState};
+
+    fn worker_file(id: &str, chat_id: &str, status: &str) -> AgentFile {
+        AgentFile {
+            id: id.into(),
+            role: "worker".into(),
+            chat_id: chat_id.into(),
+            model: "glm-5.3".into(),
+            parent: "main".into(),
+            brief: "the brief".into(),
+            status: status.into(),
+            result: String::new(),
+            machine: "local".into(),
+            name: String::new(),
+        }
+    }
+
+    fn put_agent(project: &Path, agent: &AgentFile) {
+        let dir = root_of(project).join("agents").join(&agent.id);
+        fs::create_dir_all(dir.join("fx")).unwrap();
+        write_toml(&dir.join("agent.toml"), agent).unwrap();
+    }
+
+    #[test]
+    fn rename_changes_the_display_name_and_keeps_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        put_agent(project, &worker_file("oak", "chat-oak", "working"));
+        let mut main = coordinator_agent();
+        main.chat_id = "chat-main".into();
+        put_agent(project, &main);
+
+        let before = worker_result(project, "oak").unwrap();
+        assert_eq!(before.name, "oak");
+        let renamed = rename_worker(project, "oak", "  Oak the tester  ").unwrap();
+        assert_eq!(renamed.id, "oak");
+        assert_eq!(renamed.name, "Oak the tester");
+        assert_eq!(renamed.chat_id, "chat-oak");
+        assert_eq!(
+            worker_result(project, "oak").unwrap().name,
+            "Oak the tester"
+        );
+        assert!(
+            agents(project)
+                .iter()
+                .any(|row| row.id == "oak" && row.name == "Oak the tester")
+        );
+        // A long name is cut; an empty one is refused; Main is not a worker.
+        let long = "x".repeat(100);
+        assert_eq!(
+            rename_worker(project, "oak", &long)
+                .unwrap()
+                .name
+                .chars()
+                .count(),
+            AGENT_NAME_CHARS
+        );
+        assert!(rename_worker(project, "oak", "   ").is_err());
+        assert!(rename_worker(project, "main", "Boss").is_err());
+        assert!(rename_worker(project, "nobody", "x").is_err());
+        // The id-based lookups still work after a rename.
+        assert!(worker_result(project, "Oak").is_ok());
+    }
+
+    #[test]
+    fn model_is_stored_for_the_next_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        put_agent(project, &worker_file("oak", "chat-oak", "working"));
+        assert_eq!(worker_result(project, "oak").unwrap().model, "glm-5.3");
+        let changed = set_worker_model(project, "oak", " claude-x ").unwrap();
+        assert_eq!(changed.model, "claude-x");
+        assert_eq!(worker_result(project, "oak").unwrap().model, "claude-x");
+        assert!(set_worker_model(project, "oak", "").is_err());
+        assert!(set_worker_model(project, "oak", "two words").is_err());
+        assert_eq!(worker_result(project, "oak").unwrap().model, "claude-x");
+        // The rename did not touch the model, and the model did not touch the name.
+        rename_worker(project, "oak", "Oak").unwrap();
+        let view = worker_result(project, "oak").unwrap();
+        assert_eq!(
+            (view.name.as_str(), view.model.as_str()),
+            ("Oak", "claude-x")
+        );
+    }
+
+    #[test]
+    fn a_finishing_worker_does_not_resume_a_paused_goal() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        fs::create_dir_all(root_of(project).join("context")).unwrap();
+        let mut main = coordinator_agent();
+        main.chat_id = "chat-main".into();
+        put_agent(project, &main);
+        put_agent(project, &worker_file("oak", "chat-oak", "working"));
+        arbos_goal::start_goal(project, "Ship the thing").unwrap();
+        arbos_goal::pause_goal(project).unwrap();
+
+        let done = finish_worker(project, "chat-oak", "done", "Oak is ready.").unwrap();
+        assert_eq!(done.main_chat_id, "chat-main");
+        let goal = arbos_goal::read_goal(project).unwrap();
+        assert_eq!(goal.state, GoalState::Paused);
+        assert_eq!(goal.wakes, 0);
+        assert!(arbos_goal::take_goal_wake(project, false).is_none());
+        // A complete goal stays complete through a worker report as well.
+        arbos_goal::complete_goal(project).unwrap();
+        put_agent(project, &worker_file("pine", "chat-pine", "working"));
+        finish_worker(project, "chat-pine", "done", "Pine is ready.").unwrap();
+        assert_eq!(
+            arbos_goal::read_goal(project).unwrap().state,
+            GoalState::Complete
+        );
+    }
+
+    #[test]
+    fn goal_record_is_not_writable_through_context_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        fs::create_dir_all(root_of(project).join("context")).unwrap();
+        assert!(write_context(project, "goal.toml", "state = \"active\"").is_err());
+        assert!(write_context(project, "research/note.md", "fine").is_ok());
+    }
+
+    #[test]
+    fn preferences_read_and_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deeper").join("preferences.md");
+        assert_eq!(read_preferences_at(&path), "");
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
+        assert!(append_preference_at(&path, "   ", date).is_err());
+        assert!(append_preference_at(&path, &"x".repeat(PREFERENCE_CHARS + 1), date).is_err());
+        assert!(!path.exists());
+
+        let first = append_preference_at(&path, "  Short answers.\nNo lists. ", date).unwrap();
+        assert_eq!(first, "- 2026-10-12: Short answers. No lists.");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# Preferences\n"));
+        assert!(text.ends_with("- 2026-10-12: Short answers. No lists.\n"));
+
+        let later = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        append_preference_at(&path, "Ask before deleting.", later).unwrap();
+        assert_eq!(
+            read_preferences_at(&path),
+            "- 2026-10-12: Short answers. No lists.\n- 2026-11-01: Ask before deleting."
+        );
+        // The heading is not a preference line.
+        assert!(!read_preferences_at(&path).contains("# Preferences"));
+    }
+
+    #[test]
+    fn main_prompt_carries_the_preferences_each_turn() {
+        assert_eq!(coordinator_prompt(""), COORDINATOR_PROMPT);
+        assert_eq!(coordinator_prompt("  \n "), COORDINATOR_PROMPT);
+        let prompt = coordinator_prompt("- 2026-10-12: Short answers.");
+        assert!(prompt.starts_with(COORDINATOR_PROMPT));
+        assert!(prompt.ends_with("across every project:\n- 2026-10-12: Short answers."));
+        assert!(COORDINATOR_PROMPT.contains("mcp_arbos_goal_schedule"));
+        assert!(COORDINATOR_PROMPT.contains("mcp_arbos_preferences_write"));
+        assert!(COORDINATOR_PROMPT.contains("make progress or end the turn quietly"));
     }
 }

@@ -16,6 +16,8 @@ use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
 use zeron_sync::DocsStore;
 
 pub mod agent_accounts;
+pub mod arbos_context;
+pub mod arbos_goal;
 pub mod arbos_layout;
 pub mod arbos_live;
 pub mod arbos_phone;

@@ -454,6 +454,11 @@ mod tests {
         );
         assert!(worker_wake(&root, "docs-chat", "done", "again").is_none());
         assert!(worker_wake(&root, "main-chat", "done", "main is not a worker").is_none());
+        // A new prompt to the idle worker arms the next wake.
+        crate::arbos_layout::restart_worker(&root, "docs").unwrap();
+        let second = worker_wake(&root, "docs-chat", "done", "Second reply.").unwrap();
+        assert_eq!(second.body, "Worker docs done.\nSecond reply.");
+        assert!(worker_wake(&root, "docs-chat", "done", "again").is_none());
         let _ = fs::remove_dir_all(&root);
     }
 

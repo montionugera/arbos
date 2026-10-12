@@ -8,9 +8,10 @@ use zeron_doc::SessionCommandPayload;
 use zeron_proto::{ChatConfig, HarnessId, RunRequest, SandboxLevel};
 
 use super::EngineRpc;
+use crate::arbos_goal;
 use crate::arbos_layout::{self, AgentView};
 use crate::new_id;
-use crate::{arbos_live, arbos_wakes};
+use crate::{arbos_context, arbos_live, arbos_wakes};
 
 impl EngineRpc {
     pub(super) fn arbos_call(&self, params: Value) -> Result<Value, String> {
@@ -41,6 +42,15 @@ impl EngineRpc {
                 let agent = arbos_layout::worker_result(project_path, &name)?;
                 Ok(agent_row(&agent))
             }
+            "transcript" => {
+                let name = text_field(&params, "name").ok_or_else(|| "name the worker".to_string())?;
+                let tail = params
+                    .get("tail")
+                    .and_then(Value::as_u64)
+                    .map(|tail| usize::try_from(tail).unwrap_or(usize::MAX));
+                let view = arbos_layout::worker_transcript(project_path, &name, tail)?;
+                serde_json::to_value(view).map_err(|err| err.to_string())
+            }
             "read" => {
                 let path = context_path(&params)?;
                 let text = arbos_layout::read_context(project_path, &path)?;
@@ -52,10 +62,49 @@ impl EngineRpc {
                     .get("text")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "text is missing".to_string())?;
-                arbos_layout::write_context(project_path, &path, text)?;
+                match origin_worker(project_path, &params) {
+                    Some(worker) => arbos_layout::write_worker_context(project_path, &worker, &path, text)?,
+                    None => arbos_layout::write_context(project_path, &path, text)?,
+                }
                 Ok(json!({ "path": path, "bytes": text.len() }))
             }
             "byok" => save_byok(project_path, &params),
+            "goal_show" => goal_row_json(project_path),
+            "goal_schedule" => {
+                self.require_coordinator(project_path, &params)?;
+                let seconds = params
+                    .get("seconds")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "seconds is missing".to_string())?;
+                arbos_goal::schedule_goal(project_path, seconds)?;
+                goal_row_json(project_path)
+            }
+            "goal_pause" => {
+                self.require_coordinator(project_path, &params)?;
+                arbos_goal::pause_goal(project_path)?;
+                goal_row_json(project_path)
+            }
+            "goal_resume" => {
+                self.require_coordinator(project_path, &params)?;
+                arbos_goal::resume_goal(project_path)?;
+                goal_row_json(project_path)
+            }
+            "goal_complete" => {
+                self.require_coordinator(project_path, &params)?;
+                arbos_goal::complete_goal(project_path)?;
+                goal_row_json(project_path)
+            }
+            "goal_clear" => {
+                self.require_coordinator(project_path, &params)?;
+                arbos_goal::clear_goal(project_path)?;
+                Ok(json!({ "goal": Value::Null }))
+            }
+            "preferences_write" => {
+                self.require_coordinator(project_path, &params)?;
+                let text = text_field(&params, "text").ok_or_else(|| "the preference is empty".to_string())?;
+                let line = arbos_layout::append_user_preference(&text)?;
+                Ok(json!({ "line": line }))
+            }
             "step" => {
                 self.require_coordinator(project_path, &params)?;
                 let text = text_field(&params, "text").ok_or_else(|| "the step is empty".to_string())?;
@@ -63,6 +112,17 @@ impl EngineRpc {
                 Ok(json!({ "step": step }))
             }
             "live" => Ok(live_row(project_path)),
+            "context_usage" => {
+                let main = arbos_layout::main_chat_id(project_path);
+                let window = self
+                    .doc_host
+                    .open(&main)
+                    .ok()
+                    .and_then(|handle| handle.doc().context_usage())
+                    .and_then(|usage| usage.window);
+                let view = arbos_context::usage(project_path, window);
+                serde_json::to_value(view).map_err(|err| err.to_string())
+            }
             "seen" => {
                 arbos_live::mark_seen(project_path)?;
                 Ok(live_row(project_path))
@@ -181,11 +241,47 @@ impl EngineRpc {
         }))
     }
 
+    /// `agents.send { name, text?, rename?, model? }`. A rename changes the
+    /// tab label at once. A model applies from the worker's next turn. Text
+    /// steers a running turn, else it is queued as the next prompt.
     fn send_worker(&self, project: &Path, params: &Value) -> Result<Value, String> {
         self.require_coordinator(project, params)?;
         let name = text_field(params, "name").ok_or_else(|| "name the worker".to_string())?;
-        let text = text_field(params, "text").ok_or_else(|| "the message is empty".to_string())?;
-        let worker = arbos_layout::worker_result(project, &name)?;
+        let text = text_field(params, "text");
+        let rename = text_field(params, "rename");
+        let model = text_field(params, "model");
+        if text.is_none() && rename.is_none() && model.is_none() {
+            return Err("the message is empty".into());
+        }
+        let mut worker = arbos_layout::worker_result(project, &name)?;
+        if let Some(rename) = rename.as_deref() {
+            worker = arbos_layout::rename_worker(project, &worker.id, rename)?;
+            if !worker.chat_id.is_empty() {
+                self.workspace
+                    .rename_chat(&worker.chat_id, &worker.name)
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+        if let Some(model) = model.as_deref() {
+            worker = arbos_layout::set_worker_model(project, &worker.id, model)?;
+            if !worker.chat_id.is_empty()
+                && let Some(chat) = self.workspace.chat(&worker.chat_id).map_err(|err| err.to_string())?
+                && let Some(mut config) = chat.config
+            {
+                config.model = Some(worker.model.clone());
+                self.workspace
+                    .set_chat_config(&worker.chat_id, &config)
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+        let Some(text) = text else {
+            return Ok(json!({
+                "name": worker.id,
+                "displayName": worker.name,
+                "model": worker.model,
+                "steered": false,
+            }));
+        };
         if worker.chat_id.is_empty() {
             return Err("that worker has no chat".into());
         }
@@ -209,15 +305,18 @@ impl EngineRpc {
         } else {
             let config = ChatConfig {
                 harness: HarnessId::Fx,
-                model: Some("glm-5.3".into()),
+                model: Some(worker_model(&worker.model)),
                 reasoning: None,
                 model_options: serde_json::Map::new(),
                 sandbox: SandboxLevel::DangerFullAccess,
             };
             self.queue_prompt(&worker.chat_id, &cwd, &text, &config)?;
+            arbos_layout::restart_worker(project, &worker.id)?;
         }
         Ok(json!({
             "name": worker.id,
+            "displayName": worker.name,
+            "model": worker.model,
             "steered": working,
         }))
     }
@@ -412,6 +511,16 @@ fn valid_base_url(url: &str) -> bool {
         && url.len() < 300
 }
 
+/// The worker id behind `originChatId`, when the caller is a worker. Main and
+/// plain chats return `None`, so their writes skip the report check.
+fn origin_worker(project: &Path, params: &Value) -> Option<String> {
+    let origin = text_field(params, "originChatId")?;
+    arbos_layout::agents(project)
+        .into_iter()
+        .find(|agent| agent.chat_id == origin && agent.role == "worker")
+        .map(|agent| agent.id)
+}
+
 fn worker_model(model: &str) -> String {
     let model = model.trim();
     if model.is_empty() {
@@ -443,6 +552,11 @@ fn context_path(params: &Value) -> Result<String, String> {
     Ok(relative.to_owned())
 }
 
+fn goal_row_json(project: &Path) -> Result<Value, String> {
+    let row = arbos_goal::goal_row(project);
+    Ok(json!({ "goal": row }))
+}
+
 fn live_row(project: &Path) -> Value {
     let live = arbos_live::live(project);
     json!({
@@ -459,6 +573,8 @@ fn agent_rows(agents: &[AgentView]) -> Vec<Value> {
 fn agent_row(agent: &AgentView) -> Value {
     json!({
         "name": agent.id,
+        "displayName": agent.name,
+        "model": agent.model,
         "role": agent.role,
         "status": agent.status,
         "chatId": agent.chat_id,
