@@ -24,6 +24,10 @@ pub const PROVIDERS: &[(&str, &str)] = &[
 
 /// Secret name and the environment variable a worker's tools read. `gh`
 /// reads `GH_TOKEN` itself; `op` reads the service account token.
+///
+/// The rule for a tool token: it reaches a worker through the fx child's
+/// environment only. It is never written under a project, never logged, and
+/// never returned by an op or offered to a model as a tool argument.
 pub const TOOLS: &[(&str, &str)] = &[
     ("github", "GH_TOKEN"),
     ("onepassword", "OP_SERVICE_ACCOUNT_TOKEN"),
@@ -263,17 +267,88 @@ fn write_raw(_name: &str, _value: &str) -> Result<(), String> {
 
 #[cfg(all(test, unix, not(target_os = "macos")))]
 mod tests {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+    use tracing_subscriber::fmt::MakeWriter;
+
     use super::*;
+
+    /// Tests share one process and these tests set the same variables, so
+    /// they take turns. No other test in this crate reads the variables.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn point_store_at(dir: &Path) {
+        unsafe {
+            std::env::set_var("ARBOS_SECRETS_DIR", dir);
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("OP_SERVICE_ACCOUNT_TOKEN");
+            std::env::remove_var("GIT_CONFIG_COUNT");
+        }
+    }
+
+    /// Every regular file under `root`, recursively, whose bytes contain `needle`.
+    fn files_containing(root: &Path, needle: &[u8]) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if std::fs::read(&path)
+                    .is_ok_and(|bytes| bytes.windows(needle.len()).any(|w| w == needle))
+                {
+                    found.push(path);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// A `tracing` writer that keeps every line in memory.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Capture {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Capture {
+        type Writer = Capture;
+
+        fn make_writer(&'a self) -> Capture {
+            self.clone()
+        }
+    }
 
     #[test]
     fn a_stored_github_token_reaches_the_tool_env_and_an_unknown_name_is_refused() {
+        let _guard = env_lock();
         let dir = tempfile::tempdir().unwrap();
-        // Tests share one process; no other test in this crate reads these.
-        unsafe {
-            std::env::set_var("ARBOS_SECRETS_DIR", dir.path());
-            std::env::remove_var("GH_TOKEN");
-            std::env::remove_var("OP_SERVICE_ACCOUNT_TOKEN");
-        }
+        point_store_at(dir.path());
 
         write("github", "test-token-not-real").unwrap();
         assert_eq!(read("github").as_deref(), Some("test-token-not-real"));
@@ -291,5 +366,82 @@ mod tests {
         );
         assert!(read("nonsense").is_none());
         assert!(!dir.path().join("nonsense").exists());
+    }
+
+    #[test]
+    fn a_github_token_reaches_the_fx_child_env_once_and_lands_nowhere_else() {
+        const TOKEN: &str = "test-token-github-0123456789abcdef";
+        let _guard = env_lock();
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let fx_home = project.path().join(".arbos").join("fx-home");
+        let fx_home_text = fx_home.display().to_string();
+        point_store_at(store.path());
+
+        // Everything that touches the store runs under a subscriber that keeps
+        // every line, at every level, so a logged value would show up here.
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        let pairs = tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("the secrets test is logging");
+            write("github", TOKEN).unwrap();
+            assert_eq!(read("github").as_deref(), Some(TOKEN));
+
+            // The store fills the process variable for the next fx child.
+            install_process_env();
+            assert_eq!(std::env::var("GH_TOKEN").as_deref(), Ok(TOKEN));
+            // Cleared again so the child gets it from the store, as a fresh
+            // engine does, and the git helper still follows from it.
+            unsafe { std::env::remove_var("GH_TOKEN") };
+            assert_eq!(tool_env_pairs(), vec![("GH_TOKEN", TOKEN.to_owned())]);
+
+            crate::acp::fx_child_env_pairs(Some("test-key-not-real"), &fx_home_text)
+        });
+
+        // (a) The child environment: the token once, under GH_TOKEN, and the
+        // git credential helper that reads it from there.
+        let carrying: Vec<&str> = pairs
+            .iter()
+            .filter(|(name, value)| name.contains(TOKEN) || value.contains(TOKEN))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(carrying, vec!["GH_TOKEN"], "{pairs:?}");
+        assert_eq!(
+            pairs.iter().filter(|(name, _)| name == "GH_TOKEN").count(),
+            1
+        );
+        let helpers: Vec<&str> = pairs
+            .iter()
+            .filter(|(name, _)| name.starts_with("GIT_CONFIG_VALUE_"))
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(helpers, vec!["!gh auth git-credential"]);
+        assert!(pairs.iter().any(|(name, value)| name == "GIT_CONFIG_KEY_0"
+            && value == "credential.https://github.com.helper"));
+
+        // (b) The store: one mode 600 file holds the token, outside the project.
+        let github = store.path().join("github");
+        assert_eq!(
+            files_containing(store.path(), TOKEN.as_bytes()),
+            vec![github.clone()]
+        );
+        let mode = std::fs::metadata(&github).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!store.path().starts_with(project.path()));
+        assert!(!github.starts_with(project.path()));
+        assert!(!fx_home.exists());
+        assert!(files_containing(project.path(), TOKEN.as_bytes()).is_empty());
+
+        // (c) The log: lines were captured, and none of them carries the token.
+        let log = capture.text();
+        assert!(log.contains("the secrets test is logging"), "{log}");
+        assert!(!log.contains(TOKEN), "{log}");
+        assert!(!log.contains("test-key-not-real"), "{log}");
+
+        unsafe { std::env::remove_var("GH_TOKEN") };
     }
 }

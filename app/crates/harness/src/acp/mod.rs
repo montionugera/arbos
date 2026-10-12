@@ -220,6 +220,39 @@ pub(crate) fn git_credential_env(existing_count: Option<u32>) -> Vec<(String, St
     ]
 }
 
+/// Every variable the fx child gets on top of the inherited environment: the
+/// home and Engy key, each stored provider or tool key whose variable this
+/// process does not already have, and the git credential helper when a GitHub
+/// token is present. A token reaches a worker only through this list; nothing
+/// here is written to a file or a log line.
+pub(crate) fn fx_child_env_pairs(key: Option<&str>, home: &str) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = fx_child_env(key, home)
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect();
+    let stored = crate::secrets::provider_env_pairs()
+        .into_iter()
+        .chain(crate::secrets::tool_env_pairs());
+    for (name, value) in stored {
+        if pairs.iter().any(|(existing, _)| existing == name) {
+            continue;
+        }
+        pairs.push((name.to_owned(), value));
+    }
+    // A token on this process is inherited; one from the store is in `pairs`.
+    let has_github_token = pairs
+        .iter()
+        .any(|(name, value)| name == "GH_TOKEN" && !value.trim().is_empty())
+        || std::env::var("GH_TOKEN").is_ok_and(|value| !value.trim().is_empty());
+    if has_github_token {
+        let existing_count = std::env::var("GIT_CONFIG_COUNT")
+            .ok()
+            .and_then(|count| count.trim().parse::<u32>().ok());
+        pairs.extend(git_credential_env(existing_count));
+    }
+    pairs
+}
+
 fn fx_home_override(request: &RunRequest) -> Option<String> {
     request
         .model_options
@@ -1877,31 +1910,8 @@ impl AcpHarness {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
                 .or_else(|| crate::secrets::read("engy"));
-            let mut pairs = fx_child_env(key.as_deref(), &home);
-            let stored = crate::secrets::provider_env_pairs()
-                .into_iter()
-                .chain(crate::secrets::tool_env_pairs());
-            for (name, value) in stored {
-                if pairs.iter().any(|(existing, _)| *existing == name) {
-                    continue;
-                }
-                pairs.push((name, value));
-            }
-            // A token on this process is inherited; one from the store is in `pairs`.
-            let has_github_token = pairs
-                .iter()
-                .any(|(name, value)| *name == "GH_TOKEN" && !value.trim().is_empty())
-                || std::env::var("GH_TOKEN").is_ok_and(|value| !value.trim().is_empty());
-            for (name, value) in pairs {
+            for (name, value) in fx_child_env_pairs(key.as_deref(), &home) {
                 cmd.env(name, value);
-            }
-            if has_github_token {
-                let existing_count = std::env::var("GIT_CONFIG_COUNT")
-                    .ok()
-                    .and_then(|count| count.trim().parse::<u32>().ok());
-                for (name, value) in git_credential_env(existing_count) {
-                    cmd.env(name, value);
-                }
             }
         }
         if self.spec.id == HarnessId::Antigravity {
