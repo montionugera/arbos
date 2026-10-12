@@ -54,6 +54,7 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
                     "properties": {
                         "name": { "type": "string" },
                         "text": { "type": "string", "description": "The message. Steers a running turn, else becomes the next prompt." },
+                        "message": { "type": "string", "description": "Same as text." },
                         "rename": { "type": "string", "description": "New display name for the worker's tab." },
                         "model": { "type": "string", "description": "Model id for the worker's next turn, exactly as the provider lists it. Do not guess a slug; pick one from the list you are given." }
                     },
