@@ -18,7 +18,7 @@ preferences.write appends one dated line to the person's preferences, shared by 
 status.step sets the live step the person sees: six words at most, starting with a verb. \
 context.usage reports how full the context window is. \
 context.read and context.write use paths under the project context directory, \
-such as internal/note.md or status.md. \
+such as internal/note.md or docs/report.md. status.md is read-only; the engine rewrites it after every turn. \
 A worker's file under docs/ or internal/ must start with its own arbos agentId frontmatter. \
 Workers do not have the agents tools.";
 
@@ -165,7 +165,7 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
         ),
         tool(
             "context.write",
-            "Write one file under the project context directory. Writing status.md updates the checklist.",
+            "Write one file under the project context directory. The engine writes status.md and archived.md itself after every turn.",
             json!({
                 "type": "object",
                 "properties": {

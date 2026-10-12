@@ -32,7 +32,6 @@ The person already has one plan sentence. Do not write another paragraph after a
 Do not name a file, a path, GOALS.md, or status.md in text the person reads. \
 Read `.arbos/context/GOALS.md` first. \
 Write what you learn to `.arbos/context/`. \
-Keep `status.md` current. \
 The checklist is only the active goal's steps. Do not add a step from an older goal. \
 When you tick one step, leave the other steps of this goal in place. \
 A `/goal` line already includes the workers to spawn. Send them at once. Do not wait for `/skill`. \
@@ -1198,6 +1197,10 @@ fn publish_status_page_unlocked(project: &Path) -> Result<(), String> {
     let mut kept = Vec::new();
     kept.extend(now.iter().cloned());
     kept.extend(earlier.iter().cloned());
+    // A project with no goal and no report keeps its starter page.
+    if kept.is_empty() && view.title.is_none() {
+        return Ok(());
+    }
     let mut body = String::from("[Goals](GOALS.md)\n\n");
     if kept.len() >= 6 {
         let mut recent = kept.clone();
@@ -1283,13 +1286,41 @@ pub fn is_summarize_command(shown: &str) -> bool {
     shown == "/summarize" || shown == "/compact"
 }
 
-/// Write a summary of the conversation. The last user message is kept word
-/// for word. `GOALS.md` and `status.md` are not changed. On failure the
-/// caller must leave the fx session in place.
+/// Who said one line of the conversation Main summarizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryRole {
+    /// A message the person typed.
+    Person,
+    /// Main's own reply.
+    Main,
+    /// A Worked line or the plan sentence.
+    Worked,
+}
+
+/// One line of the conversation, as `doc_host` reads it from the thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryLine {
+    pub role: SummaryRole,
+    pub text: String,
+}
+
+/// A person's line longer than this is clipped in the summary. The last
+/// message is never clipped.
+const SUMMARY_LINE_CHARS: usize = 240;
+/// Longest sentence kept from one of Main's replies.
+const SUMMARY_REPLY_CHARS: usize = 160;
+/// Longest summary paragraph.
+const SUMMARY_PARAGRAPH_CHARS: usize = 1_200;
+
+/// Write a summary of the whole conversation to `runtime/main-summary.md`.
+/// Every line the person typed stays word for word when it is short, the
+/// last one always. Main's replies and the Worked lines become one dated
+/// paragraph. `GOALS.md`, `status.md`, and the goal record are not changed.
+/// On failure the caller must leave the fx session in place.
 pub fn write_conversation_summary(
     project: &Path,
     chat_id: &str,
-    lines: &[String],
+    lines: &[SummaryLine],
 ) -> Result<String, String> {
     let _guard = layout_lock();
     let root = root_of(project);
@@ -1299,43 +1330,7 @@ pub fn write_conversation_summary(
     if main_chat_id(project) != chat_id {
         return Err("not Main".into());
     }
-    let start = lines
-        .iter()
-        .rposition(|line| line.trim().starts_with("/goal "))
-        .unwrap_or(0);
-    let mut last_user = String::new();
-    let mut earlier = Vec::new();
-    for line in &lines[start..] {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || is_summarize_command(trimmed) {
-            continue;
-        }
-        if trimmed.starts_with("Worked ·") || trimmed.contains("on this goal") {
-            earlier.push(trimmed.to_owned());
-            continue;
-        }
-        if !last_user.is_empty() {
-            earlier.push(last_user.clone());
-        }
-        last_user = trimmed.to_owned();
-    }
-    if last_user.is_empty() && earlier.is_empty() {
-        return Err("nothing to summarize".into());
-    }
-    let mut body = String::from("Summarized conversation.\n\n");
-    if earlier.is_empty() {
-        body.push_str("No earlier conversation.\n");
-    } else {
-        for line in &earlier {
-            body.push_str(line);
-            body.push('\n');
-        }
-    }
-    body.push_str("\nLast message, word for word:\n");
-    body.push_str(&last_user);
-    body.push_str("\n\n");
-    body.push_str(SUMMARY_PATHS);
-    body.push('\n');
+    let body = summary_body(lines, chrono::Local::now().date_naive())?;
     let dir = root.join("runtime");
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let path = dir.join("main-summary.md");
@@ -1348,41 +1343,132 @@ pub fn write_conversation_summary(
     Ok(SUMMARY_NOTICE.to_owned())
 }
 
+/// The text of the summary file. Pure, so a test can pin the date.
+fn summary_body(lines: &[SummaryLine], date: chrono::NaiveDate) -> Result<String, String> {
+    let mut person: Vec<&str> = Vec::new();
+    let mut replies: Vec<String> = Vec::new();
+    let mut worked: Vec<String> = Vec::new();
+    for line in lines {
+        let trimmed = line.text.trim();
+        if trimmed.is_empty() || trimmed == SUMMARY_NOTICE || is_summarize_command(trimmed) {
+            continue;
+        }
+        match line.role {
+            SummaryRole::Person => person.push(line.text.as_str()),
+            SummaryRole::Main => {
+                let sentence = first_sentence(trimmed, SUMMARY_REPLY_CHARS);
+                if !sentence.is_empty() {
+                    replies.push(sentence);
+                }
+            }
+            SummaryRole::Worked => {
+                let headline = trimmed.lines().next().unwrap_or("").trim();
+                let headline = headline.strip_prefix("Worked ·").unwrap_or(headline).trim();
+                if !headline.is_empty() {
+                    worked.push(headline.trim_end_matches('.').to_owned());
+                }
+            }
+        }
+    }
+    if person.is_empty() && replies.is_empty() && worked.is_empty() {
+        return Err("nothing to summarize".into());
+    }
+    let last_user = person.pop();
+    let mut body = format!("{SUMMARY_NOTICE}\n\n");
+    if person.is_empty() {
+        body.push_str("No earlier message from the person.\n");
+    } else {
+        body.push_str("The person said, in order:\n");
+        for line in &person {
+            body.push_str("- ");
+            body.push_str(&clip_chars(line.trim(), SUMMARY_LINE_CHARS));
+            body.push('\n');
+        }
+    }
+    body.push_str(&format!("\nSummary, {}: ", date.format("%Y-%m-%d")));
+    body.push_str(&summary_paragraph(&replies, &worked));
+    body.push_str("\n\n");
+    if let Some(last_user) = last_user {
+        body.push_str("Last message, word for word:\n");
+        body.push_str(last_user);
+        body.push_str("\n\n");
+    }
+    body.push_str(SUMMARY_PATHS);
+    body.push('\n');
+    Ok(body)
+}
+
+/// One short paragraph: how many times Main replied, what it said, and
+/// which workers and wakes reported.
+fn summary_paragraph(replies: &[String], worked: &[String]) -> String {
+    let mut text = String::new();
+    match replies.len() {
+        0 => text.push_str("Main did not reply yet."),
+        1 => text.push_str("Main replied once: "),
+        n => text.push_str(&format!("Main replied {n} times. In order: ")),
+    }
+    if !replies.is_empty() {
+        text.push_str(&replies.join(" "));
+    }
+    match worked.len() {
+        0 => text.push_str(" Nothing reported back."),
+        1 => text.push_str(&format!(" One report came back: {}.", worked[0])),
+        n => text.push_str(&format!(" {n} reports came back: {}.", worked.join("; "))),
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    clip_chars(&text, SUMMARY_PARAGRAPH_CHARS)
+}
+
+/// The first sentence of a reply, clipped. Markdown bullets and headings
+/// are stripped from the front.
+fn first_sentence(text: &str, max: usize) -> String {
+    let first = text
+        .lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | '>' | '#'))
+                .trim()
+        })
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let sentence = first.split(". ").next().unwrap_or(first).trim();
+    let mut sentence = clip_chars(sentence, max);
+    if !sentence.is_empty() && !sentence.ends_with(['.', '!', '?', '…']) {
+        sentence.push('.');
+    }
+    sentence
+}
+
+fn clip_chars(text: &str, max: usize) -> String {
+    let short: String = text.chars().take(max).collect();
+    if short.chars().count() < text.chars().count() {
+        format!("{}…", short.trim_end())
+    } else {
+        short
+    }
+}
+
 /// The prompt for the first turn after a summary. `None` when Main has not
-/// been summarized. The two paths are re-injected after the summary.
+/// been summarized. The summary file is read once and removed, so the turn
+/// after it is an ordinary turn again. A wake keeps its mark in front.
 pub fn prompt_after_summary(project: &Path, chat_id: &str, prompt: &str) -> Option<String> {
     if main_chat_id(project) != chat_id {
         return None;
     }
     let path = root_of(project).join("runtime").join("main-summary.md");
-    let summary = fs::read_to_string(path).ok()?;
+    let summary = fs::read_to_string(&path).ok()?;
+    if let Err(err) = fs::remove_file(&path) {
+        tracing::warn!(error = %err, "the summary file was not removed");
+    }
     let summary = summary.trim();
     if summary.is_empty() {
         return None;
     }
-    let title = goal_view(project)
-        .title
-        .unwrap_or_else(|| "the goal".to_owned());
-    let title = title.trim().trim_end_matches('.').trim();
-    let open = file_checkboxes(project)
-        .iter()
-        .filter(|(done, _)| !done)
-        .count();
-    let sentence = if open == 0 {
-        format!("The goal is {title}, and nothing is left.")
-    } else {
-        format!("The goal is {title}, and {open} steps are left.")
+    let (mark, rest) = match prompt.strip_prefix(zeron_proto::ARBOS_WAKE_MARK) {
+        Some(rest) => (zeron_proto::ARBOS_WAKE_MARK, rest),
+        None => ("", prompt),
     };
-    Some(format!(
-        "{summary}\n\nThe person says: {prompt}\n\
-         Read the Goals path and the Status path before you answer.\n\
-         A step is only a line that starts with \"- [ ]\" or \"- [x]\".\n\
-         Unchecked steps on disk: {open}.\n\
-         Ignore every other section of the Status file.\n\
-         Do not spawn a worker. Do not write. The goal stays as it is.\n\
-         Reply with this sentence and no other words: {sentence}\n\
-         Do not mention workers. Do not use the words checklist, tick, report, file, path, or status.\n"
-    ))
+    Some(format!("{mark}{summary}\n\n{rest}"))
 }
 
 /// Bind this chat to an agent directory and return the fx home plus the
@@ -1879,12 +1965,16 @@ fn clip_result(text: &str) -> String {
     clipped
 }
 
-/// Commit `.arbos` when a turn changed it. A clean tree is left alone.
+/// A turn ended. The status page is rewritten from state, then `.arbos` is
+/// committed when the turn changed it. A clean tree is left alone.
 pub fn commit_after_turn(project: &Path) {
     let _guard = layout_lock();
     let root = root_of(project);
     if !root.join(".git").exists() {
         return;
+    }
+    if let Err(err) = publish_status_page_unlocked(project) {
+        tracing::warn!(error = %err, "the status page was not rewritten");
     }
     let _ = git(&root, &["add", "-A"]);
     if git_clean(&root) {
@@ -2048,11 +2138,23 @@ fn git_clean(root: &Path) -> bool {
 #[cfg(test)]
 mod summary_failure_tests {
     use super::{
-        auto_compact_percent, ensure, main_chat_id, parse_auto_compact_percent,
-        tombstone_after_summary, write_conversation_summary,
+        SUMMARY_PATHS, SummaryLine, SummaryRole, auto_compact_percent, ensure, main_chat_id,
+        parse_auto_compact_percent, prompt_after_summary, summary_body, tombstone_after_summary,
+        write_conversation_summary,
     };
     use std::fs;
     use std::path::PathBuf;
+
+    fn line(role: SummaryRole, text: &str) -> SummaryLine {
+        SummaryLine {
+            role,
+            text: text.to_owned(),
+        }
+    }
+
+    fn person(text: &str) -> SummaryLine {
+        line(SummaryRole::Person, text)
+    }
 
     #[test]
     fn a_failed_summary_does_not_tombstone_and_leaves_the_file() {
@@ -2066,13 +2168,93 @@ mod summary_failure_tests {
         fs::create_dir_all(&root).unwrap();
         ensure(&root, Some("Summary")).unwrap();
         let chat = main_chat_id(&root);
-        write_conversation_summary(&root, &chat, &["/goal Clear the gate.".into()]).unwrap();
+        write_conversation_summary(&root, &chat, &[person("/goal Clear the gate.")]).unwrap();
         let path = root.join(".arbos").join("runtime").join("main-summary.md");
         let before = fs::read(&path).unwrap();
-        let failed = write_conversation_summary(&root, "not-main", &["/goal Other.".into()]);
+        let failed = write_conversation_summary(&root, "not-main", &[person("/goal Other.")]);
         assert!(failed.is_err());
         assert!(!tombstone_after_summary(&failed));
         assert_eq!(fs::read(&path).unwrap(), before);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_summary_covers_the_whole_conversation_and_keeps_the_last_message() {
+        let last = "Now  ship it,\n\twith the  odd   spacing kept. ";
+        let lines = vec![
+            person("/goal Clear the gate."),
+            line(SummaryRole::Worked, "Oak and pine are on this goal."),
+            line(
+                SummaryRole::Main,
+                "- Oak and pine are on this goal. They will report back.",
+            ),
+            line(SummaryRole::Worked, "Worked · Worker oak done.\nOak wrote research/oak.md"),
+            person("What did oak find?"),
+            line(SummaryRole::Main, "Oak found the gate is green! Nothing else."),
+            person("/summarize"),
+            line(SummaryRole::Worked, "Summarized conversation."),
+            person(last),
+        ];
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
+        let body = summary_body(&lines, date).unwrap();
+        assert!(body.starts_with("Summarized conversation.\n\n"));
+        assert!(body.contains("- /goal Clear the gate.\n"));
+        assert!(body.contains("- What did oak find?\n"));
+        assert!(body.contains("Summary, 2026-10-12: Main replied 2 times. In order: "));
+        assert!(body.contains("Oak and pine are on this goal."));
+        assert!(body.contains("Oak found the gate is green!"));
+        assert!(body.contains("2 reports came back: Oak and pine are on this goal; Worker oak done."));
+        assert!(body.contains(&format!("Last message, word for word:\n{last}\n\n")));
+        assert!(body.ends_with(&format!("{SUMMARY_PATHS}\n")));
+        assert!(!body.contains("/summarize"));
+        assert!(!body.contains("Oak wrote research/oak.md"));
+
+        let long = "x".repeat(400);
+        let clipped = summary_body(&[person(&long), person("ok")], date).unwrap();
+        assert!(clipped.contains(&format!("- {}…\n", "x".repeat(240))));
+        assert!(summary_body(&[], date).is_err());
+        let only_long = summary_body(&[person(&long)], date).unwrap();
+        assert!(only_long.contains(&format!("Last message, word for word:\n{long}\n")));
+    }
+
+    #[test]
+    fn a_goal_wake_after_a_summary_is_an_ordinary_turn() {
+        let root = std::env::temp_dir().join(format!("arbos-after-summary-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        ensure(&root, Some("After")).unwrap();
+        let chat = main_chat_id(&root);
+        assert!(prompt_after_summary(&root, &chat, "hello").is_none());
+
+        write_conversation_summary(&root, &chat, &[person("/goal Clear the gate.")]).unwrap();
+        let goal = crate::arbos_goal::start_goal(&root, "Clear the gate").unwrap();
+        let wake = format!(
+            "{}{}",
+            zeron_proto::ARBOS_WAKE_MARK,
+            crate::arbos_goal::goal_wake_prompt(&goal, chrono::Utc::now())
+        );
+        let prompt = prompt_after_summary(&root, &chat, &wake).unwrap();
+        assert!(prompt.starts_with(zeron_proto::ARBOS_WAKE_MARK));
+        assert!(prompt.contains("Summarized conversation."));
+        assert!(prompt.contains(SUMMARY_PATHS));
+        assert!(prompt.contains("Goal check · Clear the gate\n<system_notification source=\"goal\">"));
+        assert!(prompt.contains("Make progress or end the turn quietly."));
+        for forbidden in [
+            "Do not spawn",
+            "Do not write",
+            "Reply with this sentence",
+            "The person says:",
+        ] {
+            assert!(!prompt.contains(forbidden), "{forbidden} is still in the prompt");
+        }
+        let path = root.join(".arbos").join("runtime").join("main-summary.md");
+        assert!(!path.exists(), "the summary file is read once");
+        assert!(prompt_after_summary(&root, &chat, &wake).is_none());
+
+        write_conversation_summary(&root, &chat, &[person("plain question")]).unwrap();
+        let plain = prompt_after_summary(&root, &chat, "what next?").unwrap();
+        assert!(!plain.starts_with(zeron_proto::ARBOS_WAKE_MARK));
+        assert!(plain.ends_with("\n\nwhat next?"));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2522,6 +2704,32 @@ mod goal_tests {
         fs::create_dir_all(root_of(project).join("context")).unwrap();
         assert!(write_context(project, "goal.toml", "state = \"active\"").is_err());
         assert!(write_context(project, "research/note.md", "fine").is_ok());
+    }
+
+    #[test]
+    fn the_end_of_a_turn_rewrites_the_status_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        ensure(project, Some("Page")).unwrap();
+        let status = root_of(project).join("context").join("status.md");
+        let starter = fs::read_to_string(&status).unwrap();
+        // No goal and no report: the starter page stays.
+        commit_after_turn(project);
+        assert_eq!(fs::read_to_string(&status).unwrap(), starter);
+
+        let ComposerCommand::Model(_) = prepare_composer_command(project, "/goal Clear the gate.")
+        else {
+            panic!("/goal hands Main a prompt");
+        };
+        assert!(fs::read_to_string(&status).unwrap().contains("- [ ] Oak is ready."));
+        commit_after_turn(project);
+        let page = fs::read_to_string(&status).unwrap();
+        assert!(page.starts_with("[Goals](GOALS.md)\n\n## Clear the gate\n"), "{page}");
+        assert!(page.contains("- [x] [Split](research/skill-split.md) — Skill split ran."));
+        assert!(page.contains("- [ ] [Oak](research/oak.md) — Oak is ready."));
+        assert!(page.contains("- [ ] [Pine](research/pine.md) — Pine is ready."));
+        assert!(!page.contains("# Status"));
+        assert!(!COORDINATOR_PROMPT.contains("Keep `status.md` current"));
     }
 
     #[test]

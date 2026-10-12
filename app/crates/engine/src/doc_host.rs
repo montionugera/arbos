@@ -37,6 +37,7 @@ use zeron_doc::{
 use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
 
+use crate::arbos_layout::{SummaryLine, SummaryRole};
 use crate::http_error::describe_http_error;
 use crate::project_actions::{
     launch_project_setup_action, ProjectActionSetupHandoff, ProjectActionsStore,
@@ -866,9 +867,10 @@ impl ChatDocHandle {
         self.write_role_message(message_id, MessageRole::System, text, created_at)
     }
 
-    /// The conversation Main can summarize: user lines, the plan sentence,
-    /// and Worked lines. Tool traces stay out of the summary.
-    pub fn conversation_lines(&self) -> Result<Vec<String>, DocError> {
+    /// The conversation Main can summarize: what the person typed, what Main
+    /// replied, the plan sentence, and the Worked lines. Tool traces and the
+    /// engine's own notices stay out of the summary.
+    pub fn conversation_lines(&self) -> Result<Vec<SummaryLine>, DocError> {
         let entries = self.doc.read_entries()?;
         let mut lines = Vec::new();
         for entry in entries {
@@ -881,19 +883,20 @@ impl ChatDocHandle {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let text = text.trim();
-            if text.is_empty() {
+            if text.trim().is_empty() {
                 continue;
             }
-            match entry.role {
-                MessageRole::User => lines.push(text.to_owned()),
+            let role = match entry.role {
+                MessageRole::User => SummaryRole::Person,
+                MessageRole::Assistant => SummaryRole::Main,
                 MessageRole::System
                     if text.starts_with("Worked ·") || text.contains("on this goal") =>
                 {
-                    lines.push(text.to_owned());
+                    SummaryRole::Worked
                 }
-                MessageRole::System | MessageRole::Assistant => {}
-            }
+                MessageRole::System => continue,
+            };
+            lines.push(SummaryLine { role, text });
         }
         Ok(lines)
     }

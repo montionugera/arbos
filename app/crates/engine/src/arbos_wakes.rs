@@ -173,8 +173,9 @@ fn tick_goal(host: &DocHost, sessions: &SessionsEngine, chat_id: &str, cwd: &str
     };
     match queue_wake(host, sessions, chat_id, cwd, &body) {
         Ok(()) => {
+            let headline = body.lines().next().unwrap_or("Goal check").trim();
             let id = crate::new_id();
-            crate::arbos_remote::note_worked(cwd, &id, "Worked · Goal wake.");
+            crate::arbos_remote::note_worked(cwd, &id, &format!("Worked · {headline}"));
             tracing::info!(chat = %chat_id, "goal wake queued");
         }
         Err(err) => {
