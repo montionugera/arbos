@@ -673,70 +673,36 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    /// This build has one agent: fx over ACP, plus the mock for tests. The
+    /// other harnesses are not registered, so a chat configured for one of
+    /// them cannot resolve it.
     #[test]
-    fn default_registry_lists_mock_claude_codex_and_grok_slots() {
+    fn default_registry_has_the_mock_and_fx_only() {
         let registry = default_registry();
         let ids: Vec<HarnessId> = registry.descriptors().iter().map(|d| d.id).collect();
-        assert_eq!(
-            ids,
-            vec![
-                HarnessId::Mock,
-                HarnessId::Fx,
-                HarnessId::ClaudeCode,
-                HarnessId::Codex,
-                HarnessId::Cursor,
-                HarnessId::Devin,
-                HarnessId::Grok,
-                HarnessId::Hermes,
-                HarnessId::Antigravity
-            ]
-        );
+        assert_eq!(ids, vec![HarnessId::Mock, HarnessId::Fx]);
         assert!(registry.resolve(HarnessId::Mock).is_ok());
-        assert!(registry.resolve(HarnessId::ClaudeCode).is_ok());
-        // A codex-configured chat resolves the right harness (construction is
-        // cheap; CLI discovery is deferred to models()/run()).
-        let codex = registry.resolve(HarnessId::Codex).unwrap();
-        assert_eq!(codex.id(), HarnessId::Codex);
-        // Grok resolves through the shared ACP harness; its descriptor must
-        // mirror the resolved harness (descriptor-stability rule).
-        let grok = registry.resolve(HarnessId::Grok).unwrap();
-        assert_eq!(grok.id(), HarnessId::Grok);
-        assert_eq!(grok.display_name(), "Grok");
-        assert_eq!(grok.steering_mode(), SteeringMode::StepBoundary);
-        assert_eq!(
-            grok.reasoning_levels(),
-            &[
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High
-            ]
-        );
-        // Cursor, Devin, Hermes and Pi mirror their specs the same way.
-        let cursor = registry.resolve(HarnessId::Cursor).unwrap();
-        assert_eq!(cursor.id(), HarnessId::Cursor);
-        assert_eq!(cursor.display_name(), "Cursor");
-        assert_eq!(cursor.steering_mode(), SteeringMode::StepBoundary);
-        assert!(cursor.reasoning_levels().is_empty());
-        let devin = registry.resolve(HarnessId::Devin).unwrap();
-        assert_eq!(devin.id(), HarnessId::Devin);
-        assert_eq!(devin.display_name(), "Devin");
-        assert_eq!(devin.steering_mode(), SteeringMode::StepBoundary);
-        assert!(devin.reasoning_levels().is_empty());
-        let hermes = registry.resolve(HarnessId::Hermes).unwrap();
-        assert_eq!(hermes.id(), HarnessId::Hermes);
-        assert_eq!(hermes.display_name(), "Hermes");
-        assert_eq!(hermes.steering_mode(), SteeringMode::TurnBoundary);
-        assert!(hermes.reasoning_levels().is_empty());
+        for other in [
+            HarnessId::ClaudeCode,
+            HarnessId::Codex,
+            HarnessId::Cursor,
+            HarnessId::Devin,
+            HarnessId::Grok,
+            HarnessId::Hermes,
+            HarnessId::Antigravity,
+        ] {
+            assert!(
+                registry.resolve(other).is_err(),
+                "{other:?} is not in this build"
+            );
+        }
+        // fx resolves through the shared ACP harness; its descriptor mirrors
+        // the resolved harness (descriptor-stability rule).
         let fx = registry.resolve(HarnessId::Fx).unwrap();
         assert_eq!(fx.id(), HarnessId::Fx);
         assert_eq!(fx.display_name(), "fx");
         assert_eq!(fx.steering_mode(), SteeringMode::StepBoundary);
         assert!(fx.reasoning_levels().is_empty());
-        let antigravity = registry.resolve(HarnessId::Antigravity).unwrap();
-        assert_eq!(antigravity.id(), HarnessId::Antigravity);
-        assert_eq!(antigravity.display_name(), "Antigravity");
-        assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
-        assert!(antigravity.reasoning_levels().is_empty());
     }
 
     #[test]
@@ -745,19 +711,20 @@ mod tests {
         assert!(!hidden.show_all);
         let shown: HarnessPrefsFile = serde_json::from_str(r#"{"show_all":true}"#).unwrap();
         assert!(shown.show_all);
-        assert!(harness_shown(HarnessId::Fx, false));
-        assert!(harness_shown(HarnessId::Mock, false));
-        assert!(!harness_shown(HarnessId::Grok, false));
-        assert!(!harness_shown(HarnessId::ClaudeCode, false));
-        assert!(!harness_shown(HarnessId::Devin, false));
-        assert!(harness_shown(HarnessId::Grok, true));
-        assert!(harness_shown(HarnessId::ClaudeCode, true));
+        // The picker shows fx alone; show_all cannot bring the others back.
+        for show_all in [false, true] {
+            assert!(harness_shown(HarnessId::Fx, show_all));
+            assert!(!harness_shown(HarnessId::Mock, show_all));
+            assert!(!harness_shown(HarnessId::Grok, show_all));
+            assert!(!harness_shown(HarnessId::ClaudeCode, show_all));
+            assert!(!harness_shown(HarnessId::Devin, show_all));
+        }
         let ids: Vec<HarnessId> = default_registry()
             .listed_descriptors()
             .iter()
             .map(|descriptor| descriptor.id)
             .collect();
-        assert_eq!(ids, vec![HarnessId::Mock, HarnessId::Fx]);
+        assert_eq!(ids, vec![HarnessId::Fx]);
     }
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`
@@ -1065,25 +1032,22 @@ mod tests {
         assert_eq!(reloaded.enabled_set(), Vec::<HarnessId>::new());
     }
 
-    /// The Codex lazy descriptor must be indistinguishable from `describe()`
+    /// The fx lazy descriptor must be indistinguishable from `describe()`
     /// after the first resolve — otherwise the catalog entry silently changes
     /// the moment the harness is used (name/ladder flip in the picker rail).
-    /// (KNOWN GAP, predates this slot: the claude-code descriptor advertises
-    /// `[Ultrathink]` while the resolved adapter reports `[Low..Max]` — left
-    /// as-is here; flagged for its own pass.)
     #[test]
-    fn codex_lazy_descriptor_matches_resolved_harness() {
+    fn fx_lazy_descriptor_matches_resolved_harness() {
         let registry = default_registry();
         let before = registry
             .descriptors()
             .into_iter()
-            .find(|d| d.id == HarnessId::Codex)
+            .find(|d| d.id == HarnessId::Fx)
             .unwrap();
-        registry.resolve(HarnessId::Codex).unwrap();
+        registry.resolve(HarnessId::Fx).unwrap();
         let after = registry
             .descriptors()
             .into_iter()
-            .find(|d| d.id == HarnessId::Codex)
+            .find(|d| d.id == HarnessId::Fx)
             .unwrap();
         assert_eq!(before.name, after.name);
         assert_eq!(before.supports_steering, after.supports_steering);

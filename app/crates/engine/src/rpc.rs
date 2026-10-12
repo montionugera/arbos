@@ -3913,11 +3913,19 @@ mod tests {
                 let RpcReply::Value(value) = result.unwrap() else {
                     panic!("expected descriptors");
                 };
+                // The reply is the picker's list. This build shows fx alone,
+                // so the installed harness is read from the registry itself.
                 let list: Vec<crate::registry::HarnessDescriptor> =
                     serde_json::from_value(value).unwrap();
-                assert!(list[0].installed);
-                assert_eq!(list[0].enabled, Some(true));
-                assert!(list[0].can_install);
+                let listed: Vec<HarnessId> = list.iter().map(|d| d.id).collect();
+                let shown: Vec<HarnessId> =
+                    registry.listed_descriptors().iter().map(|d| d.id).collect();
+                assert_eq!(listed, shown);
+                let codex = &registry.descriptors()[0];
+                assert_eq!(codex.id, HarnessId::Codex);
+                assert!(codex.installed);
+                assert_eq!(codex.enabled, Some(true));
+                assert!(codex.can_install);
                 let path = root.join("bin/codex");
                 assert!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o111 != 0);
                 println!(
@@ -4053,9 +4061,14 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(result[0].installed);
-        assert_eq!(result[0].enabled, Some(true));
-        assert!(result[0].can_install);
+        // The reply is the picker's list, which shows fx alone in this build;
+        // the installed harness is read from the registry itself.
+        assert!(result.iter().all(|d| d.id == HarnessId::Fx));
+        let installed = &registry.descriptors()[0];
+        assert_eq!(installed.id, HarnessId::Antigravity);
+        assert!(installed.installed);
+        assert_eq!(installed.enabled, Some(true));
+        assert!(installed.can_install);
         assert!(installed_entry(&pin).unwrap().is_file());
         server.await.unwrap();
         // The verified marker makes another explicit install idempotent, even
