@@ -56,7 +56,10 @@ pub mod sign;
 #[cfg(windows)]
 pub mod windows;
 
-/// The version compiled into this binary (the workspace version).
+/// The version compiled into this binary: the workspace version, plus the
+/// commit count CI stamps in through `ARBOS_BUILD` (`0.2.112.2611`) — the
+/// full build version the release feed's versions are compared against, and
+/// the one About and Settings show.
 pub const fn current_version() -> &'static str {
     env!("ARBOS_VERSION")
 }
@@ -1768,6 +1771,20 @@ mod tests {
         // Garbage never counts as newer.
         assert!(!version_newer("", "0.1.0"));
         assert!(!version_newer("nightly", "0.1.0"));
+    }
+
+    #[test]
+    fn current_version_is_a_dotted_build_version_about_and_settings_can_show() {
+        // Whatever `ARBOS_BUILD` was at compile time, the string About and
+        // Settings render is dotted-numeric — either `0.2.112` from a bare
+        // `cargo test` or `0.2.112.2611` from a CI build.
+        let current = current_version();
+        let parsed = parse_version(current)
+            .unwrap_or_else(|| panic!("current version {current:?} is not dotted-numeric"));
+        assert!(parsed.len() == 3 || parsed.len() == 4, "{current}");
+        // And it orders against the signed edge builds the feed publishes.
+        assert!(version_newer("0.2.112.999999", current));
+        assert!(!version_newer("0.2.112", current));
     }
 
     #[test]

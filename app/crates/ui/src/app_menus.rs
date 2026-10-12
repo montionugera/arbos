@@ -398,7 +398,8 @@ fn present_as_arbos() {
 
 // Standard AppKit about panel. Icon and copyright still come from the bundle's
 // Info.plist; name and version are passed explicitly so unbundled dev builds
-// (`cargo run`) show "Zeron" and the crate version instead of the process name.
+// (`cargo run`) show "Arbos" and the full build version — the same
+// 0.2.112.<n> the updater orders on — instead of the process name.
 #[cfg(target_os = "macos")]
 mod about_panel {
     use objc2::MainThreadMarker;
@@ -414,9 +415,13 @@ mod about_panel {
             return;
         };
         let name = NSString::from_str("Arbos");
-        let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
-        // Empty build version: CFBundleVersion equals the marketing version, and
-        // AppKit would otherwise render "Version 0.2.61 (0.2.61)".
+        // The full build version: the workspace version plus, under
+        // `ARBOS_BUILD`, the commit count CI stamps in (0.2.112.2611). This
+        // is the string the updater compares against the release feed, so
+        // About never disagrees with "Check for Updates…".
+        let version = NSString::from_str(zeron_update::current_version());
+        // Empty build version: the build number is already in the version
+        // string, and AppKit would otherwise render it twice.
         let build = NSString::from_str("");
         let values: [&AnyObject; 3] = [&name, &version, &build];
         unsafe {

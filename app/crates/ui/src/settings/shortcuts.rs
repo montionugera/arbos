@@ -882,6 +882,30 @@ impl Render for ShortcutsPage {
                 })),
             );
         if self.general_page {
+            // The full build version — under `ARBOS_BUILD`, the workspace
+            // version plus the commit count CI stamps in (0.2.112.2611). It
+            // is the exact string "Check for Updates…" compares against the
+            // release feed, so Settings and About can never disagree.
+            let version_row = widgets::card_row(&theme, true)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Version"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![div()
+                                .child("The build “Check for Updates…” compares against.")
+                                .into_any_element()],
+                        )),
+                )
+                .child(
+                    div()
+                        .id("app-version")
+                        .font_family(theme.font_mono.clone())
+                        .text_color(theme.text_muted)
+                        .child(zeron_update::current_version()),
+                );
             let pull_request_destination = crate::settings::current(cx).pull_request_destination;
             let pull_request_destination_control = widgets::select(
                 "pull-request-destination",
@@ -948,6 +972,13 @@ impl Render for ShortcutsPage {
                                             .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
                                     )
+                                    .child(widgets::section(
+                                        &theme,
+                                        "About",
+                                        widgets::section_card(&theme)
+                                            .mt_0()
+                                            .child(version_row),
+                                    ))
                                     .child(widgets::section(
                                         &theme,
                                         "Links",
