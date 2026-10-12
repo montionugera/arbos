@@ -4,9 +4,10 @@
 //! sidebar update strip, and the desktop install paths).
 //!
 //! Release layout: the checker reads `manifest.json` from the GitHub Release
-//! tagged `edge` (`releases/download/edge/manifest.json`). A Linux tarball may
-//! be attached there when its build is green. A Mac disk image is not
-//! published from this repo, and an unsigned Mac artifact is not uploaded.
+//! tagged `edge` (`releases/download/edge/manifest.json`). A Linux tarball is
+//! attached there when its build is green. The Mac app is published by the
+//! macOS release workflow, signed and notarized. Both workflows merge their
+//! files into the one manifest (`scripts/ci/merge-release-manifest.py`).
 //! `latest.txt` (version only) remains as the fallback. A loopback `edge_url`
 //! still serves `{edge}/releases/*` so the local fixture tests can run.
 //!
@@ -83,7 +84,8 @@ const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 // Release metadata
 // ---------------------------------------------------------------------------
 
-/// GitHub Release `manifest.json` — written by the Linux tarball workflow.
+/// GitHub Release `manifest.json` — written by the Linux tarball and the macOS
+/// release workflows, each merging its own platform's files in.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: String,
