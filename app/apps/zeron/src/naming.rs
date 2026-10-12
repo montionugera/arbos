@@ -114,9 +114,7 @@ mod tests {\n\
 
     #[test]
     fn no_string_a_person_reads_says_zeron() {
-        let app = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..");
+        let app = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         let mut files = Vec::new();
         for tree in SCANNED {
             rust_files(&app.join(tree), &mut files);
