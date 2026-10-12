@@ -1954,6 +1954,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .format_tool_execution_error = formatToolExecutionError,
         .record_tool_call_rejected = recordToolCallRejected,
         .record_tool_call_failed = recordToolCallFailed,
+        .report_context_sections = if (session.writable != null) reportContextSections else null,
         .usage = &session.session_rt.usage,
         .usage_allocator = ctx.state.alloc,
     };
@@ -2971,6 +2972,17 @@ fn setRecoveryCheckpoint(
     // the prompt's deinit must not delete them. A failed turn never reaches
     // the success-path retain, making this the only retain on that path.
     if (ctx.current_prompt_input) |input| input.retainImageSnapshots();
+}
+
+/// `AgentRuntimeDeps.report_context_sections` on v1: the session keeps the
+/// latest request's sections and writes them with the turn's commit.
+fn reportContextSections(raw_ctx: *anyopaque, sections: types.ContextSections) void {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
+    const session = if (ctx.state.active_session) |*value| value else return;
+    session.session_write_mutex.lockUncancelable(io_mod.getIo());
+    defer session.session_write_mutex.unlock(io_mod.getIo());
+    const writable = if (session.writable) |*value| value else return;
+    writable.noteContextSections(sections);
 }
 
 fn clearRecoveryCheckpoint(raw_ctx: *anyopaque) !void {

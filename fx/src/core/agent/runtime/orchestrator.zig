@@ -18,6 +18,7 @@ const diagnostics = @import("../../workspace/diagnostics.zig");
 const gateway_error_format = @import("../../shared/gateway_error_format.zig");
 const mem_utils = @import("../../shared/mem_utils.zig");
 const text_utils = @import("../../shared/text_utils.zig");
+const token_estimate = @import("../../shared/token_estimate.zig");
 const file_mutation_contract = @import("../../tooling/file_mutation_contract.zig");
 const io_mod = @import("../../shared/io.zig");
 const host_target = @import("../../hosts/target.zig");
@@ -6077,6 +6078,7 @@ fn buildProviderPromptForCompactionWindow(
     try compacted_history.append(alloc, .{
         .role = .user,
         .content = handoff.?,
+        .context_origin = .handoff,
     });
     try compacted_history.appendSlice(alloc, retained_history_tail);
     return runtime_prompt_context.buildProviderPrompt(
@@ -6170,6 +6172,135 @@ fn appendStablePromptContext(
         const registry = deps.context_registry orelse return error.ContextRegistryUnavailable;
         try registry.appendDefaultStatic(.{ .project_context = content }, alloc, messages);
     }
+}
+
+/// The texts that tell a request's instruction messages apart, so the
+/// request can be sized by section after assembly.
+const InstructionSources = struct {
+    /// The configured prompts: system prompt, tool guidance, host
+    /// instructions and model overlay. Empty entries never match.
+    system_prompt: []const []const u8,
+    skill_catalog: ?[]const u8 = null,
+    explicit_skills: ?[]const u8 = null,
+    /// Instructions before this index are the stable prefix, whose unknown
+    /// messages are project context (AGENTS.md files and the like); unknown
+    /// messages after it are runtime guidance.
+    stable_prefix_len: usize,
+};
+
+fn matchesAny(texts: []const []const u8, content: []const u8) bool {
+    for (texts) |text| if (text.len > 0 and std.mem.eql(u8, text, content)) return true;
+    return false;
+}
+
+/// Sizes one assembled request by section with the estimate fx measures
+/// requests with. Instructions are classified by `sources`. Messages split
+/// into compaction summaries and the conversation proper; the latter takes
+/// the whole conversation estimate (the request less its fixed part) so
+/// serialization overhead lands with it, as compaction sees it. Tools take
+/// what remains of the fixed part after the instructions.
+fn measureContextSections(
+    sources: InstructionSources,
+    instructions: []const ChatMessage,
+    messages: []const ChatMessage,
+    request_text_tokens: usize,
+    fixed_text_tokens: usize,
+    request_tokens: usize,
+) types.ContextSections {
+    var sections = types.ContextSections{ .request = request_tokens };
+    var instruction_tokens: usize = 0;
+    for (instructions, 0..) |message, index| {
+        const content = message.content orelse continue;
+        const tokens = token_estimate.textTokens(content);
+        instruction_tokens += tokens;
+        if (index < sources.stable_prefix_len) {
+            if (matchesAny(sources.system_prompt, content)) {
+                sections.system_prompt += tokens;
+            } else if (sources.skill_catalog != null and std.mem.eql(u8, sources.skill_catalog.?, content)) {
+                sections.skills += tokens;
+            } else {
+                sections.rules += tokens;
+            }
+        } else if (sources.explicit_skills != null and std.mem.eql(u8, sources.explicit_skills.?, content)) {
+            sections.skills += tokens;
+        } else {
+            sections.system_prompt += tokens;
+        }
+    }
+    for (messages) |message| {
+        if (message.context_origin != .handoff) continue;
+        sections.summarized_conversation += token_estimate.textTokens(message.content orelse "");
+    }
+    const conversation_tokens = request_text_tokens -| fixed_text_tokens;
+    sections.conversation = conversation_tokens -| sections.summarized_conversation;
+    sections.tools = fixed_text_tokens -| instruction_tokens;
+    return sections;
+}
+
+/// Hands the host the section sizes of the request about to be sent.
+fn reportContextSections(
+    deps: *const AgentRuntimeDeps,
+    config: Config,
+    skills: PreparedSkills,
+    stable_prefix_len: usize,
+    request: agent_stream_provider.RequestData,
+    request_text_tokens: usize,
+    fixed_text_tokens: usize,
+    request_tokens: usize,
+) void {
+    const report = deps.report_context_sections orelse return;
+    const sections = measureContextSections(.{
+        .system_prompt = &.{
+            config.system_prompt,
+            config.custom_tool_guidance,
+            config.host_instructions,
+            config.model_prompt_overlay orelse "",
+        },
+        .skill_catalog = if (skills.catalog) |section| section.text else null,
+        .explicit_skills = if (skills.explicit) |section| section.text else null,
+        .stable_prefix_len = stable_prefix_len,
+    }, request.instructions, request.messages, request_text_tokens, fixed_text_tokens, request_tokens);
+    report(deps.ctx, sections);
+}
+
+test "context sections classify instructions by source and split the conversation" {
+    const instructions = [_]ChatMessage{
+        .{ .role = .system, .content = "You are fx, a coding agent." },
+        .{ .role = .system, .content = "Skills: one two three four" },
+        .{ .role = .system, .content = "AGENTS.md says keep tests green" },
+        .{ .role = .system, .content = "Skill body: alpha beta" },
+        .{ .role = .system, .content = "Today is Monday" },
+    };
+    const messages = [_]ChatMessage{
+        .{ .role = .user, .content = "summary of earlier work here", .context_origin = .handoff },
+        .{ .role = .user, .content = "please continue", .context_origin = .user_turn },
+        .{ .role = .assistant, .content = "continuing" },
+    };
+    const sections = measureContextSections(.{
+        .system_prompt = &.{ "You are fx, a coding agent.", "", "" },
+        .skill_catalog = "Skills: one two three four",
+        .explicit_skills = "Skill body: alpha beta",
+        .stable_prefix_len = 3,
+    }, &instructions, &messages, 400, 150, 420);
+    const tokens = token_estimate.textTokens;
+    try std.testing.expectEqual(tokens(instructions[0].content.?) + tokens(instructions[4].content.?), sections.system_prompt);
+    try std.testing.expectEqual(tokens(instructions[1].content.?) + tokens(instructions[3].content.?), sections.skills);
+    try std.testing.expectEqual(tokens(instructions[2].content.?), sections.rules);
+    try std.testing.expectEqual(tokens(messages[0].content.?), sections.summarized_conversation);
+    try std.testing.expectEqual(@as(u64, 250) - sections.summarized_conversation, sections.conversation);
+    var instruction_tokens: usize = 0;
+    for (instructions) |message| instruction_tokens += tokens(message.content.?);
+    try std.testing.expectEqual(@as(u64, 150) - instruction_tokens, sections.tools);
+    try std.testing.expectEqual(@as(u64, 420), sections.request);
+}
+
+test "context sections never go negative when the fixed part outgrows the request" {
+    const sections = measureContextSections(.{
+        .system_prompt = &.{},
+        .stable_prefix_len = 0,
+    }, &.{}, &.{}, 10, 50, 10);
+    try std.testing.expectEqual(@as(u64, 0), sections.conversation);
+    try std.testing.expectEqual(@as(u64, 50), sections.tools);
 }
 
 pub const ContextCompactionRequest = struct {
@@ -7287,12 +7418,17 @@ fn processQueuedPromptLoop(
             };
             var prepared_request_body: ?[]const u8 = null;
             var request_cost_for_attempt: ?runtime_prompt_context.RequestCost = null;
+            // The plain estimates of the whole request and of its fixed part,
+            // kept apart from calibration so the sections report adds up.
+            var request_text_tokens: usize = 0;
+            var fixed_text_tokens: ?usize = null;
             if (try deps.agent_stream_provider.buildRequest(
                 overlay_arena,
                 request_data,
             )) |request_body| {
                 prepared_request_body = request_body;
                 const measured_request_cost = try runtime_prompt_context.measureProviderRequest(std.heap.c_allocator, request_body, request_data);
+                request_text_tokens = measured_request_cost.text_tokens;
                 const applicable_calibration = if (agent.request_token_calibration) |*calibration|
                     if (std.mem.eql(u8, calibration.modelSlice(), gateway_model) and calibration.cost.applies(measured_request_cost))
                         calibration.cost
@@ -7313,6 +7449,7 @@ fn processQueuedPromptLoop(
                 fixed_request.messages = &.{};
                 agent.request_fixed_tokens = if (try deps.agent_stream_provider.buildRequest(overlay_arena, fixed_request)) |fixed_body| fixed: {
                     const measured = try runtime_prompt_context.measureProviderRequest(std.heap.c_allocator, fixed_body, fixed_request);
+                    fixed_text_tokens = measured.text_tokens;
                     const fixed = if (applicable_calibration) |calibration| runtime_prompt_context.calibrateProviderRequest(measured, calibration) else measured;
                     break :fixed fixed.estimated_input_tokens;
                 } else null;
@@ -7493,6 +7630,10 @@ fn processQueuedPromptLoop(
                 compactor.traceFailure(step_ctx, .overflow_recovery_incomplete, "estimated_tokens={d}", .{if (request_cost_for_attempt) |cost| cost.estimated_input_tokens else 0});
                 return error.ContextCapacityExceeded;
             }
+            // This request goes out as built: report its sections.
+            if (fixed_text_tokens) |fixed| if (request_cost_for_attempt) |cost| {
+                reportContextSections(deps, config, skills, stable_prefix.items.len, request_data, request_text_tokens, fixed, cost.estimated_input_tokens);
+            };
             summary_accumulator.prepareTokenRequest();
             runtime_assistant_stream.pushTokenProgressUpdate(&stream_ctx, .changed) catch |progress_err| {
                 debug_trace.logf("agent", "token progress publication failed source=gateway_prepare err={s}", .{@errorName(progress_err)});

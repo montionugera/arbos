@@ -11595,15 +11595,26 @@ impl Render for Composer {
                 let harness = (!self.side_chat)
                     .then(|| self.pickers.read(cx).resolved(cx).harness)
                     .flatten();
-                let target = {
+                let (target, agent_chat) = {
                     let state = self.state.read(cx);
-                    state
-                        .selected_chat_row()
+                    let chat = state.selected_chat_row();
+                    let target = chat
                         .map(|chat| chat.device_id.clone())
-                        .filter(|device| state.local_device_id.as_ref() != Some(device))
+                        .filter(|device| state.local_device_id.as_ref() != Some(device));
+                    // The bucket view reads the agent's log from this disk,
+                    // so only a chat on this device gets one.
+                    let agent_chat = chat.filter(|_| target.is_none()).and_then(|chat| {
+                        state
+                            .space_for_chat(chat)
+                            .map(|space| crate::account_usage::AgentChat {
+                                project: space.path.clone(),
+                                chat_id: chat.id.clone(),
+                            })
+                    });
+                    (target, agent_chat)
                 };
                 self.account_usage
-                    .update(cx, |usage, cx| usage.track(harness, target, cx));
+                    .update(cx, |usage, cx| usage.track(harness, target, agent_chat, cx));
             }
             container.child(
                 div()

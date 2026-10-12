@@ -375,6 +375,10 @@ pub fn Bindings(comptime App: type) type {
                 .record_tool_call_failed = agentRecordToolCallFailed,
                 .report_usage = agentReportUsage,
                 .report_inner_tool_usage = agentReportInnerToolUsage,
+                .report_context_sections = if (comptime @hasField(App, "session_persistence"))
+                    if (app.session_persistence.writable != null) agentReportContextSections else null
+                else
+                    null,
                 .usage_allocator = app.alloc,
                 .diff_marker_styles = .{
                     .added = ui_render.diff_added_marker_style,
@@ -1448,6 +1452,11 @@ pub fn Bindings(comptime App: type) type {
             const app: *App = @ptrCast(@alignCast(ctx));
             if (usage.input_tokens) |input| app.total_input_tokens = input;
             if (usage.output_tokens) |output| app.total_output_tokens = output;
+        }
+
+        fn agentReportContextSections(ctx: *anyopaque, sections: types.ContextSections) void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            app_session_runtime.Runtime(App).noteContextSections(app, sections);
         }
 
         fn agentReportInnerToolUsage(ctx: *anyopaque, tool_name: []const u8, usage: types.ToolUsage) void {
