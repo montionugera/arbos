@@ -20,7 +20,9 @@ pub const Digest = [Sha256.digest_length]u8;
 // frames: previous/after snapshots may live in a result-store artifact with
 // only the handle inline. Version 1 and 2 frames never carry the field and
 // remain readable.
-pub const conversation_schema_version: u8 = 3;
+// Version 4 adds context_sections frames: the section sizes of a turn's last
+// model request, written just before the turn. Older frames remain readable.
+pub const conversation_schema_version: u8 = 4;
 
 /// Every historical frame version a reader must still accept. Writers always
 /// emit conversation_schema_version.
@@ -180,6 +182,10 @@ pub const ConversationEvent = union(enum) {
     turn_completed: ConversationTurnCompleted,
     interrupted: ConversationInterruption,
     context_checkpoint: ConversationCheckpoint,
+    /// Standalone: the section sizes of the last request of the turn that
+    /// follows it. Allowed anywhere; it neither opens nor closes a turn and
+    /// replay skips it.
+    context_sections: types.ContextSections,
 };
 
 pub const ConversationEnvelope = struct {
@@ -257,7 +263,7 @@ pub fn validateConversationTransition(
         .turn_completed => if (state.pending_tool_calls.len != 0) {
             return error.UnresolvedToolCall;
         },
-        .user, .assistant, .steering, .interrupted => {},
+        .user, .assistant, .steering, .interrupted, .context_sections => {},
     }
 }
 
@@ -388,6 +394,7 @@ pub fn validateConversationEventShape(event: ConversationEvent, schema_version: 
         },
         .context_checkpoint => |checkpoint| try validateConversationText(checkpoint.summary),
         .turn_completed => |completed| try validateConversationFiles(completed.files),
+        .context_sections => if (schema_version < 4) return rejectInvalidConversationEvent("context-sections-schema"),
     }
 }
 
@@ -3376,10 +3383,10 @@ test "conversation cancellation provenance preserves ordinary frame bytes" {
     });
     defer alloc.free(encoded);
     try std.testing.expectEqualStrings(
-        "{\"schema_version\":3,\"seq\":1,\"timestamp_ms\":1,\"event\":{\"interrupted\":{\"reason\":\"cancelled\",\"partial_text\":null,\"command_replay_ref\":null,\"command_replay_bytes\":null,\"command_artifact_ref\":null,\"files\":[],\"turn_summary\":null}}}\n",
+        "{\"schema_version\":4,\"seq\":1,\"timestamp_ms\":1,\"event\":{\"interrupted\":{\"reason\":\"cancelled\",\"partial_text\":null,\"command_replay_ref\":null,\"command_replay_bytes\":null,\"command_artifact_ref\":null,\"files\":[],\"turn_summary\":null}}}\n",
         encoded,
     );
-    for ([_]u8{ 1, 2, 3 }) |version| {
+    for ([_]u8{ 1, 2, 3, 4 }) |version| {
         for (std.enums.values(session.InterruptedTerminalReason)) |reason| {
             const old = try std.fmt.allocPrint(alloc, "{{\"schema_version\":{d},\"seq\":1,\"timestamp_ms\":1,\"event\":{{\"interrupted\":{{\"reason\":\"{s}\"}}}}}}\n", .{ version, @tagName(reason) });
             defer alloc.free(old);

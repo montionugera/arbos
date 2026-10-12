@@ -479,6 +479,7 @@ fn validateCompactedLog(alloc: Allocator, dir: *io_mod.VerifiedDir, session_id: 
             .context_checkpoint => {
                 latest_checkpoint_coverage = envelope.event.context_checkpoint.covers_through_seq;
             },
+            .context_sections => {},
         }
         try trackPendingToolCall(alloc, &pending_tool_calls, envelope);
         last_seq = envelope.seq;

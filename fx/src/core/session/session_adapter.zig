@@ -2493,7 +2493,7 @@ noinline fn replay(
                             interrupted_item = true;
                             try sink.turn(try builder.finishInterrupted(value), lastStarted(entry));
                         },
-                        .context_checkpoint => return error.InvalidConversationFrame,
+                        .context_checkpoint, .context_sections => return error.InvalidConversationFrame,
                     }
                 },
                 .turn_interrupted => |ended| {
@@ -2866,7 +2866,7 @@ fn itemType(kind: PieceKind) ?[]const u8 {
         .steering => "steering",
         .turn_completed => "turn_end",
         .interrupted => "interruption",
-        .context_checkpoint => null,
+        .context_checkpoint, .context_sections => null,
     };
 }
 
@@ -3135,7 +3135,7 @@ test "every piece kind but checkpoints maps to one item type and back" {
         if (itemType(kind)) |name| {
             try testing.expectEqual(@as(?PieceKind, kind), pieceKind(name));
         } else {
-            try testing.expectEqual(PieceKind.context_checkpoint, kind);
+            try testing.expect(kind == .context_checkpoint or kind == .context_sections);
         }
     }
     try testing.expectEqual(@as(?PieceKind, null), pieceKind("compacted"));
