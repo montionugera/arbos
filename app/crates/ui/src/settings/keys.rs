@@ -20,7 +20,22 @@ const PROVIDERS: &[(&str, &str, &str)] = &[
     ("ollama", "Ollama", "http://127.0.0.1:11434/v1"),
     ("codex", "Codex OAuth", ""),
     ("grok", "Grok OAuth", ""),
+    ("github", "GitHub", ""),
+    ("onepassword", "1Password", ""),
 ];
+
+/// What a worker does with a tool token. Providers have no note.
+fn tool_note(provider: &str) -> Option<&'static str> {
+    match provider {
+        "github" => Some(
+            "Workers use this token to push branches and open pull requests. It goes to the keychain, never to a file in the project.",
+        ),
+        "onepassword" => Some(
+            "A service account token. Workers can run op read for the items it can see. It goes to the keychain, never to a file in the project.",
+        ),
+        _ => None,
+    }
+}
 
 pub struct KeysPage {
     state: Entity<AppState>,
@@ -152,6 +167,7 @@ impl Render for KeysPage {
                 .child(SharedString::from(*label))
         });
         let show_url = matches!(provider, "ai-gateway" | "openrouter" | "ollama");
+        let tool_note = tool_note(provider);
         div()
             .id("keys-page")
             .size_full()
@@ -190,6 +206,16 @@ impl Render for KeysPage {
                                 .child(popover::dialog_field(
                                     self.url_input.clone().into_any_element(),
                                 )),
+                        )
+                    })
+                    .when_some(tool_note, |column, note| {
+                        column.child(
+                            div()
+                                .mt(px(8.0))
+                                .px(px(12.0))
+                                .text_size(crate::typography::ui_rems(12.5))
+                                .text_color(theme.text_muted)
+                                .child(note),
                         )
                     })
                     .child(
