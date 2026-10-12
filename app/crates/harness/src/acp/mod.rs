@@ -201,6 +201,25 @@ pub(crate) fn fx_child_env(key: Option<&str>, home: &str) -> Vec<(&'static str, 
     env
 }
 
+/// Point git at `gh` for GitHub over HTTPS through the environment alone, so
+/// `git push` works with the `GH_TOKEN` the child already has. No git config
+/// file is touched. Entries from an existing `GIT_CONFIG_COUNT` keep their
+/// indices; this one is appended after them.
+pub(crate) fn git_credential_env(existing_count: Option<u32>) -> Vec<(String, String)> {
+    let index = existing_count.unwrap_or(0);
+    vec![
+        ("GIT_CONFIG_COUNT".to_owned(), (index + 1).to_string()),
+        (
+            format!("GIT_CONFIG_KEY_{index}"),
+            "credential.https://github.com.helper".to_owned(),
+        ),
+        (
+            format!("GIT_CONFIG_VALUE_{index}"),
+            "!gh auth git-credential".to_owned(),
+        ),
+    ]
+}
+
 fn fx_home_override(request: &RunRequest) -> Option<String> {
     request
         .model_options
@@ -1859,14 +1878,30 @@ impl AcpHarness {
                 .filter(|value| !value.is_empty())
                 .or_else(|| crate::secrets::read("engy"));
             let mut pairs = fx_child_env(key.as_deref(), &home);
-            for (name, value) in crate::secrets::provider_env_pairs() {
+            let stored = crate::secrets::provider_env_pairs()
+                .into_iter()
+                .chain(crate::secrets::tool_env_pairs());
+            for (name, value) in stored {
                 if pairs.iter().any(|(existing, _)| *existing == name) {
                     continue;
                 }
                 pairs.push((name, value));
             }
+            // A token on this process is inherited; one from the store is in `pairs`.
+            let has_github_token = pairs
+                .iter()
+                .any(|(name, value)| *name == "GH_TOKEN" && !value.trim().is_empty())
+                || std::env::var("GH_TOKEN").is_ok_and(|value| !value.trim().is_empty());
             for (name, value) in pairs {
                 cmd.env(name, value);
+            }
+            if has_github_token {
+                let existing_count = std::env::var("GIT_CONFIG_COUNT")
+                    .ok()
+                    .and_then(|count| count.trim().parse::<u32>().ok());
+                for (name, value) in git_credential_env(existing_count) {
+                    cmd.env(name, value);
+                }
             }
         }
         if self.spec.id == HarnessId::Antigravity {
@@ -5956,6 +5991,40 @@ mod tests {
         assert!(!home.exists());
         let without_key = fx_child_env(Some("  "), &home_text);
         assert!(without_key.iter().all(|(name, _)| *name != "ENGY_API_KEY"));
+    }
+
+    #[test]
+    fn git_credential_env_starts_a_config_list_or_appends_to_one() {
+        let fresh = git_credential_env(None);
+        assert_eq!(
+            fresh,
+            vec![
+                ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()),
+                (
+                    "GIT_CONFIG_KEY_0".to_owned(),
+                    "credential.https://github.com.helper".to_owned()
+                ),
+                (
+                    "GIT_CONFIG_VALUE_0".to_owned(),
+                    "!gh auth git-credential".to_owned()
+                ),
+            ]
+        );
+        let appended = git_credential_env(Some(2));
+        assert_eq!(
+            appended,
+            vec![
+                ("GIT_CONFIG_COUNT".to_owned(), "3".to_owned()),
+                (
+                    "GIT_CONFIG_KEY_2".to_owned(),
+                    "credential.https://github.com.helper".to_owned()
+                ),
+                (
+                    "GIT_CONFIG_VALUE_2".to_owned(),
+                    "!gh auth git-credential".to_owned()
+                ),
+            ]
+        );
     }
 
     #[test]
