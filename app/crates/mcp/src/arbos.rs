@@ -319,4 +319,31 @@ mod tests {
         assert!(!forces(&json!({ "reason": "The gate is green and both reports are in." })));
         assert!(!forces(&json!({})));
     }
+
+    #[test]
+    fn no_tool_takes_a_secret_so_a_model_is_never_handed_one() {
+        for profile in ["coordinator", "worker"] {
+            let tools = catalog(profile);
+            assert!(!tools.is_empty());
+            for tool in tools {
+                assert_ne!(tool.name, "byok", "{profile} can save a key");
+                assert_ne!(
+                    op_for(tool.name),
+                    "byok",
+                    "{profile}: {} saves a key",
+                    tool.name
+                );
+                let properties = tool.input_schema["properties"]
+                    .as_object()
+                    .unwrap_or_else(|| panic!("{}: properties is not an object", tool.name));
+                for property in ["secret", "token", "apiKey"] {
+                    assert!(
+                        !properties.contains_key(property),
+                        "{}: takes {property}",
+                        tool.name
+                    );
+                }
+            }
+        }
+    }
 }
