@@ -2536,6 +2536,9 @@ async fn drive_run(
             serde_json::Value::String(prep.system_prompt),
         );
     }
+    if main_turn {
+        crate::arbos_live::note_working(std::path::Path::new(&run_cwd));
+    }
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside
     // the event loop) can take ownership.

@@ -238,6 +238,12 @@ pub fn end_main_turn(project: &Path, showed_text: bool) {
     }
 }
 
+/// A Main turn has started. The header shows a derived step until a tool
+/// or `status.step` replaces it, and until the turn ends.
+pub fn note_working(project: &Path) {
+    activities().insert(project.to_path_buf(), (Activity::Writing, String::new()));
+}
+
 /// Watch Main's stream for the derived step.
 pub fn note_activity(project: &Path, event: &AgentEvent) {
     let next = match event {
@@ -271,7 +277,9 @@ pub fn note_activity(project: &Path, event: &AgentEvent) {
             }
             _ => None,
         },
-        AgentEvent::TextDelta { text } if !text.trim().is_empty() => {
+        AgentEvent::TextDelta { text } | AgentEvent::ReasoningDelta { text }
+            if !text.trim().is_empty() =>
+        {
             Some((Activity::Writing, String::new()))
         }
         _ => None,
