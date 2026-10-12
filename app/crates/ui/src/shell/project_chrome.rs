@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, Entity, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled,
-    Task, div, prelude::*, px,
+    div, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Entity, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Task,
 };
 
 use crate::composer::ComposerInput;
-use crate::image_media::{MediaImage, decode_project_icon};
+use crate::image_media::{decode_project_icon, MediaImage};
 use crate::theme::Theme;
 
 use super::Shell;
@@ -36,6 +36,8 @@ pub(super) struct ProjectChrome {
     emoji_input: Option<Entity<ComposerInput>>,
     image_input: Option<Entity<ComposerInput>>,
     pub status: Vec<(bool, String)>,
+    pub goal: Option<String>,
+    pub skill: Option<String>,
     watched: Option<String>,
     watch: Option<Task<()>>,
     icons: HashMap<String, MediaImage>,
@@ -52,6 +54,8 @@ impl Default for ProjectChrome {
             emoji_input: None,
             image_input: None,
             status: Vec::new(),
+            goal: None,
+            skill: None,
             watched: None,
             watch: None,
             icons: HashMap::new(),
@@ -156,13 +160,7 @@ impl Shell {
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
         if let Some(tab) = main {
             strip = strip.child(self.chat_tab(&tab, selected.as_deref(), surface, &theme, cx));
-            strip = strip.child(
-                div()
-                    .w(px(1.0))
-                    .h(px(16.0))
-                    .bg(theme.border)
-                    .mx(px(4.0)),
-            );
+            strip = strip.child(div().w(px(1.0)).h(px(16.0)).bg(theme.border).mx(px(4.0)));
         }
         for index in &shown_ix {
             let tab = &extras[*index];
@@ -185,7 +183,10 @@ impl Shell {
 
     pub(super) fn render_icon_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let space_id = self.project.icon_for.clone()?;
-        let project = self.project_rows(cx).into_iter().find(|row| row.id == space_id)?;
+        let project = self
+            .project_rows(cx)
+            .into_iter()
+            .find(|row| row.id == space_id)?;
         let theme = Theme::of(cx).clone();
         let emoji = self.project.emoji_input.clone()?;
         let image = self.project.image_input.clone()?;
@@ -320,6 +321,48 @@ impl Shell {
         list.into_any_element()
     }
 
+    /// The goal started with `/goal`, and the skill that has run for it.
+    /// A finished step does not remove this.
+    pub(super) fn render_active_goal(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let show = self.project.surface == Surface::Chat && self.selected_is_main(cx);
+        let Some(title) = self.project.goal.clone() else {
+            return div().into_any_element();
+        };
+        if !show {
+            return div().into_any_element();
+        }
+        let theme = Theme::of(cx).clone();
+        let mut card = div()
+            .w_full()
+            .max_w(px(720.0))
+            .mx_auto()
+            .mb(px(8.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface)
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(theme.text)
+                    .child(format!("Goal · {title}")),
+            );
+        if let Some(skill) = self.project.skill.clone() {
+            card = card.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(theme.text)
+                    .child(format!("Skill · {skill}")),
+            );
+        }
+        card.into_any_element()
+    }
+
     /// The file this worker wrote, read from the project. Main keeps the
     /// checklist. The worker tab shows the file.
     pub(super) fn render_worker_file(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -404,7 +447,11 @@ impl Shell {
                     .rounded(px(6.0))
                     .text_size(px(12.0))
                     .cursor_pointer()
-                    .text_color(if selected { theme.text } else { theme.text_muted })
+                    .text_color(if selected {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
                     .bg(if selected {
                         theme.element_hover
                     } else {
@@ -440,9 +487,11 @@ impl Shell {
                             .text_color(theme.text_muted)
                             .child(current.unwrap_or_else(|| "Context".into())),
                     )
-                    .children(editor.map(|editor| {
-                        div().flex_1().min_h_0().child(editor).into_any_element()
-                    }))
+                    .children(
+                        editor.map(|editor| {
+                            div().flex_1().min_h_0().child(editor).into_any_element()
+                        }),
+                    )
                     .when(save.is_some(), |column| {
                         column.child(
                             div()
@@ -467,8 +516,9 @@ impl Shell {
         self.project.surface = Surface::Chat;
         self.project.icon_for = None;
         let main = self.main_chat_id(space_id, cx);
-        self.state
-            .update(cx, |state, cx| state.select_space(Some(space_id.to_owned()), cx));
+        self.state.update(cx, |state, cx| {
+            state.select_space(Some(space_id.to_owned()), cx)
+        });
         if let Some(chat_id) = main {
             self.open_chat(chat_id, cx);
         } else {
@@ -477,18 +527,13 @@ impl Shell {
     }
 
     pub(super) fn open_project_chat(&mut self, cx: &mut Context<Self>) {
-        let space_id = self
-            .state
-            .read(cx)
-            .selected_space
-            .clone()
-            .or_else(|| {
-                self.state
-                    .read(cx)
-                    .spaces
-                    .first()
-                    .map(|space| space.id.clone())
-            });
+        let space_id = self.state.read(cx).selected_space.clone().or_else(|| {
+            self.state
+                .read(cx)
+                .spaces
+                .first()
+                .map(|space| space.id.clone())
+        });
         let Some(space_id) = space_id else {
             self.open_add_space(cx);
             return;
@@ -546,14 +591,13 @@ impl Shell {
 
     pub(super) fn open_icon_menu(&mut self, space_id: String, cx: &mut Context<Self>) {
         if self.project.emoji_input.is_none() {
-            self.project.emoji_input = Some(cx.new(|cx| {
-                ComposerInput::with_context("Emoji", "ProjectIcon", cx)
-            }));
+            self.project.emoji_input =
+                Some(cx.new(|cx| ComposerInput::with_context("Emoji", "ProjectIcon", cx)));
         }
         if self.project.image_input.is_none() {
-            self.project.image_input = Some(cx.new(|cx| {
-                ComposerInput::with_context("Image file path", "ProjectIcon", cx)
-            }));
+            self.project.image_input = Some(
+                cx.new(|cx| ComposerInput::with_context("Image file path", "ProjectIcon", cx)),
+            );
         }
         self.project.icon_for = Some(space_id);
         cx.notify();
@@ -622,24 +666,31 @@ impl Shell {
         }
         self.project.watched = Some(project.clone());
         self.project.status = zeron_engine::arbos_layout::status_items(Path::new(&project));
+        let view = zeron_engine::arbos_layout::goal_view(Path::new(&project));
+        self.project.goal = view.title;
+        self.project.skill = view.skill;
         self.project.watch = Some(cx.spawn(async move |this, cx| {
-            let file = PathBuf::from(&project)
-                .join(".arbos")
-                .join("context")
-                .join("status.md");
+            let root = PathBuf::from(&project).join(".arbos").join("context");
+            let status_file = root.join("status.md");
+            let goals_file = root.join("GOALS.md");
             let mut seen = String::new();
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(400))
                     .await;
-                let text = std::fs::read_to_string(&file).unwrap_or_default();
-                if text == seen {
+                let status_text = std::fs::read_to_string(&status_file).unwrap_or_default();
+                let goals_text = std::fs::read_to_string(&goals_file).unwrap_or_default();
+                let snap = format!("{status_text}\n---\n{goals_text}");
+                if snap == seen {
                     continue;
                 }
-                seen = text;
+                seen = snap;
                 let items = zeron_engine::arbos_layout::status_items(Path::new(&project));
+                let view = zeron_engine::arbos_layout::goal_view(Path::new(&project));
                 let _ = this.update(cx, |shell, cx| {
                     shell.project.status = items;
+                    shell.project.goal = view.title;
+                    shell.project.skill = view.skill;
                     cx.notify();
                 });
             }
@@ -824,13 +875,7 @@ impl Shell {
         div().text_size(px(12.0)).child(letter).into_any_element()
     }
 
-    fn request_icon(
-        &mut self,
-        key: String,
-        project: String,
-        icon: String,
-        cx: &mut Context<Self>,
-    ) {
+    fn request_icon(&mut self, key: String, project: String, icon: String, cx: &mut Context<Self>) {
         if self.project.icons.contains_key(&key) || !self.project.icon_loading.insert(key.clone()) {
             return;
         }
@@ -877,11 +922,7 @@ impl Shell {
     ) -> AnyElement {
         let active = surface == Surface::Chat && selected == Some(tab.id.as_str());
         let chat_id = tab.id.clone();
-        let mut label = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0));
+        let mut label = div().flex().flex_row().items_center().gap(px(4.0));
         if tab.main {
             label = label.child("●");
         } else if tab.worker {
@@ -890,19 +931,14 @@ impl Shell {
         label = label.child(tab.title.clone());
         if tab.worker && tab.status == "working" {
             let pulse_id = SharedString::from(format!("worker-pulse-{}", tab.id));
-            label = label.child(
-                div()
-                    .text_color(theme.accent)
-                    .child("●")
-                    .with_animation(
-                        pulse_id,
-                        Animation::new(Duration::from_millis(900)).repeat(),
-                        |dot, t| {
-                            let wave = (t * std::f32::consts::PI).sin().abs();
-                            dot.opacity(1.0 - 0.65 * wave)
-                        },
-                    ),
-            );
+            label = label.child(div().text_color(theme.accent).child("●").with_animation(
+                pulse_id,
+                Animation::new(Duration::from_millis(900)).repeat(),
+                |dot, t| {
+                    let wave = (t * std::f32::consts::PI).sin().abs();
+                    dot.opacity(1.0 - 0.65 * wave)
+                },
+            ));
         } else if tab.worker && tab.status == "error" {
             label = label.child("✕");
         } else if tab.worker && (tab.status == "done" || tab.status == "stopped") {
@@ -975,12 +1011,7 @@ impl Shell {
             .into_any_element()
     }
 
-    fn context_tab(
-        &self,
-        surface: Surface,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn context_tab(&self, surface: Surface, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let active = surface == Surface::Context;
         div()
             .id("project-tab-context")

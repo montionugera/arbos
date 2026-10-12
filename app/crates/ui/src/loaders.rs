@@ -11,8 +11,8 @@
 //! and background pause keep them still.
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, EntityId, IntoElement, ParentElement,
-    PathBuilder, Render, RenderOnce, SharedString, Styled, Window, canvas, div, point, px,
+    canvas, div, point, px, AnyElement, App, AppContext, Context, Entity, EntityId, IntoElement,
+    ParentElement, PathBuilder, Render, RenderOnce, SharedString, Styled, Window,
 };
 
 use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT, ZERON_PULSE};
@@ -21,7 +21,7 @@ use crate::theme::{GlyphPalette, Theme};
 // Shared with the terminal viewport (`zeron_proto::motion`) so both animate the
 // same loaders from the same numbers.
 pub use zeron_proto::motion::{
-    MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, ZERON_CELLS, mark_cell_stagger,
+    mark_cell_stagger, MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, ZERON_CELLS,
 };
 
 /// The animated zeron mark (zeron-loader.tsx `ZeronLoader`): the full logo
@@ -448,6 +448,13 @@ fn progress_arc(
 /// the hero ascii) over the app background with a quiet status line. While
 /// `fading` it plays `splash-out` (150ms hold, then 0.5s fade + 6px lift); the
 /// shell removes it once [`SPLASH_OUT`] has run its course.
+/// The boot line a person reads. Kept as its own function so the words stay
+/// in the release binary.
+#[inline(never)]
+pub fn boot_splash_label() -> &'static str {
+    "Setting up Arbos"
+}
+
 pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App) -> AnyElement {
     let content = div()
         .absolute()
@@ -475,7 +482,7 @@ pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App)
             div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.7))
-                .child(SharedString::from("Setting up Arbos")),
+                .child(SharedString::from(boot_splash_label())),
         );
     if fading {
         motion::splash_out("boot-splash-out", content).into_any_element()

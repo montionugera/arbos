@@ -24,7 +24,8 @@ Then summarise in a few sentences and tick the matching line in context/status.m
 Do not tick a line before that worker reports. \
 Read `.arbos/context/GOALS.md` first. \
 Write what you learn to `.arbos/context/`. \
-Keep `status.md` current.";
+Keep `status.md` current. \
+An Active goal in GOALS.md stays active after a worker reports. Do not remove it.";
 
 pub const WORKER_PROMPT: &str = "\
 You are a worker. Do the brief. Do not spawn agents and do not edit project code. \
@@ -250,6 +251,282 @@ pub fn read_context(project: &Path, relative: &str) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+/// What `/goal` and `/skill` do with a composer send.
+pub enum ComposerCommand {
+    /// Ordinary text. Send it as typed.
+    Passthrough,
+    /// The project files changed. The transcript keeps the typed line.
+    Local,
+    /// The transcript keeps the typed line. The agent receives this prompt.
+    Model(String),
+}
+
+/// The Active section of `GOALS.md`, plus the skill that has run for it.
+pub struct GoalView {
+    pub title: Option<String>,
+    pub skill: Option<String>,
+}
+
+const SPLIT_SKILL: &str = "\
+name: split
+write: research/skill-split.md
+line: Skill split ran.
+worker: oak research/oak.md Oak is ready.
+worker: pine research/pine.md Pine is ready.
+---
+Split the active goal into two workers.
+Spawn both before you wait.
+When a worker reports, tick its checklist line.
+Leave the Active goal in place.
+";
+
+/// Read the goal a person can still see. A finished step does not clear it.
+pub fn goal_view(project: &Path) -> GoalView {
+    let Ok(text) = fs::read_to_string(root_of(project).join("context").join("GOALS.md")) else {
+        return GoalView {
+            title: None,
+            skill: None,
+        };
+    };
+    let mut title = None;
+    let mut skill = None;
+    let mut in_active = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            in_active = heading.trim() == "Active";
+            continue;
+        }
+        if !in_active {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Skill:") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                skill = Some(name.to_owned());
+            }
+            continue;
+        }
+        if title.is_none() && !trimmed.is_empty() {
+            title = Some(trimmed.to_owned());
+        }
+    }
+    GoalView { title, skill }
+}
+
+/// `/goal …` records the goal. `/skill …` runs that skill, then tells Main.
+pub fn prepare_composer_command(project: &Path, prompt: &str) -> ComposerCommand {
+    if !root_of(project).join("project.toml").is_file() {
+        return ComposerCommand::Passthrough;
+    }
+    let trimmed = prompt.trim();
+    if let Some(title) = trimmed.strip_prefix("/goal ") {
+        let title = title.trim();
+        if title.is_empty() {
+            return ComposerCommand::Passthrough;
+        }
+        return if start_goal(project, title).is_ok() {
+            ComposerCommand::Local
+        } else {
+            ComposerCommand::Passthrough
+        };
+    }
+    if let Some(rest) = trimmed.strip_prefix("/skill ") {
+        let Some(name) = rest.split_whitespace().next() else {
+            return ComposerCommand::Passthrough;
+        };
+        return match run_skill(project, name) {
+            Ok(prompt) => ComposerCommand::Model(prompt),
+            Err(_) => ComposerCommand::Passthrough,
+        };
+    }
+    ComposerCommand::Passthrough
+}
+
+fn start_goal(project: &Path, title: &str) -> Result<(), String> {
+    let _guard = layout_lock();
+    if !root_of(project).join("project.toml").is_file() {
+        return Err("not a project".into());
+    }
+    write_goals(project, title, None)?;
+    if let Ok(spec) = load_skill(project, "split") {
+        ensure_step(project, &skill_step(&spec.name), false)?;
+        for (_, _, line) in &spec.workers {
+            ensure_step(project, line, false)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_skill(project: &Path, name: &str) -> Result<String, String> {
+    let _guard = layout_lock();
+    let spec = load_skill(project, name)?;
+    let path = context_file(project, &spec.write_path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&path, format!("{}\n", spec.write_line)).map_err(|e| e.to_string())?;
+    ensure_step(project, &skill_step(&spec.name), true)?;
+    for (_, _, line) in &spec.workers {
+        ensure_step(project, line, false)?;
+    }
+    let title = goal_title_unlocked(project);
+    if let Some(title) = title.as_deref() {
+        write_goals(project, title, Some(&spec.name))?;
+    }
+    Ok(skill_prompt(&spec, title.as_deref()))
+}
+
+fn skill_step(name: &str) -> String {
+    format!("Run the {name} skill")
+}
+
+fn skill_prompt(spec: &SkillSpec, goal: Option<&str>) -> String {
+    let mut prompt = String::new();
+    if let Some(goal) = goal {
+        prompt.push_str(&format!("The active goal is: {goal}.\n"));
+    }
+    prompt.push_str(&format!(
+        "The {} skill has already run. {} says: {}.\n",
+        spec.name, spec.write_path, spec.write_line
+    ));
+    prompt.push_str("The goal stays active. Do not edit GOALS.md.\n");
+    prompt.push_str(
+        "Spawn these workers at once, before you wait for any of them. Do not write their files yourself.\n",
+    );
+    for (name, file, line) in &spec.workers {
+        prompt.push_str(&format!(
+            "Name one worker {name}. Its only job is to write {file} with the line {line}.\n"
+        ));
+    }
+    prompt.push_str(
+        "When each reports, tick that line in context/status.md. Do not tick a line before that worker reports.\n",
+    );
+    if !spec.body.is_empty() {
+        prompt.push_str(&spec.body);
+        prompt.push('\n');
+    }
+    prompt
+}
+
+struct SkillSpec {
+    name: String,
+    write_path: String,
+    write_line: String,
+    workers: Vec<(String, String, String)>,
+    body: String,
+}
+
+fn load_skill(project: &Path, name: &str) -> Result<SkillSpec, String> {
+    let path = skill_file(project, name)?;
+    if !path.is_file() {
+        if slug(name) != "split" {
+            return Err("that skill is not in this project".into());
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&path, SPLIT_SKILL).map_err(|e| e.to_string())?;
+    }
+    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    parse_skill(&text)
+}
+
+fn parse_skill(text: &str) -> Result<SkillSpec, String> {
+    let (head, body) = text.split_once("\n---\n").unwrap_or((text, ""));
+    let mut name = String::new();
+    let mut write_path = String::new();
+    let mut write_line = String::new();
+    let mut workers = Vec::new();
+    for line in head.lines() {
+        let line = line.trim();
+        if line.is_empty() || line == "---" {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("name:") {
+            name = rest.trim().to_owned();
+        } else if let Some(rest) = line.strip_prefix("write:") {
+            write_path = rest.trim().to_owned();
+        } else if let Some(rest) = line.strip_prefix("line:") {
+            write_line = rest.trim().to_owned();
+        } else if let Some(rest) = line.strip_prefix("worker:") {
+            let mut parts = rest.split_whitespace();
+            let worker_name = parts.next().unwrap_or("").to_owned();
+            let file = parts.next().unwrap_or("").to_owned();
+            let worker_line = parts.collect::<Vec<_>>().join(" ");
+            if worker_name.is_empty() || file.is_empty() || worker_line.is_empty() {
+                return Err("a worker needs a name, a file, and a line".into());
+            }
+            workers.push((worker_name, file, worker_line));
+        } else {
+            return Err("the skill has a line that is not a step".into());
+        }
+    }
+    if name.is_empty() || write_path.is_empty() || write_line.is_empty() || workers.is_empty() {
+        return Err("the skill is missing a step".into());
+    }
+    Ok(SkillSpec {
+        name,
+        write_path,
+        write_line,
+        workers,
+        body: body.trim().to_owned(),
+    })
+}
+
+fn skill_file(project: &Path, name: &str) -> Result<PathBuf, String> {
+    let name = slug(name);
+    if name.is_empty() {
+        return Err("name the skill".into());
+    }
+    Ok(root_of(project).join("skills").join(name).join("SKILL.md"))
+}
+
+fn write_goals(project: &Path, title: &str, skill: Option<&str>) -> Result<(), String> {
+    let mut body = format!("# Goals\n\n## Active\n\n{title}\n");
+    if let Some(skill) = skill {
+        body.push_str(&format!("\nSkill: {skill}\n"));
+    }
+    body.push_str("\n## Standing\n\nStanding goals for this project.\n");
+    fs::write(root_of(project).join("context").join("GOALS.md"), body).map_err(|e| e.to_string())
+}
+
+fn goal_title_unlocked(project: &Path) -> Option<String> {
+    goal_view(project).title
+}
+
+fn ensure_step(project: &Path, text: &str, done: bool) -> Result<(), String> {
+    let path = root_of(project).join("context").join("status.md");
+    let mut current = fs::read_to_string(&path).unwrap_or_else(|_| "# Status\n".to_owned());
+    let mark = if done { "- [x]" } else { "- [ ]" };
+    let mut lines: Vec<String> = current.lines().map(str::to_owned).collect();
+    let mut found = false;
+    for line in &mut lines {
+        let trimmed = line.trim();
+        let rest = trimmed
+            .strip_prefix("- [ ]")
+            .or_else(|| trimmed.strip_prefix("- [x]"))
+            .or_else(|| trimmed.strip_prefix("- [X]"));
+        if rest.is_some_and(|rest| rest.trim() == text) {
+            if done {
+                *line = format!("{mark} {text}");
+            }
+            found = true;
+        }
+    }
+    if !found {
+        if !current.ends_with('\n') && !current.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(format!("{mark} {text}"));
+    }
+    current = lines.join("\n");
+    if !current.ends_with('\n') {
+        current.push('\n');
+    }
+    fs::write(path, current).map_err(|e| e.to_string())
+}
+
 /// Checkbox rows from `context/status.md`, in file order.
 pub fn status_items(project: &Path) -> Vec<(bool, String)> {
     let Ok(text) = fs::read_to_string(root_of(project).join("context").join("status.md")) else {
@@ -297,7 +574,10 @@ pub fn prepare_turn(project: &Path, chat_id: &str) -> Option<TurnPrep> {
 /// A claimed coordinator uses the chat id in `agents/main/agent.toml`.
 /// Before that claim, Main is `{project id}-main`.
 pub fn main_chat_id(project: &Path) -> String {
-    let path = root_of(project).join("agents").join("main").join("agent.toml");
+    let path = root_of(project)
+        .join("agents")
+        .join("main")
+        .join("agent.toml");
     let claimed = read_agent(&path)
         .map(|agent| agent.chat_id)
         .unwrap_or_default();
@@ -312,7 +592,10 @@ pub fn main_chat_id(project: &Path) -> String {
 /// Stamp the coordinator agent with the chat created for Main.
 pub fn claim_main(project: &Path, chat_id: &str) -> Result<(), String> {
     let _guard = layout_lock();
-    let path = root_of(project).join("agents").join("main").join("agent.toml");
+    let path = root_of(project)
+        .join("agents")
+        .join("main")
+        .join("agent.toml");
     let mut agent = read_agent(&path).unwrap_or_else(coordinator_agent);
     if agent.chat_id.is_empty() {
         agent.chat_id = chat_id.to_owned();
@@ -348,9 +631,7 @@ pub fn agents(project: &Path) -> Vec<AgentView> {
             "worker" => 1,
             _ => 2,
         };
-        rank(&a.role)
-            .cmp(&rank(&b.role))
-            .then(a.id.cmp(&b.id))
+        rank(&a.role).cmp(&rank(&b.role)).then(a.id.cmp(&b.id))
     });
     rows
 }
@@ -459,10 +740,7 @@ pub fn worker_result(project: &Path, name: &str) -> Result<AgentView, String> {
     if id.is_empty() {
         return Err("name the worker".into());
     }
-    let path = root_of(project)
-        .join("agents")
-        .join(&id)
-        .join("agent.toml");
+    let path = root_of(project).join("agents").join(&id).join("agent.toml");
     read_agent(&path)
         .map(agent_view)
         .ok_or_else(|| "no such worker".to_string())

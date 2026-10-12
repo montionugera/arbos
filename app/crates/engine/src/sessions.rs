@@ -25,9 +25,8 @@ use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use zeron_doc::{
-    DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter,
-    SessionCommandPayload, SessionDoc, SessionMessageEntry, fold_event_into_parts,
-    sanitize_tool_call,
+    fold_event_into_parts, sanitize_tool_call, DocError, MessagePart, MessageRole, MessageStatus,
+    SegmentWriter, SessionCommandPayload, SessionDoc, SessionMessageEntry, STREAM_COMMIT_MS,
 };
 use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage, TurnControl};
 use zeron_proto::{
@@ -38,7 +37,7 @@ use zeron_proto::{
 use crate::doc_host::{ChatDocHandle, DocHost};
 use crate::registry::{HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
-use crate::{EngineError, new_id, now_ms};
+use crate::{new_id, now_ms, EngineError};
 
 /// One journaled event: the durable seq plus the event, as broadcast to subscribers.
 #[derive(Debug, Clone)]
@@ -572,6 +571,26 @@ impl SessionsEngine {
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)
             .map_err(|error| EngineError::Other(error.to_string()))?;
+        // `/goal` updates the project and stays in the transcript.
+        // `/skill` runs, then the agent receives the skill's steps.
+        // The typed line is what the transcript keeps.
+        let shown = request.prompt.clone();
+        match crate::arbos_layout::prepare_composer_command(
+            std::path::Path::new(&request.cwd),
+            &shown,
+        ) {
+            crate::arbos_layout::ComposerCommand::Local => {
+                let handle = self.doc_handle(chat_id)?;
+                let user_id = message_id.unwrap_or_else(new_id);
+                handle.write_user_message(&user_id, &shown, now_ms())?;
+                self.inner.note_message(chat_id, &shown);
+                return Ok(String::new());
+            }
+            crate::arbos_layout::ComposerCommand::Model(prompt) => {
+                request.prompt = prompt;
+            }
+            crate::arbos_layout::ComposerCommand::Passthrough => {}
+        }
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -662,7 +681,7 @@ impl SessionsEngine {
                     lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
                 }
                 let handle = self.doc_handle(chat_id)?;
-                handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                handle.write_user_message(&user_id, &shown, now_ms())?;
                 self.note_turn_start(chat_id, &request.cwd);
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
@@ -674,7 +693,7 @@ impl SessionsEngine {
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
-                    self.inner.note_message(chat_id, &request.prompt);
+                    self.inner.note_message(chat_id, &shown);
                     return Ok(run_id);
                 }
                 // The run died around the send. If its exit drain already
@@ -687,7 +706,7 @@ impl SessionsEngine {
                     ledger.len() != before
                 };
                 if !reclaimed {
-                    self.inner.note_message(chat_id, &request.prompt);
+                    self.inner.note_message(chat_id, &shown);
                     return Ok(run_id);
                 }
                 // Keep the already-written doc entry's id for the fresh run
@@ -720,7 +739,7 @@ impl SessionsEngine {
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         if !idle {
-            handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+            handle.write_user_message(&user_id, &shown, now_ms())?;
         }
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
@@ -820,7 +839,7 @@ impl SessionsEngine {
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
         if !idle {
-            self.inner.note_message(chat_id, &request.prompt);
+            self.inner.note_message(chat_id, &shown);
         }
 
         // Name the chat NOW, off the first prompt — not after the first
@@ -829,7 +848,7 @@ impl SessionsEngine {
         // the Done-time call below stays as the retry for a failed
         // generation).
         if !idle && let Some(titles) = self.inner.titles.get() {
-            titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
+            titles.maybe_generate(chat_id, harness_id, &shown, &request.cwd);
         }
 
         tokio::spawn(drive_run(
@@ -3360,9 +3379,9 @@ async fn drive_run(
             // Leaving only the user prompt makes the turn look like it is
             // waiting on the model. A parked teardown (the idle reaper) is
             // not a user Stop: `turn_was_active` is false there.
-            let visible_reply = folded.iter().any(|part| {
-                matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty())
-            });
+            let visible_reply = folded.iter().any(
+                |part| matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty()),
+            );
             if *status == DoneStatus::Interrupted
                 && interrupted
                 && turn_was_active
@@ -3400,8 +3419,7 @@ async fn drive_run(
                 // budget: only consecutive crash-revive-crash cycles spend it.
                 inner.journal.clear_resume_attempts(&chat_id);
             }
-            if turn_was_active
-                && matches!(status, DoneStatus::Completed | DoneStatus::Interrupted)
+            if turn_was_active && matches!(status, DoneStatus::Completed | DoneStatus::Interrupted)
             {
                 crate::arbos_layout::commit_after_turn(std::path::Path::new(&run_cwd));
             }
@@ -4025,11 +4043,9 @@ mod tests {
             .doc()
             .read_entries()
             .unwrap();
-        assert!(
-            !entries
-                .iter()
-                .any(|entry| entry.role == zeron_doc::MessageRole::User)
-        );
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.role == zeron_doc::MessageRole::User));
         if !fail {
             assert!(entries.is_empty());
             assert_eq!(
@@ -4129,10 +4145,9 @@ mod tests {
         let id = subagent_doc_id("chat-abc123", "toolu_01EjFLnNhCiMR2PBNKcVvkT");
         assert_eq!(id, "chat-abc123--sub--toolu_01EjFLnNhCiMR2PBNKcVvkT");
         assert!(id.len() <= 128);
-        assert!(
-            id.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        );
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
     }
 
     #[test]

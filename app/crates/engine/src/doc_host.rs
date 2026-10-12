@@ -29,21 +29,21 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use zeron_doc::{
-    COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
-    MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
-    evaluate_command, join_continuation_entries,
+    evaluate_command, join_continuation_entries, CommandBasedOn, CommandDisposition, DocError,
+    EvaluationContext, MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage,
+    SessionCommandEntry, SessionCommandPayload, SessionCommandStatus, SessionDoc,
+    SessionMessageEntry, SubagentStatus, COMMAND_DEFAULT_TTL_MS,
 };
 use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
 
 use crate::http_error::describe_http_error;
 use crate::project_actions::{
-    ProjectActionSetupHandoff, ProjectActionsStore, launch_project_setup_action,
+    launch_project_setup_action, ProjectActionSetupHandoff, ProjectActionsStore,
 };
 use crate::sessions::{SessionsEngine, SteerOutcome};
 use crate::workspace_host::WorkspaceHost;
-use crate::{EngineError, Terminals, new_id, now_ms};
+use crate::{new_id, now_ms, EngineError, Terminals};
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
@@ -5667,6 +5667,22 @@ impl DocHost {
         // transcript when it is actually delivered. Never interrupt to hurry
         // steering.
         let prompt = self.resolve_prompt_attachments(prompt);
+        let command = self
+            .project_cwd(sessions, chat_id)
+            .as_deref()
+            .map(|cwd| crate::arbos_layout::prepare_composer_command(Path::new(cwd), &prompt))
+            .unwrap_or(crate::arbos_layout::ComposerCommand::Passthrough);
+        let spoken = match &command {
+            crate::arbos_layout::ComposerCommand::Model(text) => text.clone(),
+            crate::arbos_layout::ComposerCommand::Local
+            | crate::arbos_layout::ComposerCommand::Passthrough => prompt.clone(),
+        };
+        if matches!(command, crate::arbos_layout::ComposerCommand::Local) {
+            if let Some(message_id) = message_id.as_deref() {
+                let _ = handle.write_user_message(message_id, &prompt, issued_at.min(now_ms()));
+            }
+            return Ok((SessionCommandStatus::Applied, None));
+        }
         // A live turn without a mailbox can't take it either: the fresh
         // dispatch below would interrupt it.
         let unsteerable_turn =
@@ -5692,7 +5708,7 @@ impl DocHost {
             tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
         }
         match sessions
-            .steer_at(chat_id, &prompt, message_id.clone(), issued_at)
+            .steer_at(chat_id, &spoken, message_id.clone(), issued_at)
             .await?
         {
             SteerOutcome::Accepted => {
@@ -5712,10 +5728,10 @@ impl DocHost {
                         Some("no live run and no prior run config".into()),
                     ));
                 };
-                request.prompt = prompt;
+                request.prompt = spoken.clone();
                 request.resume = None; // dispatch re-derives the harness session
-                // A reused config must not re-inline the PREVIOUS turn's
-                // images; this prompt's own refs (if any) ride its text.
+                                       // A reused config must not re-inline the PREVIOUS turn's
+                                       // images; this prompt's own refs (if any) ride its text.
                 request.attachments = Vec::new();
                 let harness = self.harness_for_request(chat_id, &request);
                 self.dispatch_with_source_context(sessions, chat_id, harness, request, message_id)
@@ -5738,6 +5754,21 @@ impl DocHost {
                 ))
             }
         }
+    }
+
+    /// Folder for `/goal` and `/skill`. A live run knows it. Otherwise the chat row does.
+    fn project_cwd(&self, sessions: &SessionsEngine, chat_id: &str) -> Option<String> {
+        if let Some(cwd) = sessions
+            .last_request(chat_id)
+            .map(|request| request.cwd)
+            .filter(|cwd| !cwd.is_empty())
+        {
+            return Some(cwd);
+        }
+        self.workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .and_then(|chat| chat.cwd)
+            .filter(|cwd| !cwd.is_empty())
     }
 
     async fn capture_source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {
@@ -6243,7 +6274,7 @@ mod source_context_tests {
 
 #[cfg(test)]
 mod degrade_grace_tests {
-    use super::{DEGRADE_GRACE, DegradeGrace, GraceKey};
+    use super::{DegradeGrace, GraceKey, DEGRADE_GRACE};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -6285,9 +6316,9 @@ mod degrade_grace_tests {
 
     #[tokio::test]
     async fn dormant_chat_clears_old_degradation_before_reconnection() {
-        use super::{DocHost, DocHostConfig, EdgeConfig, lock};
-        use std::sync::Arc;
+        use super::{lock, DocHost, DocHostConfig, EdgeConfig};
         use std::sync::atomic::Ordering;
+        use std::sync::Arc;
         use zeron_proto::{ChatSyncState, HarnessId};
 
         let dir = tempfile::tempdir().unwrap();
@@ -6308,11 +6339,9 @@ mod degrade_grace_tests {
         assert_eq!(dormant.chats[0].sync_state, ChatSyncState::Local);
         assert!(dormant.chats[0].connected);
         assert!(!dormant.chats[0].delivery_live);
-        assert!(
-            !lock(&host.inner.connectivity_grace)
-                .chats
-                .contains_key("dormant")
-        );
+        assert!(!lock(&host.inner.connectivity_grace)
+            .chats
+            .contains_key("dormant"));
 
         // Focus requests a connection. Its first down sample gets a new grace
         // period even though the doc was dormant longer than DEGRADE_GRACE.
@@ -6352,7 +6381,7 @@ mod part_segment_tests {
 
 #[cfg(test)]
 mod queued_message_prompt_tests {
-    use super::{ATTACHMENT_ONLY_PROMPT, ATTACHMENT_PROMPT_HEADER, queued_message_prompt};
+    use super::{queued_message_prompt, ATTACHMENT_ONLY_PROMPT, ATTACHMENT_PROMPT_HEADER};
 
     #[test]
     fn dispatch_adds_the_attachment_transport_to_visible_queue_text() {
