@@ -74,6 +74,7 @@ mod command_palette;
 mod file_mutations;
 mod files_panel;
 mod harness_updates;
+mod listening_pill;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
@@ -11491,6 +11492,7 @@ impl Shell {
                     )
                     .children(self.render_voice_composer_orb(composer_width, cx))
                     .child(status)
+                    .child(self.render_listening_pill(cx))
                     .child(self.render_active_goal(cx))
                     .child(self.render_project_checklist(cx))
                     .child(self.render_worker_file(cx))

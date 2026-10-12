@@ -15,6 +15,7 @@ use crate::composer::ComposerInput;
 use crate::image_media::{decode_project_icon, MediaImage};
 use crate::theme::Theme;
 
+use super::listening_pill::{listening_rows, ListeningRow};
 use super::Shell;
 
 pub(super) const RAIL_WIDTH: f32 = 88.0;
@@ -52,6 +53,13 @@ pub(super) struct ProjectChrome {
     pub unread: bool,
     /// The live step while Main is working. Empty when Main is idle.
     pub step: String,
+    /// What Main waits on now: the rows of the Listening pill.
+    pub listening: Vec<ListeningRow>,
+    /// The pill was clicked open; it stays open until clicked again.
+    pub listening_open: bool,
+    /// The pointer is over the pill, so its rows show.
+    pub listening_hover: bool,
+    pub listening_task: Option<Task<()>>,
     /// The file opened from the list beside Main. This does not leave the chat.
     side_file: Option<String>,
     side_editor: Option<Entity<ComposerInput>>,
@@ -77,6 +85,10 @@ impl Default for ProjectChrome {
             skill: None,
             unread: false,
             step: String::new(),
+            listening: Vec::new(),
+            listening_open: false,
+            listening_hover: false,
+            listening_task: None,
             side_file: None,
             side_editor: None,
             watched: None,
@@ -87,9 +99,9 @@ impl Default for ProjectChrome {
     }
 }
 
-struct ProjectRow {
+pub(super) struct ProjectRow {
     id: String,
-    path: String,
+    pub(super) path: String,
     name: String,
     home: String,
 }
@@ -1035,6 +1047,11 @@ impl Shell {
         let live = zeron_engine::arbos_live::live(Path::new(&project));
         self.project.unread = live.unread;
         self.project.step = live.step;
+        self.project.listening_open = false;
+        self.project.listening_hover = false;
+        let subscriptions = zeron_engine::arbos_wakes::subscriptions(Path::new(&project));
+        let agents = zeron_engine::arbos_layout::agents(Path::new(&project));
+        self.project.listening = self.listening_rows_now(&subscriptions, &agents, cx);
         self.project.watch = Some(cx.spawn(async move |this, cx| {
             let root = PathBuf::from(&project).join(".arbos").join("context");
             let status_file = root.join("status.md");
@@ -1052,8 +1069,10 @@ impl Shell {
                 let live = zeron_engine::arbos_live::live(&project_path);
                 let row = zeron_engine::arbos_goal::goal_row(&project_path);
                 let elapsed = row.as_ref().map(|row| row.elapsed_seconds).unwrap_or(0);
+                let subscriptions = zeron_engine::arbos_wakes::subscriptions(&project_path);
+                let agents = zeron_engine::arbos_layout::agents(&project_path);
                 let snap = format!(
-                    "{status_text}\n---\n{goals_text}\n---\n{goal_text}\n---\n{}\n{}\n---\n{elapsed}",
+                    "{status_text}\n---\n{goals_text}\n---\n{goal_text}\n---\n{}\n{}\n---\n{elapsed}\n---\n{subscriptions:?}\n{agents:?}",
                     live.unread, live.step
                 );
                 if snap == seen {
@@ -1074,10 +1093,30 @@ impl Shell {
                     shell.project.skill = view.skill;
                     shell.project.unread = unread;
                     shell.project.step = step;
+                    shell.project.listening =
+                        shell.listening_rows_now(&subscriptions, &agents, cx);
                     cx.notify();
                 });
             }
         }));
+    }
+
+    /// The pill's rows, with each working worker's start read from its chat.
+    fn listening_rows_now(
+        &self,
+        subscriptions: &[zeron_engine::arbos_wakes::SubscriptionView],
+        agents: &[zeron_engine::arbos_layout::AgentView],
+        cx: &gpui::App,
+    ) -> Vec<ListeningRow> {
+        let state = self.state.read(cx);
+        let since = |chat_id: &str| {
+            state
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .map(|chat| chat.created_at)
+        };
+        listening_rows(subscriptions, agents, &since)
     }
 
     fn project_rows(&self, cx: &gpui::App) -> Vec<ProjectRow> {
@@ -1094,7 +1133,7 @@ impl Shell {
             .collect()
     }
 
-    fn selected_project(&self, cx: &gpui::App) -> Option<ProjectRow> {
+    pub(super) fn selected_project(&self, cx: &gpui::App) -> Option<ProjectRow> {
         let state = self.state.read(cx);
         let space = state
             .selected_space
@@ -1174,7 +1213,7 @@ impl Shell {
             .map(|tab| tab.id)
     }
 
-    fn selected_is_main(&self, cx: &gpui::App) -> bool {
+    pub(super) fn selected_is_main(&self, cx: &gpui::App) -> bool {
         let state = self.state.read(cx);
         let Some(selected) = state.selected_chat.as_deref() else {
             return false;
