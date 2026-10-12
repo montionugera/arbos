@@ -27,7 +27,8 @@ Do not name a file, a path, GOALS.md, or status.md in text the person reads. \
 Read `.arbos/context/GOALS.md` first. \
 Write what you learn to `.arbos/context/`. \
 Keep `status.md` current. \
-When you rewrite context/status.md, keep every checkbox line that is already there. \
+The checklist is only the active goal's steps. Do not add a step from an older goal. \
+When you tick one step, leave the other steps of this goal in place. \
 A `/goal` line already includes the workers to spawn. Send them at once. Do not wait for `/skill`. \
 An Active goal in GOALS.md stays active after a worker reports. Do not remove it.";
 
@@ -361,11 +362,7 @@ fn begin_goal(project: &Path, title: &str) -> Result<String, String> {
     }
     fs::write(&path, format!("{}\n", spec.write_line)).map_err(|e| e.to_string())?;
     write_goals(project, title, Some(&spec.name))?;
-    ensure_step(project, &skill_step(&spec.name), true)?;
-    for (_, _, line) in &spec.workers {
-        // A new goal opens these steps again so the checklist can advance.
-        set_step(project, line, false)?;
-    }
+    install_goal_steps(project, &spec)?;
     Ok(skill_prompt(&spec, Some(title)))
 }
 
@@ -377,10 +374,7 @@ fn run_skill(project: &Path, name: &str) -> Result<String, String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     fs::write(&path, format!("{}\n", spec.write_line)).map_err(|e| e.to_string())?;
-    ensure_step(project, &skill_step(&spec.name), true)?;
-    for (_, _, line) in &spec.workers {
-        ensure_step(project, line, false)?;
-    }
+    install_goal_steps(project, &spec)?;
     let title = goal_title_unlocked(project);
     if let Some(title) = title.as_deref() {
         write_goals(project, title, Some(&spec.name))?;
@@ -415,6 +409,9 @@ fn skill_prompt(spec: &SkillSpec, goal: Option<&str>) -> String {
     }
     prompt.push_str(
         "When each reports, tick that line in context/status.md. Do not tick a line before that worker reports.\n",
+    );
+    prompt.push_str(
+        "The checklist already lists only this goal. Do not add a step from an older goal.\n",
     );
     if !spec.body.is_empty() {
         prompt.push_str(&spec.body);
@@ -548,45 +545,68 @@ fn goal_title_unlocked(project: &Path) -> Option<String> {
     goal_view(project).title
 }
 
-fn ensure_step(project: &Path, text: &str, done: bool) -> Result<(), String> {
-    set_step_inner(project, text, done, false)
+/// The checklist a person sees is this goal only. Older goals stay in the
+/// notes. They do not keep a checkbox under the current goal.
+fn install_goal_steps(project: &Path, spec: &SkillSpec) -> Result<(), String> {
+    let mut steps = vec![(true, skill_step(&spec.name))];
+    let mut names = Vec::new();
+    for (name, _, line) in &spec.workers {
+        steps.push((false, line.clone()));
+        names.push(name.clone());
+    }
+    replace_goal_checklist(project, &steps)?;
+    reopen_workers(project, &names);
+    Ok(())
 }
 
-/// Set a checklist line, including opening one that was already done.
-fn set_step(project: &Path, text: &str, done: bool) -> Result<(), String> {
-    set_step_inner(project, text, done, true)
-}
-
-fn set_step_inner(project: &Path, text: &str, done: bool, force: bool) -> Result<(), String> {
+fn replace_goal_checklist(project: &Path, steps: &[(bool, String)]) -> Result<(), String> {
     let path = root_of(project).join("context").join("status.md");
-    let mut current = fs::read_to_string(&path).unwrap_or_else(|_| "# Status\n".to_owned());
-    let mark = if done { "- [x]" } else { "- [ ]" };
-    let mut lines: Vec<String> = current.lines().map(str::to_owned).collect();
-    let mut found = false;
-    for line in &mut lines {
+    let current = fs::read_to_string(&path).unwrap_or_default();
+    let mut rest = String::new();
+    for line in current.lines() {
         let trimmed = line.trim();
-        let rest = trimmed
-            .strip_prefix("- [ ]")
-            .or_else(|| trimmed.strip_prefix("- [x]"))
-            .or_else(|| trimmed.strip_prefix("- [X]"));
-        if rest.is_some_and(|rest| rest.trim() == text) {
-            if done || force {
-                *line = format!("{mark} {text}");
-            }
-            found = true;
+        if trimmed.is_empty() || trimmed == "# Status" {
+            continue;
         }
-    }
-    if !found {
-        if !current.ends_with('\n') && !current.is_empty() {
-            lines.push(String::new());
+        if is_checkbox(trimmed) {
+            continue;
         }
-        lines.push(format!("{mark} {text}"));
+        rest.push_str(trimmed);
+        rest.push('\n');
     }
-    current = lines.join("\n");
-    if !current.ends_with('\n') {
-        current.push('\n');
+    let mut body = String::from("# Status\n\n");
+    for (done, text) in steps {
+        let mark = if *done { "- [x]" } else { "- [ ]" };
+        body.push_str(&format!("{mark} {text}\n"));
     }
-    fs::write(path, current).map_err(|e| e.to_string())
+    if !rest.trim().is_empty() {
+        body.push('\n');
+        body.push_str(rest.trim_end());
+        body.push('\n');
+    }
+    fs::write(path, body).map_err(|e| e.to_string())
+}
+
+fn is_checkbox(trimmed: &str) -> bool {
+    trimmed.starts_with("- [ ]") || trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]")
+}
+
+/// A new goal has not finished these workers yet. A previous "done" must
+/// not check the new steps.
+fn reopen_workers(project: &Path, names: &[String]) {
+    let root = root_of(project);
+    for name in names {
+        let path = root.join("agents").join(slug(name)).join("agent.toml");
+        let Some(mut agent) = read_agent(&path) else {
+            continue;
+        };
+        if agent.role != "worker" {
+            continue;
+        }
+        agent.status = "idle".into();
+        agent.result.clear();
+        let _ = write_toml(&path, &agent);
+    }
 }
 
 /// Mark this worker's checklist line done. A trailing period does not matter.
@@ -631,11 +651,41 @@ fn tick_worker_ready(project: &Path, worker_id: &str) {
     let _ = fs::write(path, out);
 }
 
-/// Checkbox rows from `context/status.md`, in file order.
-/// A worker that already finished keeps its line checked.
+/// Checkbox rows the person sees. An active goal shows only its own steps.
+/// A worker step is checked when that worker has finished this goal.
 pub fn status_items(project: &Path) -> Vec<(bool, String)> {
     let _guard = layout_lock();
     reconcile_done_workers(project);
+    if let Some(items) = active_goal_steps(project) {
+        return items;
+    }
+    file_checkboxes(project)
+}
+
+fn active_goal_steps(project: &Path) -> Option<Vec<(bool, String)>> {
+    let skill = goal_view(project).skill?;
+    if skill.is_empty() {
+        return None;
+    }
+    let spec = load_skill(project, &skill).ok()?;
+    let finished = finished_worker_ids(project);
+    let mut items = vec![(true, skill_step(&spec.name))];
+    for (name, _, line) in spec.workers {
+        let done = finished.iter().any(|id| id == &slug(&name));
+        items.push((done, line));
+    }
+    Some(items)
+}
+
+fn finished_worker_ids(project: &Path) -> Vec<String> {
+    list_agents(&root_of(project))
+        .into_iter()
+        .filter(|agent| agent.role == "worker" && agent.status == "done")
+        .map(|agent| agent.id)
+        .collect()
+}
+
+fn file_checkboxes(project: &Path) -> Vec<(bool, String)> {
     let Ok(text) = fs::read_to_string(root_of(project).join("context").join("status.md")) else {
         return Vec::new();
     };
