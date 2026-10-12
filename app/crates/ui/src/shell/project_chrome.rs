@@ -1075,7 +1075,7 @@ impl Shell {
                             .size(px(9.0))
                             .rounded_full()
                             .border_1()
-                            .border_color(theme.background)
+                            .border_color(theme.bg)
                             .bg(theme.warning),
                     )
                 }),
