@@ -866,6 +866,38 @@ impl ChatDocHandle {
         self.write_role_message(message_id, MessageRole::System, text, created_at)
     }
 
+    /// The conversation Main can summarize: user lines, the plan sentence,
+    /// and Worked lines. Tool traces stay out of the summary.
+    pub fn conversation_lines(&self) -> Result<Vec<String>, DocError> {
+        let entries = self.doc.read_entries()?;
+        let mut lines = Vec::new();
+        for entry in entries {
+            let text = entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            match entry.role {
+                MessageRole::User => lines.push(text.to_owned()),
+                MessageRole::System
+                    if text.starts_with("Worked ·") || text.contains("on this goal") =>
+                {
+                    lines.push(text.to_owned());
+                }
+                MessageRole::System | MessageRole::Assistant => {}
+            }
+        }
+        Ok(lines)
+    }
+
     fn write_role_message(
         &self,
         message_id: &str,

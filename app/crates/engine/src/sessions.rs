@@ -607,25 +607,42 @@ impl SessionsEngine {
             }
             crate::arbos_layout::ComposerCommand::Passthrough => {}
         }
-        // A long Main session is replaced by the goal and the checklist on
-        // disk. The old fx thread is not resumed. The files stay as they are.
-        if let Some(packed) = crate::arbos_layout::compact_main(
-            std::path::Path::new(&request.cwd),
-            chat_id,
-            &shown,
-        ) {
-            self.inner.drop_harness_resume(chat_id, &request.cwd);
-            if lock(&self.inner.runs).contains_key(chat_id) {
-                self.terminate(chat_id).await?;
-            }
-            request.prompt = packed.prompt;
-            if let Ok(handle) = self.doc_handle(chat_id) {
+        if crate::arbos_layout::is_summarize_command(&shown) {
+            let handle = self.doc_handle(chat_id)?;
+            let user_id = message_id.unwrap_or_else(new_id);
+            handle.write_user_message(&user_id, &shown, now_ms())?;
+            self.inner.note_message(chat_id, &shown);
+            if self.is_working(chat_id) {
                 let _ = handle.write_system_message(
-                    &format!("compact-{}", new_id()),
-                    &packed.notice,
+                    &format!("summarize-wait-{}", new_id()),
+                    "Main is still working. Wait, then summarize.",
                     now_ms(),
                 );
+                return Ok(String::new());
             }
+            let lines = handle.conversation_lines().unwrap_or_default();
+            match crate::arbos_layout::write_conversation_summary(
+                std::path::Path::new(&request.cwd),
+                chat_id,
+                &lines,
+            ) {
+                Ok(notice) => {
+                    self.inner.drop_harness_resume(chat_id, &request.cwd);
+                    let _ = handle.write_system_message(
+                        &format!("summarize-{}", new_id()),
+                        &notice,
+                        now_ms(),
+                    );
+                }
+                Err(_) => {
+                    let _ = handle.write_system_message(
+                        &format!("summarize-failed-{}", new_id()),
+                        "Summarize failed. The thread is unchanged.",
+                        now_ms(),
+                    );
+                }
+            }
+            return Ok(String::new());
         }
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
@@ -791,6 +808,18 @@ impl SessionsEngine {
         if request.resume.is_none() {
             request.resume = self.inner.resume_for(chat_id, &request.cwd);
             resume_injected = request.resume.is_some();
+        }
+        // A fresh session after /summarize gets the summary, the last user
+        // message, and the goal and status paths. A failed summarize never
+        // reaches this, because the old session is still resumed.
+        if request.resume.is_none()
+            && let Some(prompt) = crate::arbos_layout::prompt_after_summary(
+                std::path::Path::new(&request.cwd),
+                chat_id,
+                &request.prompt,
+            )
+        {
+            request.prompt = prompt;
         }
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 

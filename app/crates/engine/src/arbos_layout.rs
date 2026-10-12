@@ -30,7 +30,8 @@ Keep `status.md` current. \
 The checklist is only the active goal's steps. Do not add a step from an older goal. \
 When you tick one step, leave the other steps of this goal in place. \
 A `/goal` line already includes the workers to spawn. Send them at once. Do not wait for `/skill`. \
-An Active goal in GOALS.md stays active after a worker reports. Do not remove it.";
+An Active goal in GOALS.md stays active after a worker reports. Do not remove it. \
+Goals: `.arbos/context/GOALS.md`. Status: `.arbos/context/status.md`. Read them before acting.";
 
 pub const WORKER_PROMPT: &str = "\
 You are a worker. Do the brief. Do not spawn agents and do not edit project code. \
@@ -711,127 +712,95 @@ fn reconcile_done_workers(project: &Path) {
     }
 }
 
-/// Main compacts once its saved session passes this size. The next question
-/// then answers from the files on disk, not from the old thread.
-const MAIN_COMPACT_BYTES: u64 = 64 * 1024;
+const SUMMARY_NOTICE: &str = "Summarized conversation.";
+const SUMMARY_PATHS: &str = "Goals: `.arbos/context/GOALS.md`. Status: `.arbos/context/status.md`. Read them before acting.";
 
-/// What Main shows, and what the fresh session is told, after compaction.
-#[derive(Debug, Clone)]
-pub struct MainCompact {
-    pub notice: String,
-    pub prompt: String,
+/// `/summarize` and `/compact` on idle Main.
+pub fn is_summarize_command(shown: &str) -> bool {
+    let shown = shown.trim();
+    shown == "/summarize" || shown == "/compact"
 }
 
-/// Compact Main when its session has grown. `None` leaves the thread as it is.
-/// This does not change `GOALS.md` or `status.md`.
-pub fn compact_main(project: &Path, chat_id: &str, shown: &str) -> Option<MainCompact> {
-    let shown = shown.trim();
-    if shown.is_empty() || shown.starts_with("/goal") || shown.starts_with("/skill") {
-        return None;
-    }
+/// Write a summary of the conversation. The last user message is kept word
+/// for word. `GOALS.md` and `status.md` are not changed. On failure the
+/// caller must leave the fx session in place.
+pub fn write_conversation_summary(
+    project: &Path,
+    chat_id: &str,
+    lines: &[String],
+) -> Result<String, String> {
     let _guard = layout_lock();
     let root = root_of(project);
     if !root.join("project.toml").is_file() {
-        return None;
+        return Err("not a project".into());
     }
+    if main_chat_id(project) != chat_id {
+        return Err("not Main".into());
+    }
+    let mut last_user = String::new();
+    let mut earlier = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_summarize_command(trimmed) {
+            continue;
+        }
+        if trimmed.starts_with("Worked ·") || trimmed.contains("on this goal") {
+            earlier.push(trimmed.to_owned());
+            continue;
+        }
+        if !last_user.is_empty() {
+            earlier.push(last_user.clone());
+        }
+        last_user = trimmed.to_owned();
+    }
+    if last_user.is_empty() && earlier.is_empty() {
+        return Err("nothing to summarize".into());
+    }
+    let mut body = String::from("Summarized conversation.\n\n");
+    if earlier.is_empty() {
+        body.push_str("No earlier conversation.\n");
+    } else {
+        for line in &earlier {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    body.push_str("\nLast message, word for word:\n");
+    body.push_str(&last_user);
+    body.push_str("\n\n");
+    body.push_str(SUMMARY_PATHS);
+    body.push('\n');
+    let dir = root.join("runtime");
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let path = dir.join("main-summary.md");
+    let tmp = dir.join("main-summary.md.tmp");
+    fs::write(&tmp, &body).map_err(|err| err.to_string())?;
+    if let Err(err) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.to_string());
+    }
+    Ok(SUMMARY_NOTICE.to_owned())
+}
+
+/// The prompt for the first turn after a summary. `None` when Main has not
+/// been summarized. The two paths are re-injected after the summary.
+pub fn prompt_after_summary(project: &Path, chat_id: &str, prompt: &str) -> Option<String> {
     if main_chat_id(project) != chat_id {
         return None;
     }
-    let sessions = root
-        .join("agents")
-        .join("main")
-        .join("fx")
-        .join(".fx")
-        .join("sessions");
-    if session_log_bytes(&sessions) < MAIN_COMPACT_BYTES {
+    let path = root_of(project).join("runtime").join("main-summary.md");
+    let summary = fs::read_to_string(path).ok()?;
+    let summary = summary.trim();
+    if summary.is_empty() {
         return None;
     }
-    let packed = disk_readout(project, shown);
-    archive_sessions(&sessions).ok()?;
-    Some(packed)
-}
-
-fn session_log_bytes(sessions: &Path) -> u64 {
-    let mut total = 0u64;
-    let Ok(entries) = fs::read_dir(sessions) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let log = entry.path().join("events.jsonl");
-        if let Ok(meta) = fs::metadata(&log) {
-            total = total.saturating_add(meta.len());
-        }
-    }
-    total
-}
-
-fn archive_sessions(sessions: &Path) -> Result<(), String> {
-    if !sessions.is_dir() {
-        return Ok(());
-    }
-    let parent = sessions
-        .parent()
-        .ok_or_else(|| "the session folder has no parent".to_owned())?;
-    for n in 1..100 {
-        let dest = parent.join(format!("sessions-archived-{n}"));
-        if dest.exists() {
-            continue;
-        }
-        fs::rename(sessions, dest).map_err(|err| err.to_string())?;
-        return Ok(());
-    }
-    Err("the old session could not be archived".into())
-}
-
-/// The goal and the checklist, read now. The model is told to use only this.
-fn disk_readout(project: &Path, asked: &str) -> MainCompact {
-    let view = goal_view(project);
-    let goal = view
-        .title
-        .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| "none".to_owned());
-    let skill = view
-        .skill
-        .filter(|skill| !skill.trim().is_empty())
-        .unwrap_or_else(|| "none".to_owned());
-    let steps = file_checkboxes(project);
-    let done: Vec<&str> = steps
-        .iter()
-        .filter(|(checked, _)| *checked)
-        .map(|(_, line)| line.as_str())
-        .collect();
-    let left: Vec<&str> = steps
-        .iter()
-        .filter(|(checked, _)| !*checked)
-        .map(|(_, line)| line.as_str())
-        .collect();
-    let done = if done.is_empty() {
-        "nothing".to_owned()
-    } else {
-        done.join(". ")
-    };
-    let left = if left.is_empty() {
-        "nothing".to_owned()
-    } else {
-        left.join(". ")
-    };
-    let prompt = format!(
-        "The earlier thread was compacted. It is gone.\n\
-         Use only these lines. They were read from disk just now.\n\
-         Active goal: {goal}\n\
-         Skill: {skill}\n\
-         Done: {done}\n\
-         Left: {left}\n\
-         The person asks: {asked}\n\
+    Some(format!(
+        "{summary}\n\nThe person says: {prompt}\n\
+         Read the Goals path and the Status path before you answer.\n\
          Reply with one sentence under 70 characters. Name the goal and what is left.\n\
-         If nothing is left, say nothing is left.\n\
-         Do not call a tool. Do not change anything on disk.\n\
-         Do not use these words: checklist, file, path, status, tick, or report.\n"
-    );
-    MainCompact {
-        notice: "The earlier thread was compacted.".to_owned(),
-        prompt,
-    }
+         If every step is checked, say nothing is left.\n\
+         Do not write anything. Do not use the words checklist, tick, or report.\n"
+    ))
 }
 
 /// Bind this chat to an agent directory and return the fx home plus the
