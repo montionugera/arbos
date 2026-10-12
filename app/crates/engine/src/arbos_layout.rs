@@ -737,9 +737,13 @@ pub fn write_conversation_summary(
     if main_chat_id(project) != chat_id {
         return Err("not Main".into());
     }
+    let start = lines
+        .iter()
+        .rposition(|line| line.trim().starts_with("/goal "))
+        .unwrap_or(0);
     let mut last_user = String::new();
     let mut earlier = Vec::new();
-    for line in lines {
+    for line in &lines[start..] {
         let trimmed = line.trim();
         if trimmed.is_empty() || is_summarize_command(trimmed) {
             continue;
@@ -794,13 +798,28 @@ pub fn prompt_after_summary(project: &Path, chat_id: &str, prompt: &str) -> Opti
     if summary.is_empty() {
         return None;
     }
+    let title = goal_view(project)
+        .title
+        .unwrap_or_else(|| "the goal".to_owned());
+    let title = title.trim().trim_end_matches('.').trim();
+    let open = file_checkboxes(project)
+        .iter()
+        .filter(|(done, _)| !done)
+        .count();
+    let sentence = if open == 0 {
+        format!("The goal is {title}, and nothing is left.")
+    } else {
+        format!("The goal is {title}, and {open} steps are left.")
+    };
     Some(format!(
         "{summary}\n\nThe person says: {prompt}\n\
          Read the Goals path and the Status path before you answer.\n\
+         A step is only a line that starts with \"- [ ]\" or \"- [x]\".\n\
+         Unchecked steps on disk: {open}.\n\
+         Ignore every other section of the Status file.\n\
          Do not spawn a worker. Do not write. The goal stays as it is.\n\
-         Reply with one sentence under 70 characters. Name the goal and what is left.\n\
-         If every step is checked, say nothing is left.\n\
-         Do not use the words checklist, tick, or report.\n"
+         Reply with this sentence and no other words: {sentence}\n\
+         Do not mention workers. Do not use the words checklist, tick, report, file, path, or status.\n"
     ))
 }
 
