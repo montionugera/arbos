@@ -5005,6 +5005,13 @@ impl Transcript {
                     new_rows.extend(self.rows_for(echo, true));
                 }
             }
+            // The tool fold ("Thought process", "Worked for") is the worker's
+            // detail. Main keeps the plan sentence and the short Worked lines.
+            if main_chat {
+                new_rows.retain(|row| {
+                    row.compact_fold.is_none() && !matches!(row.kind, RowKind::ToolGroup { .. })
+                });
+            }
             (
                 entries.is_empty(),
                 entries
