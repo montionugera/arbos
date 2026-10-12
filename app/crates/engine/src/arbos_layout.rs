@@ -20,8 +20,7 @@ Repeat that pair for every worker. Spawn returns at once. machine is \"local\" o
 Start every independent worker before you wait for any of them. \
 When a worker finishes you see a Worked line. \
 A Worked line can also be a subscription wake, with no message from the person. Answer that wake in one sentence. \
-Tick the matching line in context/status.md with mcp_arbos_context_write. \
-Do not tick a line before that worker reports. \
+The status page is rewritten when a worker reports. Do not write status.md yourself. \
 The person already has one plan sentence. Do not write another paragraph after a worker reports. \
 Do not name a file, a path, GOALS.md, or status.md in text the person reads. \
 Read `.arbos/context/GOALS.md` first. \
@@ -245,6 +244,10 @@ pub fn set_icon(project: &Path, icon: &str) -> Result<(), String> {
 /// that directory.
 pub fn write_context(project: &Path, relative: &str, text: &str) -> Result<(), String> {
     let _guard = layout_lock();
+    let relative = relative.trim();
+    if relative == "status.md" || relative == "archived.md" {
+        return Err("Main writes the status page".into());
+    }
     let path = context_file(project, relative)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -409,7 +412,7 @@ fn skill_prompt(spec: &SkillSpec, goal: Option<&str>) -> String {
         ));
     }
     prompt.push_str(
-        "When each reports, tick that line in context/status.md. Do not tick a line before that worker reports.\n",
+        "When each reports, the status page updates on its own. Do not write status.md.\n",
     );
     prompt.push_str(
         "The checklist already lists only this goal. Do not add a step from an older goal.\n",
@@ -701,6 +704,247 @@ fn file_checkboxes(project: &Path) -> Vec<(bool, String)> {
             Some((rest.0, rest.1.trim().to_string()))
         })
         .collect()
+}
+
+#[derive(Clone)]
+struct PageItem {
+    done: bool,
+    label: String,
+    target: String,
+    readout: String,
+    rank: u64,
+}
+
+fn file_rank(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn context_first_line(project: &Path, relative: &str) -> Option<String> {
+    let path = context_file(project, relative).ok()?;
+    let text = fs::read_to_string(path).ok()?;
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    if line.chars().count() > 72 {
+        return None;
+    }
+    Some(line.to_owned())
+}
+
+fn title_case_name(name: &str) -> String {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_uppercase().collect::<String>() + chars.as_str()
+}
+
+fn page_line(item: &PageItem) -> String {
+    let mark = if item.done { "x" } else { " " };
+    if item.target.is_empty() {
+        format!("- [{mark}] {} — {}", item.label, item.readout)
+    } else {
+        format!(
+            "- [{mark}] [{}]({}) — {}",
+            item.label, item.target, item.readout
+        )
+    }
+}
+
+fn tldr_line(item: &PageItem) -> String {
+    if item.target.is_empty() {
+        format!("- {} — {}", item.label, item.readout)
+    } else {
+        format!("- [{}]({}) — {}", item.label, item.target, item.readout)
+    }
+}
+
+/// Keep every open item. Keep the three newest done items. The rest move.
+fn cap_done(items: Vec<PageItem>) -> (Vec<PageItem>, Vec<PageItem>) {
+    let mut open = Vec::new();
+    let mut done = Vec::new();
+    for item in items {
+        if item.done {
+            done.push(item);
+        } else {
+            open.push(item);
+        }
+    }
+    done.sort_by(|left, right| right.rank.cmp(&left.rank));
+    let overflow = if done.len() > 3 {
+        done.split_off(3)
+    } else {
+        Vec::new()
+    };
+    done.sort_by(|left, right| left.rank.cmp(&right.rank));
+    open.append(&mut done);
+    (open, overflow)
+}
+
+fn atomic_context_write(path: &Path, body: &str) -> Result<(), String> {
+    let tmp = path.with_extension("md.tmp");
+    fs::write(&tmp, body).map_err(|err| err.to_string())?;
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.to_string());
+    }
+    Ok(())
+}
+
+fn append_archived(project: &Path, section: &str, lines: &[String]) -> Result<(), String> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let path = root_of(project).join("context").join("archived.md");
+    let mut body = fs::read_to_string(&path).unwrap_or_else(|_| "# Archived\n".to_owned());
+    if !body.contains("# Archived") {
+        body = format!("# Archived\n\n{body}");
+    }
+    let fresh: Vec<&String> = lines.iter().filter(|line| !body.contains(line.as_str())).collect();
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&format!("\n## {section}\n\n"));
+    for line in fresh {
+        body.push_str(line);
+        body.push('\n');
+    }
+    atomic_context_write(&path, &body)
+}
+
+/// Rewrite `status.md` from the goal and the workers. Main is the only writer.
+pub fn publish_status_page(project: &Path) -> Result<(), String> {
+    let _guard = layout_lock();
+    publish_status_page_unlocked(project)
+}
+
+fn publish_status_page_unlocked(project: &Path) -> Result<(), String> {
+    let root = root_of(project);
+    if !root.join("project.toml").is_file() {
+        return Err("not a project".into());
+    }
+    let view = goal_view(project);
+    let heading = view
+        .title
+        .as_deref()
+        .map(|title| title.trim().trim_end_matches('.').trim().to_owned())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| "This project".to_owned());
+    let mut now = Vec::new();
+    let mut skill_ids = Vec::new();
+    if let Some(skill) = view.skill.as_deref() {
+        if let Ok(spec) = load_skill(project, skill) {
+            let target = spec.write_path.clone();
+            let rank = context_file(project, &target)
+                .map(|path| file_rank(&path))
+                .unwrap_or(0);
+            let readout = context_first_line(project, &target).unwrap_or(spec.write_line);
+            now.push(PageItem {
+                done: true,
+                label: title_case_name(&spec.name),
+                target,
+                readout,
+                rank,
+            });
+            let finished = finished_worker_ids(project);
+            for (name, file, line) in spec.workers {
+                let id = slug(&name);
+                skill_ids.push(id.clone());
+                let done = finished.iter().any(|finished_id| finished_id == &id);
+                let rank = context_file(project, &file)
+                    .map(|path| file_rank(&path))
+                    .unwrap_or(0);
+                let readout = context_first_line(project, &file).unwrap_or(line);
+                now.push(PageItem {
+                    done,
+                    label: title_case_name(&name),
+                    target: file,
+                    readout,
+                    rank,
+                });
+            }
+        }
+    }
+    let (now, _now_overflow) = cap_done(now);
+    let mut earlier = Vec::new();
+    for agent in list_agents(&root) {
+        if agent.role != "worker"
+            || agent.status != "done"
+            || skill_ids.iter().any(|id| id == &agent.id)
+        {
+            continue;
+        }
+        let target = format!("research/{}.md", agent.id);
+        let rank = file_rank(&root.join("agents").join(&agent.id).join("agent.toml"));
+        let readout = context_first_line(project, &target).unwrap_or_else(|| {
+            let line = agent.result.lines().map(str::trim).find(|line| !line.is_empty());
+            match line {
+                Some(line) if !line.contains('/') && line.chars().count() <= 72 => {
+                    let mut text = line.trim_end_matches('.').to_owned();
+                    text.push('.');
+                    text
+                }
+                _ => "Done.".to_owned(),
+            }
+        });
+        earlier.push(PageItem {
+            done: true,
+            label: title_case_name(&agent.id),
+            target: if context_first_line(project, &target).is_some() {
+                target
+            } else {
+                String::new()
+            },
+            readout,
+            rank,
+        });
+    }
+    let (earlier, earlier_overflow) = cap_done(earlier);
+    let overflow_lines: Vec<String> = earlier_overflow.iter().map(page_line).collect();
+    append_archived(project, "Earlier", &overflow_lines)?;
+    let mut kept = Vec::new();
+    kept.extend(now.iter().cloned());
+    kept.extend(earlier.iter().cloned());
+    let mut body = String::from("[Goals](GOALS.md)\n\n");
+    if kept.len() >= 6 {
+        let mut recent = kept.clone();
+        recent.sort_by(|left, right| right.rank.cmp(&left.rank));
+        recent.truncate(4);
+        body.push_str("<tldr>\n");
+        for item in &recent {
+            body.push_str(&tldr_line(item));
+            body.push('\n');
+        }
+        body.push_str("</tldr>\n\n");
+    }
+    if !now.is_empty() {
+        body.push_str(&format!("## {heading}\n\n"));
+        for item in &now {
+            body.push_str(&page_line(item));
+            body.push('\n');
+        }
+        body.push('\n');
+    }
+    if !earlier.is_empty() {
+        body.push_str("## Earlier\n\n");
+        for item in &earlier {
+            body.push_str(&page_line(item));
+            body.push('\n');
+        }
+        body.push('\n');
+    }
+    let path = root.join("context").join("status.md");
+    let current = fs::read_to_string(&path).unwrap_or_default();
+    if current == body {
+        return Ok(());
+    }
+    atomic_context_write(&path, &body)
 }
 
 fn reconcile_done_workers(project: &Path) {
@@ -1006,6 +1250,7 @@ pub fn finish_worker(
     write_toml(&path, &agent).ok()?;
     if status == "done" {
         tick_worker_ready(project, &agent.id);
+        let _ = publish_status_page_unlocked(project);
     }
     Some(WorkerDone {
         id: agent.id,

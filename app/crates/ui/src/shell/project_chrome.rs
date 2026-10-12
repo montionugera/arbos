@@ -645,6 +645,19 @@ impl Shell {
         }
         let editor = self.project.editor.clone();
         let save = current.clone();
+        let status_page = current.as_deref() == Some("status.md");
+        let page_text = if status_page {
+            self.selected_project(cx).and_then(|project| {
+                zeron_engine::arbos_layout::read_context(Path::new(&project.path), "status.md").ok()
+            })
+        } else {
+            None
+        };
+        let title = if status_page {
+            "Status".to_owned()
+        } else {
+            current.clone().unwrap_or_else(|| "Context".into())
+        };
         div()
             .size_full()
             .flex()
@@ -665,14 +678,20 @@ impl Shell {
                             .flex_none()
                             .text_size(px(12.0))
                             .text_color(theme.text_muted)
-                            .child(current.unwrap_or_else(|| "Context".into())),
+                            .child(title),
                     )
-                    .children(
-                        editor.map(|editor| {
+                    .when(status_page, |column| {
+                        column.child(render_status_page(
+                            page_text.as_deref().unwrap_or(""),
+                            &theme,
+                        ))
+                    })
+                    .when(!status_page, |column| {
+                        column.children(editor.map(|editor| {
                             div().flex_1().min_h_0().child(editor).into_any_element()
-                        }),
-                    )
-                    .when(save.is_some(), |column| {
+                        }))
+                    })
+                    .when(!status_page && save.is_some(), |column| {
                         column.child(
                             div()
                                 .id("context-save")
@@ -761,12 +780,7 @@ impl Shell {
 
     pub(super) fn show_project_context(&mut self, cx: &mut Context<Self>) {
         self.project.icon_for = None;
-        if self.project.context_relative.is_none() {
-            self.open_context_file("GOALS.md".into(), cx);
-        } else {
-            self.project.surface = Surface::Context;
-            cx.notify();
-        }
+        self.open_context_file("status.md".into(), cx);
     }
 
     pub(super) fn open_icon_menu(&mut self, space_id: String, cx: &mut Context<Self>) {
@@ -798,14 +812,23 @@ impl Shell {
     }
 
     fn open_context_file(&mut self, relative: String, cx: &mut Context<Self>) {
+        if relative == "status.md" {
+            if let Some(project) = self.selected_project(cx) {
+                let _ = zeron_engine::arbos_layout::publish_status_page(Path::new(&project.path));
+            }
+        }
         let text = self
             .selected_project(cx)
             .and_then(|project| {
                 zeron_engine::arbos_layout::read_context(Path::new(&project.path), &relative).ok()
             })
             .unwrap_or_default();
-        self.project.context_relative = Some(relative);
+        self.project.context_relative = Some(relative.clone());
         self.project.surface = Surface::Context;
+        if relative == "status.md" {
+            cx.notify();
+            return;
+        }
         if let Some(editor) = self.project.editor.clone() {
             editor.update(cx, |input, cx| input.set_text(text, cx));
         } else {
@@ -1212,6 +1235,166 @@ impl Shell {
             .on_click(cx.listener(|this, _, _, cx| this.show_project_context(cx)))
             .into_any_element()
     }
+}
+
+enum StatusBlock {
+    Link(String),
+    Tldr(Vec<String>),
+    Heading(String),
+    Item {
+        done: bool,
+        label: String,
+        readout: String,
+    },
+}
+
+fn parse_status_blocks(text: &str) -> Vec<StatusBlock> {
+    let mut blocks = Vec::new();
+    let mut tldr: Option<Vec<String>> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "<tldr>" {
+            tldr = Some(Vec::new());
+            continue;
+        }
+        if line == "</tldr>" {
+            if let Some(lines) = tldr.take() {
+                blocks.push(StatusBlock::Tldr(lines));
+            }
+            continue;
+        }
+        if let Some(lines) = tldr.as_mut() {
+            if let Some(text) = line.strip_prefix("- ") {
+                lines.push(readable_item(text));
+            }
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("## ") {
+            blocks.push(StatusBlock::Heading(heading.trim().to_owned()));
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("- [x] ") {
+            let (label, readout) = split_status_item(rest);
+            blocks.push(StatusBlock::Item {
+                done: true,
+                label,
+                readout,
+            });
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("- [ ] ") {
+            let (label, readout) = split_status_item(rest);
+            blocks.push(StatusBlock::Item {
+                done: false,
+                label,
+                readout,
+            });
+            continue;
+        }
+        if line.starts_with('[') {
+            if let Some(label) = line.split_once(']').map(|(label, _)| label.trim_start_matches('['))
+            {
+                blocks.push(StatusBlock::Link(label.to_owned()));
+            }
+        }
+    }
+    blocks
+}
+
+fn split_status_item(rest: &str) -> (String, String) {
+    let rest = rest.trim();
+    let (head, readout) = rest
+        .split_once(" — ")
+        .map(|(head, readout)| (head.trim(), readout.trim().to_owned()))
+        .unwrap_or((rest, String::new()));
+    let label = if let Some(body) = head.strip_prefix('[') {
+        body.split_once(']')
+            .map(|(label, _)| label.trim().to_owned())
+            .unwrap_or_else(|| head.to_owned())
+    } else {
+        head.to_owned()
+    };
+    (label, readout)
+}
+
+fn readable_item(text: &str) -> String {
+    let (label, readout) = split_status_item(text);
+    if readout.is_empty() {
+        label
+    } else {
+        format!("{label} — {readout}")
+    }
+}
+
+fn render_status_page(text: &str, theme: &Theme) -> AnyElement {
+    let mut page = div()
+        .id("status-page")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .pb(px(16.0));
+    for block in parse_status_blocks(text) {
+        page = match block {
+            StatusBlock::Link(label) => page.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(label),
+            ),
+            StatusBlock::Tldr(lines) => {
+                let mut card = div()
+                    .p(px(10.0))
+                    .rounded(px(8.0))
+                    .bg(theme.surface)
+                    .border_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0));
+                for line in lines {
+                    card = card.child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme.text)
+                            .child(line),
+                    );
+                }
+                page.child(card)
+            }
+            StatusBlock::Heading(text) => page.child(
+                div()
+                    .mt(px(8.0))
+                    .text_size(px(16.0))
+                    .text_color(theme.text)
+                    .child(text),
+            ),
+            StatusBlock::Item {
+                done,
+                label,
+                readout,
+            } => {
+                let mark = if done { "✓" } else { "○" };
+                let line = if readout.is_empty() {
+                    format!("{mark}  {label}")
+                } else {
+                    format!("{mark}  {label} — {readout}")
+                };
+                page.child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(theme.text)
+                        .child(line),
+                )
+            }
+        };
+    }
+    page.into_any_element()
 }
 
 trait SplitMain {
