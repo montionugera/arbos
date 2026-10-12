@@ -394,8 +394,17 @@ impl Shell {
         // and project actions, live in the session card.
         let on_canvas = self.state.read(cx).selected_chat_row().is_none();
         // The window title is the product name. While Main is working, the
-        // title is the live step (set by Main, or derived from the turn).
-        let step = self.project.step.clone();
+        // title is the live step (set by Main, or derived from the turn). On
+        // a worker's tab whose model is being retried, it is that worker's
+        // line instead.
+        let step = self
+            .state
+            .read(cx)
+            .selected_chat
+            .as_deref()
+            .and_then(|chat_id| self.project.worker_steps.get(chat_id))
+            .cloned()
+            .unwrap_or_else(|| self.project.step.clone());
         let title = if on_canvas {
             SharedString::from("")
         } else if step.is_empty() {

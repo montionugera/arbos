@@ -853,6 +853,10 @@ impl ChatDocHandle {
             let line = format!("Worked · {headline}");
             return self.write_system_message(message_id, &line, created_at);
         }
+        if text.starts_with(zeron_proto::ARBOS_CONTINUE_MARK) {
+            // The engine resumes a paused model response. Nobody typed it.
+            return self.write_system_message(message_id, "Trying the model again.", created_at);
+        }
         self.write_role_message(message_id, MessageRole::User, text, created_at)
     }
 

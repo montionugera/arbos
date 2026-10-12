@@ -21,6 +21,7 @@ pub mod arbos_goal;
 pub mod arbos_layout;
 pub mod arbos_live;
 pub mod arbos_phone;
+pub mod arbos_recovery;
 pub mod arbos_remote;
 pub mod arbos_wakes;
 pub mod auth;

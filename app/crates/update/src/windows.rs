@@ -501,13 +501,11 @@ mod tests {
                 artifact("1.2.3"),
                 super::super::FileMeta {
                     sha256: Some(format!("{:x}", Sha256::digest(b"expected"))),
-                    // Present but never parsed: the corrupt body fails the
-                    // digest check before the signature is looked at.
-                    signature: Some("AAAA".into()),
-                    ..Default::default()
+                    signature: Some(String::new()),
                 },
             )]
             .into(),
+            ..Default::default()
         };
         let error = stage(&base, &manifest, dir.path(), None)
             .await

@@ -11,6 +11,7 @@ const types = @import("../core/shared/types.zig");
 const atomic_value = @import("../core/mcp/atomic_value.zig");
 const json_comparison = @import("../core/shared/json_comparison.zig");
 const sse = @import("sse.zig");
+const stream_idle = @import("stream_idle.zig");
 
 pub fn isRetryableGatewayError(err: anyerror) bool {
     return err == error.HttpConnectionClosing or
@@ -567,7 +568,7 @@ fn fetchGatewayJsonAtUrlCore(
 
     var cancel_watch_done = std.atomic.Value(bool).init(false);
     const cancel_watcher = if (req.connection) |conn|
-        try spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, null, null, null, conn.stream_writer.stream)
+        try spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, null, null, null, null, conn.stream_writer.stream)
     else
         null;
     defer {
@@ -1615,7 +1616,7 @@ fn streamGatewayCompletionCoreWithOptions(
         var connected_watch = ConnectedRequestWatch.init(core_options.response_head_timing);
         const cancel_watcher = if (watch_connected_socket)
             if (req.connection) |conn|
-                spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, &system_resumed, null, &connected_watch, conn.stream_writer.stream) catch |err| {
+                spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, &system_resumed, null, null, &connected_watch, conn.stream_writer.stream) catch |err| {
                     debug_trace.eventf("gateway", "cancel_watcher_spawn_error", trace_ctx, "attempt={d} err={s}", .{ attempt + 1, @errorName(err) });
                     return @as(anyerror!StreamResult, err);
                 }
@@ -1790,7 +1791,7 @@ fn streamGatewayCompletionCoreWithOptions(
                 .raw = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake).raw.addDuration(.fromMilliseconds(pool_drain_budget_ms)),
             };
             const drain_thread = if (req.connection) |conn|
-                spawn_gateway_cancel_watcher(&drain_watch_done, cancel_flag, null, drain_deadline, null, conn.stream_writer.stream) catch null
+                spawn_gateway_cancel_watcher(&drain_watch_done, cancel_flag, null, drain_deadline, null, null, conn.stream_writer.stream) catch null
             else
                 null;
             const drain_ok = if (body_reader.discardRemaining()) |drained_bytes| blk: {
@@ -2110,6 +2111,7 @@ const GatewayCancelWatcher = struct {
         cancel_flag: *std.atomic.Value(bool),
         system_resumed: ?*std.atomic.Value(bool),
         deadline: ?std.Io.Clock.Timestamp,
+        idle: ?*stream_idle.Budget,
         connected_watch: ?*ConnectedRequestWatch,
         stream: std.Io.net.Stream,
     ) void {
@@ -2142,6 +2144,11 @@ const GatewayCancelWatcher = struct {
                     return;
                 }
             }
+            if (idle) |budget| if (budget.expired()) {
+                budget.trip();
+                stream.shutdown(io_mod.getIo(), .both) catch {};
+                return;
+            };
             if (connected_watch) |watch| {
                 const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
                 if (watch.response_head_expired(now) and watch.win_response_head_timeout()) {
@@ -2187,7 +2194,7 @@ pub fn spawnHttpCancelWatcher(
     cancel_flag: *std.atomic.Value(bool),
     stream: std.Io.net.Stream,
 ) !std.Thread {
-    return spawn_gateway_cancel_watcher(done, cancel_flag, null, null, null, stream);
+    return spawn_gateway_cancel_watcher(done, cancel_flag, null, null, null, null, stream);
 }
 
 pub fn spawnHttpCancelWatcherBounded(
@@ -2196,7 +2203,7 @@ pub fn spawnHttpCancelWatcherBounded(
     deadline: std.Io.Clock.Timestamp,
     stream: std.Io.net.Stream,
 ) !std.Thread {
-    return spawn_gateway_cancel_watcher(done, cancel_flag, null, deadline, null, stream);
+    return spawn_gateway_cancel_watcher(done, cancel_flag, null, deadline, null, null, stream);
 }
 
 /// One shared concrete opener result so every backend reuses the same
@@ -2259,6 +2266,14 @@ pub const CancelWatch = struct {
             try spawnHttpCancelWatcher(&self.done, cancel, connection);
     }
 
+    /// Like `start`, but also closes the connection when the streaming body
+    /// stays silent past `idle` (see `stream_idle.Budget`). Whichever of the
+    /// absolute deadline and the sliding idle budget fires first wins.
+    pub fn startWithIdleBudget(self: *CancelWatch, cancel: *std.atomic.Value(bool), deadline: ?std.Io.Clock.Timestamp, idle: ?*stream_idle.Budget, connection: std.Io.net.Stream) !void {
+        self.done.store(false, .seq_cst);
+        self.thread = try spawn_gateway_cancel_watcher(&self.done, cancel, null, deadline, idle, null, connection);
+    }
+
     pub fn stop(self: *CancelWatch) void {
         self.done.store(true, .seq_cst);
         if (self.thread) |thread| thread.join();
@@ -2271,6 +2286,7 @@ fn spawn_gateway_cancel_watcher(
     cancel_flag: *std.atomic.Value(bool),
     system_resumed: ?*std.atomic.Value(bool),
     deadline: ?std.Io.Clock.Timestamp,
+    idle: ?*stream_idle.Budget,
     connected_watch: ?*ConnectedRequestWatch,
     stream: std.Io.net.Stream,
 ) !std.Thread {
@@ -2282,6 +2298,7 @@ fn spawn_gateway_cancel_watcher(
         cancel_flag,
         system_resumed,
         deadline,
+        idle,
         connected_watch,
         stream,
     });
@@ -6722,6 +6739,8 @@ const LoopbackGatewayMode = enum {
     reset_after_head_read,
     slow_terminal_chunk,
     never_terminating_body,
+    chat_completions_body_stall,
+    chat_completions_steady_progress,
 };
 
 const LoopbackGatewayFixture = struct {
@@ -7113,6 +7132,40 @@ const LoopbackGatewayFixture = struct {
                     sleepBlocking(50);
                 }
             },
+            .chat_completions_body_stall => {
+                // One delta, then silence until teardown or `hold_ms`: the
+                // idle budget is the only thing that can end this read.
+                try readLoopbackGatewayRequest(zio, stream, self);
+                try writeLoopbackGatewayBytes(
+                    zio,
+                    stream,
+                    "HTTP/1.1 200 OK\r\n" ++
+                        "Content-Type: text/event-stream\r\n" ++
+                        "Connection: close\r\n\r\n" ++
+                        chat_completions_partial_event,
+                );
+                self.markStage();
+                self.hold();
+            },
+            .chat_completions_steady_progress => {
+                // Keep-alive comments every 10 ms, longer than any short idle
+                // budget in total, then a clean finish.
+                try readLoopbackGatewayRequest(zio, stream, self);
+                try writeLoopbackGatewayBytes(
+                    zio,
+                    stream,
+                    "HTTP/1.1 200 OK\r\n" ++
+                        "Content-Type: text/event-stream\r\n" ++
+                        "Connection: close\r\n\r\n",
+                );
+                self.markStage();
+                for (0..40) |_| {
+                    if (self.stopping.load(.seq_cst)) return;
+                    writeLoopbackGatewayBytes(zio, stream, ": ping\n\n") catch return;
+                    sleepBlocking(10);
+                }
+                try writeLoopbackGatewayBytes(zio, stream, chat_completions_finish_events);
+            },
         }
     }
 
@@ -7176,6 +7229,164 @@ pub const TestModelCatalogFixture = struct {
         return self.fixture.capturedHeaderValue(name);
     }
 };
+
+const chat_completions_partial_event =
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
+const chat_completions_finish_events =
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n" ++
+    "data: [DONE]\n\n";
+
+/// Loopback chat-completions server for idle-budget tests in other files.
+pub const TestStreamIdleFixture = struct {
+    fixture: LoopbackGatewayFixture,
+
+    /// Sends one delta, then stays silent for `hold_ms` before closing.
+    pub fn initStall(hold_ms: u64) !@This() {
+        return .{ .fixture = try LoopbackGatewayFixture.init(.chat_completions_body_stall, hold_ms) };
+    }
+
+    /// Sends keep-alive comments every 10 ms for 400 ms, then finishes.
+    pub fn initSteadyProgress() !@This() {
+        return .{ .fixture = try LoopbackGatewayFixture.init(.chat_completions_steady_progress, 0) };
+    }
+
+    pub fn start(self: *@This()) !void {
+        try self.fixture.start();
+        if (!self.fixture.waitForAcceptStart(5000)) return error.TestFixtureNotListening;
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.fixture.deinit();
+    }
+
+    pub fn port(self: *@This()) u16 {
+        return self.fixture.port();
+    }
+
+    pub fn failure(self: *@This()) ?anyerror {
+        return self.fixture.failure;
+    }
+};
+
+/// One sent chat-completions request whose body is read under an idle budget.
+/// The caller owns `client`, which must outlive the probe.
+const StreamIdleProbe = struct {
+    request: std.http.Client.Request,
+    watch: CancelWatch = .{},
+    cancel_flag: std.atomic.Value(bool) = .init(false),
+
+    fn open(client: *std.http.Client, port: u16) !StreamIdleProbe {
+        var url_buf: [64]u8 = undefined;
+        const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/v1/chat/completions", .{port});
+        var probe: StreamIdleProbe = .{
+            .request = try client.request(.POST, try std.Uri.parse(url), .{ .keep_alive = false }),
+        };
+        errdefer probe.request.deinit();
+        probe.request.transfer_encoding = .{ .content_length = 2 };
+        var send_buffer: [256]u8 = undefined;
+        var body = try probe.request.sendBodyUnflushed(&send_buffer);
+        try body.writer.writeAll("{}");
+        try body.end();
+        try probe.request.connection.?.flush();
+        return probe;
+    }
+
+    /// Reads the whole response body through the activity reader while the
+    /// cancel watcher enforces `idle`. Returns the body or the read failure.
+    fn readBody(self: *StreamIdleProbe, alloc: std.mem.Allocator, idle: ?*stream_idle.Budget) ![]u8 {
+        var response = try self.request.receiveHead(&.{});
+        try std.testing.expectEqual(std.http.Status.ok, response.head.status);
+        try self.watch.startWithIdleBudget(&self.cancel_flag, null, idle, self.request.connection.?.stream_writer.stream);
+        var transfer: [8 * 1024]u8 = undefined;
+        const body_reader = response.reader(&transfer);
+        var activity_buffer: [1024]u8 = undefined;
+        var tracked = if (idle) |budget| stream_idle.ActivityReader.init(body_reader, budget, &activity_buffer) else null;
+        const reader: *std.Io.Reader = if (tracked) |*wrapper| &wrapper.interface else body_reader;
+        return reader.allocRemaining(alloc, .limited(64 * 1024));
+    }
+
+    fn deinit(self: *StreamIdleProbe) void {
+        self.watch.stop();
+        self.request.deinit();
+    }
+};
+
+test "stream idle watch cuts a silent body and reports a timeout within the budget" {
+    const alloc = std.testing.allocator;
+    const zio = io_mod.getIo();
+    var fixture = try LoopbackGatewayFixture.init(.chat_completions_body_stall, 10_000);
+    defer fixture.deinit();
+    try fixture.start();
+    try std.testing.expect(fixture.waitForAcceptStart(5000));
+
+    var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
+    defer client.deinit();
+    var probe = try StreamIdleProbe.open(&client, fixture.port());
+    defer probe.deinit();
+    var budget = stream_idle.Budget.init(100);
+    const started = std.Io.Clock.Timestamp.now(zio, .awake);
+    const outcome = probe.readBody(alloc, &budget);
+    const elapsed_ms = started.durationTo(std.Io.Clock.Timestamp.now(zio, .awake)).raw.toMilliseconds();
+
+    try std.testing.expect(budget.wasTripped());
+    try std.testing.expectEqual(error.Timeout, budget.failure(error.IncompleteStream));
+    try std.testing.expect(elapsed_ms < 2_000);
+    // A shut-down socket reads as either a clean EOF or a failed read; the
+    // bytes delivered before the cut are intact either way.
+    if (outcome) |body| {
+        defer alloc.free(body);
+        try std.testing.expectEqualStrings(chat_completions_partial_event, body);
+    } else |err| try std.testing.expectEqual(error.ReadFailed, err);
+}
+
+test "stream idle watch tolerates steady keep-alive traffic" {
+    const alloc = std.testing.allocator;
+    const zio = io_mod.getIo();
+    var fixture = try LoopbackGatewayFixture.init(.chat_completions_steady_progress, 0);
+    defer fixture.deinit();
+    try fixture.start();
+    try std.testing.expect(fixture.waitForAcceptStart(5000));
+
+    var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
+    defer client.deinit();
+    var probe = try StreamIdleProbe.open(&client, fixture.port());
+    defer probe.deinit();
+    var budget = stream_idle.Budget.init(100);
+    const started = std.Io.Clock.Timestamp.now(zio, .awake);
+    const body = try probe.readBody(alloc, &budget);
+    defer alloc.free(body);
+    const elapsed_ms = started.durationTo(std.Io.Clock.Timestamp.now(zio, .awake)).raw.toMilliseconds();
+
+    fixture.deinit();
+    if (fixture.failure) |err| return err;
+    try std.testing.expect(!budget.wasTripped());
+    try std.testing.expectEqual(error.IncompleteStream, budget.failure(error.IncompleteStream));
+    try std.testing.expect(std.mem.endsWith(u8, body, "data: [DONE]\n\n"));
+    try std.testing.expect(elapsed_ms >= 300);
+}
+
+test "stream idle watch stays disarmed when the budget is disabled" {
+    const alloc = std.testing.allocator;
+    const zio = io_mod.getIo();
+    var fixture = try LoopbackGatewayFixture.init(.chat_completions_body_stall, 300);
+    defer fixture.deinit();
+    try fixture.start();
+    try std.testing.expect(fixture.waitForAcceptStart(5000));
+
+    var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
+    defer client.deinit();
+    var probe = try StreamIdleProbe.open(&client, fixture.port());
+    defer probe.deinit();
+    const started = std.Io.Clock.Timestamp.now(zio, .awake);
+    const body = try probe.readBody(alloc, null);
+    defer alloc.free(body);
+    const elapsed_ms = started.durationTo(std.Io.Clock.Timestamp.now(zio, .awake)).raw.toMilliseconds();
+
+    fixture.deinit();
+    if (fixture.failure) |err| return err;
+    try std.testing.expectEqualStrings(chat_completions_partial_event, body);
+    try std.testing.expect(elapsed_ms >= 250);
+}
 
 const RequestOpenProbe = struct {
     attempts: usize = 0,

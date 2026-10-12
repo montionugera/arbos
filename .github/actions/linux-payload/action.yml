@@ -1,0 +1,53 @@
+name: Linux update payload
+description: >-
+  The Linux desktop as one tarball — the binary, the desktop entry, the icon,
+  and an install.sh that lays it into the self-updating layout the app manages.
+  This is the payload the in-app updater installs on Linux, built by
+  app/scripts/package-linux.sh exactly as a person would build it.
+
+inputs:
+  build:
+    description: The build number (a commit count), the fourth version component.
+    required: true
+  profile:
+    description: "`release` or `debug`, as scripts/package-linux.sh takes it."
+    required: false
+    default: release
+
+outputs:
+  path:
+    description: The tarball that was built, relative to the workspace root.
+    value: ${{ steps.build.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: gpui system deps
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq \
+          libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+          libx11-dev libxcb1-dev libx11-xcb-dev \
+          libfontconfig1-dev libfreetype-dev libasound2-dev \
+          libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+
+    - name: Build and pack
+      id: build
+      shell: bash
+      working-directory: app
+      env:
+        ARBOS_BUILD: ${{ inputs.build }}
+        PROFILE: ${{ inputs.profile }}
+      run: |
+        set -euo pipefail
+        scripts/package-linux.sh
+        shopt -s nullglob
+        tarballs=(target/package/*-linux-*.tar.gz)
+        if [ "${#tarballs[@]}" -ne 1 ]; then
+          echo "::error title=No single Linux tarball::expected one *-linux-*.tar.gz in app/target/package, found ${#tarballs[@]}: ${tarballs[*]:-none}"
+          exit 1
+        fi
+        echo "path=app/${tarballs[0]}" >> "$GITHUB_OUTPUT"
+        ls -la target/package

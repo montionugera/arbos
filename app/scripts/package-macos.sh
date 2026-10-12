@@ -2,11 +2,17 @@
 # macOS packaging: build the release binary for the host arch and produce
 #   target/package/arbos-<version>-macos-<arch>.dmg          (user download)
 #   target/package/arbos-<version>-macos-<arch>-app.tar.gz   (auto-updater)
-# containing Arbos.app (unsigned unless CODESIGN_IDENTITY is set).
+# containing Arbos.app (unsigned unless CODESIGN_IDENTITY is set). The
+# "Release main" workflow runs this on every green commit to main, signed with
+# the best Apple certificate the repository holds, and publishes the tarball
+# to the `edge` release with Arbos's own Ed25519 signature over its bytes,
+# which is what the running app verifies before installing it.
 #
 # Usage: scripts/package-macos.sh
-# Env:   ARBOS_BUILD=<n> — the commit count, as CI passes it, making the
-#          version 0.2.112.<n> (the full build version the updater orders on).
+# Env:   ARBOS_BUILD=<n> appends the build number as a fourth version component
+#        (the binary, the bundle, and the file names all carry it); CI passes
+#        the commit count, making the version 0.2.112.<n> — the full build
+#        version the updater orders on.
 #        CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
 #        NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID — App Store Connect
 #          API key (.p8) for notarization; all three set → notarize + staple the

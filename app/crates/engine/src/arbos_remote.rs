@@ -1380,7 +1380,7 @@ async fn wait_for_worker(state: &RemoteState, prepared: &PreparedJob) -> Result<
 
 fn worker_status(project: &Path, worker_id: &str) -> Result<Option<String>, String> {
     let agent = arbos_layout::worker_result(project, worker_id)?;
-    if agent.status != "working" && !agent.status.is_empty() {
+    if !arbos_layout::status_is_live(&agent.status) && !agent.status.is_empty() {
         return Ok(Some(if agent.result.is_empty() {
             agent.status
         } else {

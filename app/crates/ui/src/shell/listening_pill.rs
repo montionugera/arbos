@@ -7,7 +7,7 @@ use gpui::{
     div, prelude::*, px, AnyElement, Context, InteractiveElement, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement, Styled,
 };
-use zeron_engine::arbos_layout::AgentView;
+use zeron_engine::arbos_layout::{status_is_live, AgentView};
 use zeron_engine::arbos_wakes::SubscriptionView;
 use zeron_rpc::methods;
 
@@ -37,9 +37,12 @@ pub(super) struct ListeningRow {
     pub since: String,
     /// RFC 3339. Empty when unknown.
     pub next_wake: String,
+    /// A worker's live line while its model is being retried or has paused.
+    /// Empty otherwise.
+    pub step: String,
 }
 
-/// The engine's rows as the pill shows them: working workers first, then
+/// The engine's rows as the pill shows them: live workers first, then
 /// each unexpired subscription in file order. `worker_since` gives the
 /// start time of a worker's chat, when the chat is known.
 pub(super) fn listening_rows(
@@ -49,7 +52,7 @@ pub(super) fn listening_rows(
 ) -> Vec<ListeningRow> {
     let mut rows: Vec<ListeningRow> = agents
         .iter()
-        .filter(|agent| agent.role == "worker" && agent.status == "working")
+        .filter(|agent| agent.role == "worker" && status_is_live(&agent.status))
         .map(|agent| ListeningRow {
             waits: Waits::Worker {
                 chat_id: agent.chat_id.clone(),
@@ -59,6 +62,7 @@ pub(super) fn listening_rows(
                 .map(|time| time.to_rfc3339())
                 .unwrap_or_default(),
             next_wake: String::new(),
+            step: agent.step.clone(),
         })
         .collect();
     rows.extend(
@@ -70,6 +74,7 @@ pub(super) fn listening_rows(
                 label: subscription_label(&sub.kind, &sub.label),
                 since: sub.created.clone(),
                 next_wake: sub.next_wake.clone(),
+                step: String::new(),
             }),
     );
     rows
@@ -93,10 +98,14 @@ pub(super) fn pill_text(count: usize) -> String {
     format!("Listening · {count}")
 }
 
-/// The second line of a row: when the wait began and, where known, the
-/// next wake. Empty when neither time is known.
+/// The second line of a row: a worker's live line while its model is
+/// being retried, when the wait began and, where known, the next wake.
+/// Empty when none of these is known.
 pub(super) fn row_detail(row: &ListeningRow, now: DateTime<Local>) -> String {
     let mut parts = Vec::new();
+    if !row.step.trim().is_empty() {
+        parts.push(row.step.trim().to_owned());
+    }
     if let Some(since) = clock_text(&row.since, now) {
         parts.push(format!("since {since}"));
     }
@@ -317,6 +326,7 @@ mod tests {
             result: String::new(),
             machine: "local".into(),
             model: String::new(),
+            step: String::new(),
         }
     }
 
@@ -429,6 +439,7 @@ mod tests {
             label: "Daily at 08:30".into(),
             since: today.to_rfc3339(),
             next_wake: tomorrow.to_rfc3339(),
+            step: String::new(),
         };
         assert_eq!(row_detail(&row, now), "since 06:05 · next Oct 13 08:30");
         let unknown = ListeningRow {
@@ -442,5 +453,28 @@ mod tests {
             ..row
         };
         assert_eq!(row_detail(&no_next, now), "since 06:05");
+    }
+
+    #[test]
+    fn a_waiting_worker_stays_listed_and_its_detail_leads_with_the_step() {
+        let mut waiting = agent("fix-tests", "worker", "waiting");
+        waiting.step = "Waiting on the model — try 3 of 8, next in 32 s".into();
+        let started = Utc.with_ymd_and_hms(2026, 10, 12, 7, 15, 0).unwrap();
+        let since = |_: &str| Some(started);
+        let rows = listening_rows(
+            &[],
+            &[waiting, agent("write-docs", "worker", "error")],
+            &since,
+        );
+        assert_eq!(rows.len(), 1, "an errored worker is not a wait");
+        assert_eq!(rows[0].label, "Worker fix-tests");
+        let now = Local.with_ymd_and_hms(2026, 10, 12, 9, 0, 0).unwrap();
+        let detail = row_detail(&rows[0], now);
+        assert!(
+            detail.starts_with("Waiting on the model — try 3 of 8, next in 32 s · since "),
+            "{detail}"
+        );
+        let plain = listening_rows(&[], &[agent("fix-tests", "worker", "working")], &since);
+        assert_eq!(plain[0].step, "");
     }
 }

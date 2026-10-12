@@ -1,6 +1,6 @@
 # The public half of the Arbos update signing key.
 #
-# Every published payload — the macOS app tarball, the Linux tarball — is signed
+# Every published payload — the macOS app zip, the Linux tarball — is signed
 # with the private half, which lives only in the repository secret
 # ARBOS_UPDATE_SIGNING_KEY and is never written to a file that can be
 # committed. This half is compiled into the app: an update installs only if
@@ -14,15 +14,12 @@
 #
 # To set it up once, from a checkout:
 #
-#   cargo run -q -p zeron-update --bin arbos-updatectl -- keygen \
-#       --public crates/update/update-key.pub | gh secret set ARBOS_UPDATE_SIGNING_KEY
+#   cargo run -q -p arbos-update --bin arbos-updatectl -- keygen \
+#       --public crates/arbos-update/update-key.pub | gh secret set ARBOS_UPDATE_SIGNING_KEY
 #
 # That writes this file (commit it) and pipes the secret straight into the
 # repository secret without it ever reaching a terminal or a shell history.
 #
 # Until the line exists, a build refuses every update rather than trusting an
 # unsigned one, and the publish workflow skips itself with a note.
-#
-# The line below is the legacy tree's key (commit ac8195fa), so payloads
-# published while that tree lived still verify.
 ed25519 tRMVEMFE8nHJfhoFBIt3pIjEUEFiqvXB9HiB8Rnn3YQ=

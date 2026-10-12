@@ -3,29 +3,24 @@
 //! Ed25519 over the bytes of the file itself — the same promise Sparkle's
 //! appcast signing makes, and for the same reason: it is ours to make. Apple's
 //! notarization says a downloaded app has been seen by Apple and found clean,
-//! which is a different sentence about a different moment, and it is still
-//! waiting on a Developer ID certificate. This says the running app fetched
+//! which is a different sentence about a different moment, and it depends on
+//! which certificate the repository holds. This says the running app fetched
 //! the bytes the build published and nothing in between changed them. The two
-//! stack: when the certificate arrives the payload inside gains a notarized
-//! signature and keeps this one, and nothing in this file changes.
+//! stack: a payload with a notarized Apple signature inside still carries this
+//! one, and nothing in this file changes when the certificate does.
 //!
 //! The private half exists in exactly one place, the repository secret
 //! `ARBOS_UPDATE_SIGNING_KEY`. The public half is `update-key.pub` beside this
 //! crate, compiled into the app. A build with no key in it refuses every
 //! update rather than taking an unsigned one.
-//!
-//! Recovered from the legacy tree (commit c5d2c30e, `crates/arbos-update`),
-//! where the same key signed the dev channel's payloads; the line in
-//! `update-key.pub` is that key's public half, so builds published before the
-//! legacy tree was removed still verify.
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ring::{
-    digest,
     rand::{SecureRandom, SystemRandom},
     signature::{self, Ed25519KeyPair, KeyPair, UnparsedPublicKey},
 };
+use sha2::{Digest, Sha256};
 
 /// The key file's one meaningful line begins with this. Written out rather
 /// than implied so a second algorithm could be added later without a file
@@ -56,15 +51,15 @@ impl PublicKey {
         format!("{ALGORITHM} {}", self.to_base64())
     }
 
-    /// Whether `signature` — base64, as the feed carries it — is this key's
-    /// signature over `payload`.
+    /// Whether `signature` — base64, as the manifest carries it — is this
+    /// key's signature over `payload`.
     pub fn verify(&self, payload: &[u8], signature: &str) -> Result<()> {
         let raw = B64
             .decode(signature.trim())
             .context("signature is not base64")?;
         UnparsedPublicKey::new(&signature::ED25519, self.0)
             .verify(payload, &raw)
-            .map_err(|_| anyhow!("signature does not match the update signing key"))
+            .map_err(|_| anyhow!("signature does not match the Arbos update signing key"))
     }
 }
 
@@ -84,7 +79,7 @@ impl SecretKey {
         ))
     }
 
-    /// Sign `payload`, base64, as the feed carries it.
+    /// Sign `payload`, base64, as the manifest carries it.
     pub fn sign(&self, payload: &[u8]) -> Result<String> {
         Ok(B64.encode(self.pair()?.sign(payload).as_ref()))
     }
@@ -128,7 +123,7 @@ pub fn parse_key_file(text: &str) -> Option<PublicKey> {
         })
 }
 
-/// Lowercase hex SHA-256 of `payload` — the second thing the feed carries
+/// Lowercase hex SHA-256 of `payload` — the second thing the manifest carries
 /// about a download.
 ///
 /// The signature is what makes a payload trustworthy; this is what makes a
@@ -136,14 +131,7 @@ pub fn parse_key_file(text: &str) -> Option<PublicKey> {
 /// signature, and only the digest says which in a way a person can check by
 /// hand with `shasum -a 256`.
 pub fn sha256_hex(payload: &[u8]) -> String {
-    digest::digest(&digest::SHA256, payload)
-        .as_ref()
-        .iter()
-        .fold(String::with_capacity(64), |mut out, byte| {
-            use std::fmt::Write;
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
+    format!("{:x}", Sha256::digest(payload))
 }
 
 fn fixed(text: &str) -> Result<[u8; KEY_LEN]> {
@@ -162,12 +150,12 @@ fn fixed_bytes(raw: &[u8]) -> Result<[u8; KEY_LEN]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PublicKey, SecretKey, generate, parse_key_file, sha256_hex};
+    use super::{PublicKey, SecretKey, built_in_key, generate, parse_key_file, sha256_hex};
 
     #[test]
     fn a_signature_over_the_payload_verifies() {
         let (secret, public) = generate().unwrap();
-        let payload = b"Arbos.app, zipped";
+        let payload = b"Arbos.app, archived";
         let signature = secret.sign(payload).unwrap();
         public.verify(payload, &signature).unwrap();
     }
@@ -175,9 +163,9 @@ mod tests {
     #[test]
     fn one_changed_byte_fails() {
         let (secret, public) = generate().unwrap();
-        let signature = secret.sign(b"Arbos.app, zipped").unwrap();
-        assert!(public.verify(b"Arbos.app, zipped!", &signature).is_err());
-        assert!(public.verify(b"Arbos.app, zippee", &signature).is_err());
+        let signature = secret.sign(b"Arbos.app, archived").unwrap();
+        assert!(public.verify(b"Arbos.app, archived!", &signature).is_err());
+        assert!(public.verify(b"Arbos.app, archivee", &signature).is_err());
         assert!(public.verify(b"", &signature).is_err());
     }
 
@@ -196,7 +184,7 @@ mod tests {
     #[test]
     fn a_mangled_signature_is_an_error_and_not_a_panic() {
         let (secret, public) = generate().unwrap();
-        let payload = b"Arbos.app, zipped";
+        let payload = b"Arbos.app, archived";
         let good = secret.sign(payload).unwrap();
         for bad in ["", "not base64!!", "AAAA", &good[..good.len() - 4]] {
             assert!(public.verify(payload, bad).is_err(), "`{bad}` verified");
@@ -219,19 +207,17 @@ mod tests {
 
     #[test]
     fn a_key_file_with_no_key_in_it_reads_as_no_key() {
-        // What ships before anybody has run `keygen`. The app must see
-        // "cannot verify", never "nothing to check".
+        // The app must see "cannot verify", never "nothing to check".
         assert!(parse_key_file("# only comments\n\n   \n").is_none());
         assert!(parse_key_file("ed25519 not-base64").is_none());
         assert!(parse_key_file("rsa AAAA").is_none());
     }
 
     #[test]
-    fn the_built_in_key_file_parses() {
-        // This repository has a key: the same public half the legacy tree's
-        // dev channel signed with. A build that cannot see it refuses every
-        // update, so the file parsing is worth one direct test.
-        assert!(super::built_in_key().is_some());
+    fn the_shipped_key_file_holds_a_key() {
+        // The one the publish workflow's `verify` step proves matches the
+        // ARBOS_UPDATE_SIGNING_KEY secret.
+        assert!(built_in_key().is_some(), "update-key.pub has no key line");
     }
 
     #[test]
