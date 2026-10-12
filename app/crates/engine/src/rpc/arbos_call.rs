@@ -611,6 +611,7 @@ fn check_worker_model(requested: &str, offered: &[String]) -> Result<(), String>
 }
 
 /// The optional fields of `agents.send`. At least one is present.
+#[derive(Debug)]
 struct SendFields {
     text: Option<String>,
     rename: Option<String>,
