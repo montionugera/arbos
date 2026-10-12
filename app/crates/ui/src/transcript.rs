@@ -7278,6 +7278,11 @@ impl Transcript {
                         .into_any_element(),
                 );
             }
+            // Main keeps the plan sentence and the Worked lines. A worker
+            // tab keeps the working word.
+            if chat_id.ends_with("-main") {
+                return None;
+            }
             let (sending, queued, elapsed, turn) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
