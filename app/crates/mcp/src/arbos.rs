@@ -11,6 +11,9 @@ This server is the Arbos project. \
 agents.spawn starts a worker and returns at once. \
 machine is local or the name of a registered install. \
 agents.transcript returns a worker's last few turns, never the whole log. \
+agents.send steers a running worker, renames it, or changes its model for the next turn. \
+goal.show, goal.schedule, goal.pause, goal.resume, goal.complete, and goal.clear manage the project's durable goal. \
+preferences.write appends one dated line to the person's preferences, shared by every project. \
 context.read and context.write use paths under the project context directory, \
 such as internal/note.md or status.md. \
 A worker's file under docs/ or internal/ must start with its own arbos agentId frontmatter. \
@@ -42,14 +45,16 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
             ),
             tool(
                 "agents.send",
-                "Steer a running worker, or send a new prompt when it is idle.",
+                "Steer a running worker, or send a new prompt when it is idle. rename changes the worker's display name at once. model applies from the worker's next turn. text is optional when rename or model is given.",
                 json!({
                     "type": "object",
                     "properties": {
                         "name": { "type": "string" },
-                        "text": { "type": "string" }
+                        "text": { "type": "string", "description": "The message. Steers a running turn, else becomes the next prompt." },
+                        "rename": { "type": "string", "description": "New display name for the worker's tab." },
+                        "model": { "type": "string", "description": "Model id for the worker's next turn." }
                     },
-                    "required": ["name", "text"]
+                    "required": ["name"]
                 }),
             ),
             tool(
@@ -76,6 +81,53 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
                         "tail": { "type": "integer", "description": "How many of the last turns to return. Defaults to 10. Clamped to 1 through 50." }
                     },
                     "required": ["name"]
+                }),
+            ),
+            tool(
+                "goal.show",
+                "The project's goal: objective, state (active, paused, complete), elapsed seconds, last wake, and the wake interval. Null when there is no goal.",
+                no_args(),
+            ),
+            tool(
+                "goal.schedule",
+                "Choose how many seconds to wait before the next goal wake. Clamped to 30 through 86400. Returns the goal.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "seconds": { "type": "integer", "description": "Seconds until the next wake, and between later wakes." }
+                    },
+                    "required": ["seconds"]
+                }),
+            ),
+            tool(
+                "goal.pause",
+                "Pause the goal. Wakes stop until goal.resume. The clock keeps running.",
+                no_args(),
+            ),
+            tool(
+                "goal.resume",
+                "Resume a paused goal. Wakes start again on the interval.",
+                no_args(),
+            ),
+            tool(
+                "goal.complete",
+                "Mark the goal complete. Call this only when the objective is proven. Wakes stop.",
+                no_args(),
+            ),
+            tool(
+                "goal.clear",
+                "Remove the goal. Wakes stop. The checklist and GOALS.md stay.",
+                no_args(),
+            ),
+            tool(
+                "preferences.write",
+                "Save one dated line about how the person wants work done, across every project. Use it only when the person states a preference, corrects you, or repeats the same request.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "One sentence. Newlines are joined." }
+                    },
+                    "required": ["text"]
                 }),
             ),
         ]);
@@ -108,10 +160,19 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
     tools
 }
 
+fn no_args() -> Value {
+    json!({ "type": "object", "properties": {} })
+}
+
+/// Tools only Main has. A worker's call is refused before it reaches the engine.
+fn main_only(name: &str) -> bool {
+    name.starts_with("agents.") || name.starts_with("goal.") || name.starts_with("preferences.")
+}
+
 pub async fn call(zeron: &Zeron, name: &str, args: Value) -> Result<Value, String> {
     let profile = std::env::var("ARBOS_MCP").unwrap_or_default();
-    if profile != "coordinator" && name.starts_with("agents.") {
-        return Err("workers cannot call agents tools".into());
+    if profile != "coordinator" && main_only(name) {
+        return Err("workers cannot call agents, goal, or preferences tools".into());
     }
     if !catalog(&profile).iter().any(|tool| tool.name == name) {
         return Err(format!("unknown tool: {name}"));
@@ -140,6 +201,13 @@ fn op_for(name: &str) -> &'static str {
         "agents.list" => "list",
         "agents.result" => "result",
         "agents.transcript" => "transcript",
+        "goal.show" => "goal_show",
+        "goal.schedule" => "goal_schedule",
+        "goal.pause" => "goal_pause",
+        "goal.resume" => "goal_resume",
+        "goal.complete" => "goal_complete",
+        "goal.clear" => "goal_clear",
+        "preferences.write" => "preferences_write",
         "context.read" => "read",
         "context.write" => "write",
         _ => "",
