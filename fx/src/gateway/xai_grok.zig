@@ -9,6 +9,7 @@ const types = @import("../core/shared/types.zig");
 const gateway_client = @import("client.zig");
 const responses_protocol = @import("responses_protocol.zig");
 const sse_stream = @import("sse.zig");
+const stream_idle = @import("stream_idle.zig");
 const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
 
 const Allocator = std.mem.Allocator;
@@ -308,10 +309,22 @@ pub fn streamPrepared(
         } };
     }
 
+    // Bound the streaming body with the sliding idle budget alongside the
+    // optional absolute deadline; whichever fires first closes the socket.
+    var idle_budget: ?stream_idle.Budget = if (stream_idle.configuredTimeoutMs()) |timeout_ms| stream_idle.Budget.init(timeout_ms) else null;
+    const idle: ?*stream_idle.Budget = if (idle_budget) |*budget| budget else null;
+    if (idle != null) {
+        cancel_watch.stop();
+        if (http_request.connection) |connection|
+            try cancel_watch.startWithIdleBudget(request.cancel_flag, request.deadline, idle, connection.stream_writer.stream);
+    }
     var transfer_buffer: [transfer_buffer_bytes]u8 = undefined;
-    const reader = response.reader(&transfer_buffer);
+    const body_reader = response.reader(&transfer_buffer);
+    var activity_buffer: [16 * 1024]u8 = undefined;
+    var tracked: ?stream_idle.ActivityReader = if (idle) |budget| stream_idle.ActivityReader.init(body_reader, budget, &activity_buffer) else null;
+    const reader: *std.Io.Reader = if (tracked) |*wrapper| &wrapper.interface else body_reader;
     var events = request.events;
-    var completion = try consumeSse(
+    var completion = consumeSse(
         alloc,
         reader,
         &events,
@@ -321,7 +334,7 @@ pub fn streamPrepared(
         EventBridge.toolInput,
         request.cancel_flag,
         request.content_capture_limit,
-    );
+    ) catch |err| return if (idle) |budget| budget.failure(err) else err;
     errdefer {
         var owned = stream_provider.Result{ .completed = .{
             .completion = completion,
