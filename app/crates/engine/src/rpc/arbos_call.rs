@@ -11,6 +11,7 @@ use super::EngineRpc;
 use crate::arbos_goal;
 use crate::arbos_layout::{self, AgentView};
 use crate::new_id;
+use crate::{arbos_live, arbos_wakes};
 
 impl EngineRpc {
     pub(super) fn arbos_call(&self, params: Value) -> Result<Value, String> {
@@ -103,6 +104,28 @@ impl EngineRpc {
                 let text = text_field(&params, "text").ok_or_else(|| "the preference is empty".to_string())?;
                 let line = arbos_layout::append_user_preference(&text)?;
                 Ok(json!({ "line": line }))
+            }
+            "step" => {
+                self.require_coordinator(project_path, &params)?;
+                let text = text_field(&params, "text").ok_or_else(|| "the step is empty".to_string())?;
+                let step = arbos_live::set_step(project_path, &text)?;
+                Ok(json!({ "step": step }))
+            }
+            "live" => Ok(live_row(project_path)),
+            "seen" => {
+                arbos_live::mark_seen(project_path)?;
+                Ok(live_row(project_path))
+            }
+            "subscriptions_list" => Ok(json!({
+                "subscriptions": arbos_wakes::subscriptions(project_path),
+            })),
+            "subscriptions_remove" => {
+                let id = text_field(&params, "id").ok_or_else(|| "name the subscription".to_string())?;
+                arbos_wakes::remove_subscription(project_path, &id)?;
+                Ok(json!({
+                    "removed": id,
+                    "subscriptions": arbos_wakes::subscriptions(project_path),
+                }))
             }
             _ => Err("unknown arbos op".into()),
         }
@@ -277,6 +300,7 @@ impl EngineRpc {
                 sandbox: SandboxLevel::DangerFullAccess,
             };
             self.queue_prompt(&worker.chat_id, &cwd, &text, &config)?;
+            arbos_layout::restart_worker(project, &worker.id)?;
         }
         Ok(json!({
             "name": worker.id,
@@ -520,6 +544,15 @@ fn context_path(params: &Value) -> Result<String, String> {
 fn goal_row_json(project: &Path) -> Result<Value, String> {
     let row = arbos_goal::goal_row(project);
     Ok(json!({ "goal": row }))
+}
+
+fn live_row(project: &Path) -> Value {
+    let live = arbos_live::live(project);
+    json!({
+        "unread": live.unread,
+        "step": live.step,
+        "stepSource": live.step_source,
+    })
 }
 
 fn agent_rows(agents: &[AgentView]) -> Vec<Value> {

@@ -2202,30 +2202,29 @@ fn wake_if_worker(inner: &Inner, chat_id: &str, cwd: &str, status: &DoneStatus, 
         DoneStatus::Errored => "error",
         DoneStatus::Interrupted => "stopped",
     };
+    // One wake per worker turn: the layout marks the worker done on the
+    // first call and answers nothing on a repeat.
     let Some(done) =
-        crate::arbos_layout::finish_worker(std::path::Path::new(cwd), chat_id, label, reply)
+        crate::arbos_live::worker_wake(std::path::Path::new(cwd), chat_id, label, reply)
     else {
         return;
     };
-    let body = if done.result.is_empty() {
-        format!("Worker {} {label}.", done.id)
-    } else {
-        format!("Worker {} {label}.\n{}", done.id, done.result)
-    };
-    let prompt = format!("{}{body}", zeron_proto::ARBOS_WAKE_MARK);
+    let prompt = format!("{}{}", zeron_proto::ARBOS_WAKE_MARK, done.body);
     let Some(host) = lock(&inner.doc_host).clone() else {
         return;
     };
     let working = lock(&inner.runs).contains_key(&done.main_chat_id);
-    if working {
-        let headline = body.trim().lines().next().unwrap_or("").trim();
-        let line = format!("Worked · {headline}");
-        if let Ok(handle) = host.open(&done.main_chat_id) {
-            let _ = handle.write_system_message(&new_id(), &line, now_ms());
-        }
-        return;
-    }
-    let queued = {
+    // A working Main is steered, so the reply still reaches it in this turn.
+    // The steer draws the same Worked line a queued run does.
+    let queued = if working {
+        host.queue_command(
+            &done.main_chat_id,
+            SessionCommandPayload::Steer {
+                prompt,
+                message_id: Some(new_id()),
+            },
+        )
+    } else {
         let mut request = lock(&inner.last_requests)
             .get(&done.main_chat_id)
             .cloned()
@@ -2258,7 +2257,7 @@ fn wake_if_worker(inner: &Inner, chat_id: &str, cwd: &str, status: &DoneStatus, 
         )
     };
     if let Err(err) = queued {
-        tracing::warn!(worker = %done.id, error = %err, "worker wake was not queued");
+        tracing::warn!(worker = %done.worker, error = %err, "worker wake was not queued");
     }
 }
 
@@ -2521,10 +2520,13 @@ async fn drive_run(
             .arbos_mcp(&chat_id, &request.cwd)
             .or_else(|| inner.zeron_mcp(&chat_id));
     }
+    // Main's turns feed the live step, the unread flag, and the link check.
+    let mut main_turn = false;
     if harness_id == HarnessId::Fx
         && let Some(prep) =
             crate::arbos_layout::prepare_turn(std::path::Path::new(&request.cwd), &chat_id)
     {
+        main_turn = prep.role == "coordinator";
         request.model_options.insert(
             "_arbosFxHome".into(),
             serde_json::Value::String(prep.fx_home),
@@ -3404,6 +3406,9 @@ async fn drive_run(
             }
             _ => {}
         }
+        if main_turn {
+            crate::arbos_live::note_activity(std::path::Path::new(&run_cwd), &event);
+        }
 
         // Startup-crash retry: a run that dies before ever starting (errored
         // Done, no SessionStarted, nothing streamed) means the AGENT CHILD
@@ -3597,6 +3602,26 @@ async fn drive_run(
                     text: "Stopped".into(),
                 });
             }
+            // Main's reply is checked before it is shown: a local link to a
+            // file that is missing, or an image that does not decode, is
+            // marked so the UI drops the link.
+            if main_turn && visible_reply {
+                let project = std::path::Path::new(&run_cwd);
+                for part in folded.iter_mut() {
+                    if let MessagePart::Text { text, .. } = part {
+                        let (marked, missing) =
+                            crate::arbos_live::mark_missing_links(project, text);
+                        if !missing.is_empty() {
+                            tracing::info!(
+                                chat = %chat_id,
+                                missing = ?missing,
+                                "reply linked missing files"
+                            );
+                            *text = marked;
+                        }
+                    }
+                }
+            }
             // A Done landing on a PARKED session with nothing streamed (the
             // idle reaper's or an interrupt's own teardown) has no entry to
             // finalize — writing one would leave an empty aborted stub.
@@ -3658,6 +3683,14 @@ async fn drive_run(
             let pending_steer = inner.has_pending_steers(&chat_id, &run_id);
             if turn_was_active && !pending_steer {
                 wake_if_worker(&inner, &chat_id, &run_cwd, status, &folded_text(&folded));
+                if main_turn {
+                    // The step clears with the turn. Unread is set only when
+                    // the person has text to read.
+                    crate::arbos_live::end_main_turn(
+                        std::path::Path::new(&run_cwd),
+                        visible_reply,
+                    );
+                }
             }
             let completed_turn = (*status == DoneStatus::Completed
                 && !interrupted

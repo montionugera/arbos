@@ -1,5 +1,6 @@
-//! The `arbos` tool catalog. Main sees `agents.*` and `context.*`.
-//! A worker sees `context.*` only, so a worker cannot spawn another worker.
+//! The `arbos` tool catalog. Main sees `agents.*`, `status.step`, and
+//! `context.*`. A worker sees `context.*` only, so a worker cannot spawn
+//! another worker.
 
 use serde_json::{Value, json};
 
@@ -14,6 +15,7 @@ agents.transcript returns a worker's last few turns, never the whole log. \
 agents.send steers a running worker, renames it, or changes its model for the next turn. \
 goal.show, goal.schedule, goal.pause, goal.resume, goal.complete, and goal.clear manage the project's durable goal. \
 preferences.write appends one dated line to the person's preferences, shared by every project. \
+status.step sets the live step the person sees: six words at most, starting with a verb. \
 context.read and context.write use paths under the project context directory, \
 such as internal/note.md or status.md. \
 A worker's file under docs/ or internal/ must start with its own arbos agentId frontmatter. \
@@ -130,6 +132,17 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
                     "required": ["text"]
                 }),
             ),
+            tool(
+                "status.step",
+                "Set the live step the person sees while you work. Six words at most, starting with a verb, such as Checking the gate. It clears when the turn ends.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "The step, six words at most, starting with a verb." }
+                    },
+                    "required": ["text"]
+                }),
+            ),
         ]);
     }
     tools.extend([
@@ -166,13 +179,16 @@ fn no_args() -> Value {
 
 /// Tools only Main has. A worker's call is refused before it reaches the engine.
 fn main_only(name: &str) -> bool {
-    name.starts_with("agents.") || name.starts_with("goal.") || name.starts_with("preferences.")
+    name.starts_with("agents.")
+        || name.starts_with("goal.")
+        || name.starts_with("preferences.")
+        || name.starts_with("status.")
 }
 
 pub async fn call(zeron: &Zeron, name: &str, args: Value) -> Result<Value, String> {
     let profile = std::env::var("ARBOS_MCP").unwrap_or_default();
     if profile != "coordinator" && main_only(name) {
-        return Err("workers cannot call agents, goal, or preferences tools".into());
+        return Err("workers cannot call agents, goal, preferences, or status tools".into());
     }
     if !catalog(&profile).iter().any(|tool| tool.name == name) {
         return Err(format!("unknown tool: {name}"));
@@ -208,6 +224,7 @@ fn op_for(name: &str) -> &'static str {
         "goal.complete" => "goal_complete",
         "goal.clear" => "goal_clear",
         "preferences.write" => "preferences_write",
+        "status.step" => "step",
         "context.read" => "read",
         "context.write" => "write",
         _ => "",
@@ -219,5 +236,48 @@ fn tool(name: &'static str, description: &'static str, input_schema: Value) -> T
         name,
         description,
         input_schema,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn main_sees_every_tool_once_and_a_worker_sees_context_only() {
+        let main: Vec<&str> = catalog("coordinator").iter().map(|tool| tool.name).collect();
+        let mut sorted = main.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), main.len(), "a tool is listed twice: {main:?}");
+        for name in [
+            "agents.spawn",
+            "agents.send",
+            "agents.list",
+            "agents.result",
+            "agents.transcript",
+            "goal.show",
+            "goal.schedule",
+            "goal.pause",
+            "goal.resume",
+            "goal.complete",
+            "goal.clear",
+            "preferences.write",
+            "status.step",
+            "context.read",
+            "context.write",
+        ] {
+            assert!(main.contains(&name), "{name} is missing from Main's catalog");
+            assert!(!op_for(name).is_empty(), "{name} has no op");
+        }
+        let worker: Vec<&str> = catalog("worker").iter().map(|tool| tool.name).collect();
+        assert_eq!(worker, vec!["context.read", "context.write"]);
+        for name in &main {
+            assert_eq!(
+                main_only(name),
+                !name.starts_with("context."),
+                "{name} is gated wrong"
+            );
+        }
     }
 }
