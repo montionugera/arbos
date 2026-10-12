@@ -1797,7 +1797,9 @@ mod tests {
         assert!(!sessions.has_changed().unwrap());
         assert!(!spaces.has_changed().unwrap());
 
-        host.create_space("space", "test-device", "/project", None, false)
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_string_lossy().into_owned();
+        host.create_space("space", "test-device", &project_path, None, false)
             .unwrap();
         host.inner.publish();
         assert!(
@@ -1805,8 +1807,11 @@ mod tests {
             "real changes must wake readers"
         );
         assert_eq!(spaces.borrow_and_update()[0].id, "space");
-        assert!(!chats.has_changed().unwrap());
-        assert!(!sessions.has_changed().unwrap());
+        // A new project comes with its Main chat, so the chat list changes too.
+        assert!(chats.has_changed().unwrap(), "the Main chat wakes readers");
+        let main = host.chat("space-main").unwrap().unwrap();
+        assert_eq!(main.space_id.as_deref(), Some("space"));
+        assert_eq!(main.title.as_deref(), Some("Main"));
         drop(spaces);
 
         host.rename_space("space", Some("Renamed")).unwrap();
