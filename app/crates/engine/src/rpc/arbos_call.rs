@@ -40,6 +40,15 @@ impl EngineRpc {
                 let agent = arbos_layout::worker_result(project_path, &name)?;
                 Ok(agent_row(&agent))
             }
+            "transcript" => {
+                let name = text_field(&params, "name").ok_or_else(|| "name the worker".to_string())?;
+                let tail = params
+                    .get("tail")
+                    .and_then(Value::as_u64)
+                    .map(|tail| usize::try_from(tail).unwrap_or(usize::MAX));
+                let view = arbos_layout::worker_transcript(project_path, &name, tail)?;
+                serde_json::to_value(view).map_err(|err| err.to_string())
+            }
             "read" => {
                 let path = context_path(&params)?;
                 let text = arbos_layout::read_context(project_path, &path)?;
@@ -51,7 +60,10 @@ impl EngineRpc {
                     .get("text")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "text is missing".to_string())?;
-                arbos_layout::write_context(project_path, &path, text)?;
+                match origin_worker(project_path, &params) {
+                    Some(worker) => arbos_layout::write_worker_context(project_path, &worker, &path, text)?,
+                    None => arbos_layout::write_context(project_path, &path, text)?,
+                }
                 Ok(json!({ "path": path, "bytes": text.len() }))
             }
             "byok" => save_byok(project_path, &params),
@@ -387,6 +399,16 @@ fn valid_base_url(url: &str) -> bool {
         && !url.contains(' ')
         && !url.contains('\n')
         && url.len() < 300
+}
+
+/// The worker id behind `originChatId`, when the caller is a worker. Main and
+/// plain chats return `None`, so their writes skip the report check.
+fn origin_worker(project: &Path, params: &Value) -> Option<String> {
+    let origin = text_field(params, "originChatId")?;
+    arbos_layout::agents(project)
+        .into_iter()
+        .find(|agent| agent.chat_id == origin && agent.role == "worker")
+        .map(|agent| agent.id)
 }
 
 fn worker_model(model: &str) -> String {
