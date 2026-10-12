@@ -23,9 +23,11 @@ const file_mutation_contract = @import("../../../tooling/file_mutation_contract.
 const context_contract = @import("../../../workspace/context_contract.zig");
 const io_mod = @import("../../../shared/io.zig");
 const pathing = @import("../../../workspace/pathing.zig");
+const tool_admission = @import("../../../tooling/tool_admission.zig");
 const tool_dispatch = @import("../../../tooling/tool_dispatch.zig");
 const tool_runtime = @import("../../../tooling/tool_runtime.zig");
 const command_output_content = @import("../../../tooling/command_output_content.zig");
+const managed_execution = @import("../../../execution/managed_execution.zig");
 const testing_write_file = if (builtin.is_test)
     @import("../../../../tools/filesystem/write_file.zig")
 else
@@ -150,6 +152,85 @@ fn discardVisionToolOutput(
     _: command_output_content.Stream,
     _: []const u8,
 ) anyerror!void {}
+
+pub const shell_agent_test_tools = [_]tool_dispatch.Tool{builtin_tools.shell};
+
+/// Runs the real `shell` tool through `tool_runtime.executeToolCallAuthorized`
+/// so a flow test can observe genuine command output. The run-command
+/// authority is rebuilt from the exact call because the fake permission
+/// outcome carries a placeholder fingerprint.
+pub const ShellAgentToolRuntime = struct {
+    alloc: Allocator,
+    managed: managed_execution.Runtime,
+    workspace_root: []const u8 = "/tmp",
+    worker: worker_runtime.WorkerRuntime = .{},
+    session: session_runtime.SessionRuntime = .{ .max_history_turns = 8 },
+
+    pub fn init(alloc: Allocator) ShellAgentToolRuntime {
+        return .{ .alloc = alloc, .managed = managed_execution.Runtime.init(alloc) };
+    }
+
+    pub fn deinit(self: *ShellAgentToolRuntime) void {
+        self.managed.deinit();
+        self.worker.deinit(self.alloc);
+        self.session.deinit(self.alloc);
+    }
+
+    pub fn override(self: *ShellAgentToolRuntime) ToolExecutionOverride {
+        return .{ .context = self, .execute_fn = execute };
+    }
+
+    fn execute(raw: *anyopaque, request: ToolExecutionRequest) !ToolExecutionResult {
+        const self: *ShellAgentToolRuntime = @ptrCast(@alignCast(raw));
+        const ctx = self.context();
+        const command_ctx = try tool_admission.runCommandContext(
+            ctx.admissionInput(),
+            request.call_allocator,
+            request.call,
+        );
+        var authorized = request;
+        authorized.authority = .{ .run_command = .{ .shell_allowed = .{
+            .fingerprint = .init(command_ctx),
+            .source = .configured_rule,
+        } } };
+        return tool_runtime.executeToolCallAuthorized(ctx, authorized);
+    }
+
+    fn context(self: *ShellAgentToolRuntime) tool_runtime.Context {
+        return .{
+            .workspace_root = self.workspace_root,
+            .ignored_list_entries = &.{},
+            .max_list_entries = 100,
+            .max_read_file_bytes = 64 * 1024,
+            .max_read_file_lines = 400,
+            .max_read_file_line_len = 2000,
+            .max_command_output_bytes = 64 * 1024,
+            .max_tool_result_bytes = 64 * 1024,
+            .api_key = "key",
+            .agent_stream_provider = agent_stream_provider.unavailable_provider,
+            .model = "anthropic/claude-opus-4.6",
+            .gateway_retry_count = 1,
+            .gateway_chat_url = "https://example.invalid",
+            .agent_step_limit = 8,
+            .tool_registry = .{ .tools = shell_agent_test_tools[0..] },
+            .permission_mode = .auto,
+            .permission_grants = &.{},
+            .permission_rules = .{},
+            .worker = &self.worker,
+            .session = &self.session,
+            .session_allocator = self.alloc,
+            .managed_executions = &self.managed,
+            .context_registry = .{ .default_provider = builtin_context.provider },
+            .lifecycle_scope = .{
+                .kind = .interactive,
+                .workspace_root = self.workspace_root,
+            },
+            .interactive = false,
+            .output_chunk_ctx = undefined,
+            .on_output_chunk = discardVisionToolOutput,
+        };
+    }
+};
 
 const test_tools = [_]tool_dispatch.Tool{
     builtin_tools.glob_files,

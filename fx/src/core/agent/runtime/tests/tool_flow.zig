@@ -9,6 +9,7 @@ const session_codec = @import("../../../session/session_codec.zig");
 const session_child_store = @import("../../../session/session_child_store.zig");
 const result_store = @import("../../../session/result_store.zig");
 const debug_trace = @import("../../../shared/debug_trace.zig");
+const secret_env = @import("../../../shared/secret_env.zig");
 const image_attachments = @import("../../../images/image_attachments.zig");
 const io_mod = @import("../../../shared/io.zig");
 const diff = @import("../../../output/diff.zig");
@@ -64,6 +65,7 @@ const toolCall = test_support.toolCall;
 
 const vision_agent_test_tools = test_support.vision_agent_test_tools;
 const VisionAgentToolRuntime = test_support.VisionAgentToolRuntime;
+const ShellAgentToolRuntime = test_support.ShellAgentToolRuntime;
 
 const PostEffectTerminalFailure = struct {
     effect_count: usize = 0,
@@ -2323,6 +2325,79 @@ test "vision uses generic lifecycle execution memory persistence and reprojectio
     }
     try std.testing.expect(saw_call);
     try std.testing.expect(saw_result);
+}
+
+test "shell tool result redacts secret env values before the model and lifecycle events" {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const token = "ghp_arbosFlowTestToken0123456789";
+    const injected = [_]secret_env.Secret{.{ .name = "GH_TOKEN", .value = token }};
+    secret_env.overrideForTesting(&injected);
+    defer secret_env.overrideForTesting(null);
+
+    // The token reaches the command through a file so it never appears in
+    // the tool arguments; only the command output carries it.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io_mod.getIo(), .{ .sub_path = "token.txt", .data = token });
+    const token_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "token.txt");
+    defer alloc.free(token_path);
+    const arguments_json = try std.fmt.allocPrint(
+        alloc,
+        "{{\"action\":\"run\",\"command\":\"FAKE_TOKEN=\\\"$(cat {s})\\\"; printf '%s unrelated-string %s' \\\"$FAKE_TOKEN\\\" \\\"$FAKE_TOKEN\\\"\",\"timeout_ms\":600000}}",
+        .{token_path},
+    );
+    defer alloc.free(arguments_json);
+
+    const calls = [_]ToolCall{toolCall("call_shell", "shell", arguments_json)};
+    const completions = [_]FakeCompletion{
+        .{ .tool_calls = &calls },
+        .{ .content = "Final" },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    defer hooks.deinit();
+    var shell_runtime = ShellAgentToolRuntime.init(alloc);
+    defer shell_runtime.deinit();
+    hooks.tool_execution_override = shell_runtime.override();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.permission_mode = .auto;
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
+
+    const execution = hooks.history_turns.items[0].assistant.execution;
+    const persisted_output = execution.tool_steps[0].tool_results[0].output;
+    try std.testing.expectEqual(@as(usize, 2), countNeedle(persisted_output, "[redacted:GH_TOKEN]"));
+    try std.testing.expect(std.mem.find(u8, persisted_output, "unrelated-string") != null);
+    try std.testing.expect(std.mem.find(u8, persisted_output, token) == null);
+
+    try std.testing.expectEqual(@as(usize, 2), gateway.request_bodies.items.len);
+    try expectBodyContains(&gateway, 1, "[redacted:GH_TOKEN]");
+    try expectBodyNotContains(&gateway, 1, token);
+
+    var saw_redacted_terminal = false;
+    for (hooks.lifecycle_events.items) |event| {
+        switch (event) {
+            .progress => |progress| try std.testing.expect(std.mem.find(u8, progress.text, token) == null),
+            .terminal => |terminal| {
+                if (terminal.result) |result| {
+                    try std.testing.expect(std.mem.find(u8, result, token) == null);
+                    if (std.mem.find(u8, result, "[redacted:GH_TOKEN]") != null) saw_redacted_terminal = true;
+                }
+                if (terminal.result_memory) |memory| {
+                    if (memory.preview) |preview| {
+                        try std.testing.expect(std.mem.find(u8, preview, token) == null);
+                        if (std.mem.find(u8, preview, "[redacted:GH_TOKEN]") != null) saw_redacted_terminal = true;
+                    }
+                }
+            },
+            .provisional, .authoritative_started, .turn_finished => {},
+        }
+    }
+    try std.testing.expect(saw_redacted_terminal);
+    for (hooks.texts.items) |text| try std.testing.expect(std.mem.find(u8, text, token) == null);
 }
 
 test "vision OOM propagates through assembled orchestrator without a tool result" {
