@@ -82,6 +82,28 @@ fn tick(host: &DocHost, workspace: &WorkspaceHost, sessions: &SessionsEngine, po
         if let Err(err) = tick_project(host, sessions, &chat_id, &cwd, poll_github) {
             tracing::warn!(chat = %chat_id, error = %err, "subscription project tick failed");
         }
+        tick_goal(host, sessions, &chat_id, &cwd);
+    }
+}
+
+/// The durable goal: wake idle Main when the goal's interval has passed.
+/// A running turn is never steered; the wake waits for the next tick that
+/// finds Main idle. The record is stamped before the wake is queued, so a
+/// queue failure costs one interval, not a wake storm.
+fn tick_goal(host: &DocHost, sessions: &SessionsEngine, chat_id: &str, cwd: &str) {
+    let working = sessions.is_working(chat_id);
+    let Some(body) = crate::arbos_goal::take_goal_wake(Path::new(cwd), working) else {
+        return;
+    };
+    match queue_wake(host, sessions, chat_id, cwd, &body) {
+        Ok(()) => {
+            let id = crate::new_id();
+            crate::arbos_remote::note_worked(cwd, &id, "Worked · Goal wake.");
+            tracing::info!(chat = %chat_id, "goal wake queued");
+        }
+        Err(err) => {
+            tracing::warn!(chat = %chat_id, error = %err, "goal wake was not queued")
+        }
     }
 }
 

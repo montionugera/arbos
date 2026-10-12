@@ -30,7 +30,91 @@ The checklist is only the active goal's steps. Do not add a step from an older g
 When you tick one step, leave the other steps of this goal in place. \
 A `/goal` line already includes the workers to spawn. Send them at once. Do not wait for `/skill`. \
 An Active goal in GOALS.md stays active after a worker reports. Do not remove it. \
-Goals: `.arbos/context/GOALS.md`. Status: `.arbos/context/status.md`. Read them before acting.";
+Goals: `.arbos/context/GOALS.md`. Status: `.arbos/context/status.md`. Read them before acting. \
+The goal tools are mcp_arbos_goal_show, mcp_arbos_goal_schedule, mcp_arbos_goal_pause, mcp_arbos_goal_resume, mcp_arbos_goal_complete, and mcp_arbos_goal_clear. \
+A goal wake is a Worked line that carries <system_notification source=\"goal\">. It is not a message from the person. \
+On a goal wake, make progress or end the turn quietly. Call mcp_arbos_goal_complete only when the objective is proven. \
+Call mcp_arbos_goal_schedule with seconds to choose how long to wait before the next wake. \
+Stop ends the turn only; the goal stays until it is cleared or complete. \
+mcp_arbos_preferences_write saves one dated line about how the person wants work done, across every project. \
+Use it only when the person states a preference, corrects you, or repeats the same request.";
+
+/// Main's full system prompt. `preferences` is the text of
+/// `~/.arbos/preferences.md`; an empty string adds nothing.
+pub fn coordinator_prompt(preferences: &str) -> String {
+    let preferences = preferences.trim();
+    if preferences.is_empty() {
+        return COORDINATOR_PROMPT.to_owned();
+    }
+    format!(
+        "{COORDINATOR_PROMPT}\nHow the person wants work done, across every project:\n{preferences}"
+    )
+}
+
+/// Longest preference line `preferences.write` keeps.
+const PREFERENCE_CHARS: usize = 300;
+
+/// `~/.arbos/preferences.md`, the user-scope store. `ARBOS_CONFIG_DIR`
+/// moves it, as it moves every other user file.
+pub fn user_preferences_path() -> PathBuf {
+    crate::arbos_remote::config_dir().join("preferences.md")
+}
+
+/// The saved preference lines, one per line, for Main's prompt. Missing
+/// file: empty string.
+pub fn read_user_preferences() -> String {
+    read_preferences_at(&user_preferences_path())
+}
+
+/// `preferences.write { text }`: append one dated line. Returns the line.
+pub fn append_user_preference(text: &str) -> Result<String, String> {
+    append_preference_at(
+        &user_preferences_path(),
+        text,
+        chrono::Local::now().date_naive(),
+    )
+}
+
+fn read_preferences_at(path: &Path) -> String {
+    let Ok(text) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("- "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn append_preference_at(
+    path: &Path,
+    text: &str,
+    date: chrono::NaiveDate,
+) -> Result<String, String> {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return Err("the preference is empty".into());
+    }
+    if text.chars().count() > PREFERENCE_CHARS {
+        return Err(format!(
+            "keep a preference under {PREFERENCE_CHARS} characters"
+        ));
+    }
+    let line = format!("- {}: {text}", date.format("%Y-%m-%d"));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut body = fs::read_to_string(path).unwrap_or_else(|_| {
+        "# Preferences\n\nHow work should be done, in every project.\n".to_owned()
+    });
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&line);
+    body.push('\n');
+    fs::write(path, body).map_err(|e| e.to_string())?;
+    Ok(line)
+}
 
 pub const WORKER_PROMPT: &str = "\
 You are a worker. Do the brief. Do not spawn agents and do not edit project code. \
@@ -77,18 +161,24 @@ struct AgentFile {
     /// `local`, or the install name that runs this worker.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     machine: String,
+    /// Display name set by `agents.send { rename }`. Empty means the id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    name: String,
 }
 
 /// One row of `agents/*/agent.toml` for the tab strip and the list tool.
 #[derive(Debug, Clone)]
 pub struct AgentView {
     pub id: String,
+    /// The display name: the rename when there is one, else the id.
+    pub name: String,
     pub role: String,
     pub chat_id: String,
     pub status: String,
     pub brief: String,
     pub result: String,
     pub machine: String,
+    pub model: String,
 }
 
 /// A worker turn just ended. `main_chat_id` is the coordinator to wake.
@@ -107,12 +197,12 @@ pub struct TurnPrep {
     pub role: String,
 }
 
-fn layout_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn layout_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-fn root_of(project: &Path) -> PathBuf {
+pub(crate) fn root_of(project: &Path) -> PathBuf {
     project.join(".arbos")
 }
 
@@ -248,6 +338,9 @@ pub fn write_context(project: &Path, relative: &str, text: &str) -> Result<(), S
     if relative == "status.md" || relative == "archived.md" {
         return Err("Main writes the status page".into());
     }
+    if relative == "goal.toml" {
+        return Err("the goal tools write the goal record".into());
+    }
     let path = context_file(project, relative)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -367,6 +460,7 @@ fn begin_goal(project: &Path, title: &str) -> Result<String, String> {
     fs::write(&path, format!("{}\n", spec.write_line)).map_err(|e| e.to_string())?;
     write_goals(project, title, Some(&spec.name))?;
     install_goal_steps(project, &spec)?;
+    crate::arbos_goal::start_goal_unlocked(project, title)?;
     Ok(skill_prompt(&spec, Some(title)))
 }
 
@@ -400,9 +494,7 @@ fn skill_prompt(spec: &SkillSpec, goal: Option<&str>) -> String {
         spec.name, spec.write_path, spec.write_line
     ));
     prompt.push_str("The goal stays active. Do not edit GOALS.md.\n");
-    prompt.push_str(
-        "The person already started the goal. Do not wait for another command.\n",
-    );
+    prompt.push_str("The person already started the goal. Do not wait for another command.\n");
     prompt.push_str(
         "Spawn these workers at once, before you wait for any of them, even if their files already exist. Do not write their files yourself.\n",
     );
@@ -803,7 +895,10 @@ fn append_archived(project: &Path, section: &str, lines: &[String]) -> Result<()
     if !body.contains("# Archived") {
         body = format!("# Archived\n\n{body}");
     }
-    let fresh: Vec<&String> = lines.iter().filter(|line| !body.contains(line.as_str())).collect();
+    let fresh: Vec<&String> = lines
+        .iter()
+        .filter(|line| !body.contains(line.as_str()))
+        .collect();
     if fresh.is_empty() {
         return Ok(());
     }
@@ -883,7 +978,11 @@ fn publish_status_page_unlocked(project: &Path) -> Result<(), String> {
         let target = format!("research/{}.md", agent.id);
         let rank = file_rank(&root.join("agents").join(&agent.id).join("agent.toml"));
         let readout = context_first_line(project, &target).unwrap_or_else(|| {
-            let line = agent.result.lines().map(str::trim).find(|line| !line.is_empty());
+            let line = agent
+                .result
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty());
             match line {
                 Some(line) if !line.contains('/') && line.chars().count() <= 72 => {
                     let mut text = line.trim_end_matches('.').to_owned();
@@ -1079,13 +1178,13 @@ pub fn prepare_turn(project: &Path, chat_id: &str) -> Option<TurnPrep> {
     let fx = root.join("agents").join(&agent.id).join("fx");
     fs::create_dir_all(&fx).ok()?;
     let system_prompt = match agent.role.as_str() {
-        "coordinator" => COORDINATOR_PROMPT,
-        "worker" => WORKER_PROMPT,
-        _ => CHAT_PROMPT,
+        "coordinator" => coordinator_prompt(&read_user_preferences()),
+        "worker" => WORKER_PROMPT.to_owned(),
+        _ => CHAT_PROMPT.to_owned(),
     };
     Some(TurnPrep {
         fx_home: fx.display().to_string(),
-        system_prompt: system_prompt.to_owned(),
+        system_prompt,
         agent_id: agent.id,
         role: agent.role,
     })
@@ -1137,6 +1236,7 @@ fn coordinator_agent() -> AgentFile {
         status: String::new(),
         result: String::new(),
         machine: String::new(),
+        name: String::new(),
     }
 }
 
@@ -1192,6 +1292,7 @@ pub fn reserve_worker(
         status: String::new(),
         result: String::new(),
         machine: String::new(),
+        name: String::new(),
     });
     if agent.role == "coordinator" {
         return Err("main is the coordinator".into());
@@ -1273,15 +1374,72 @@ pub fn worker_result(project: &Path, name: &str) -> Result<AgentView, String> {
 }
 
 fn agent_view(agent: AgentFile) -> AgentView {
+    let name = if agent.name.trim().is_empty() {
+        agent.id.clone()
+    } else {
+        agent.name.trim().to_owned()
+    };
     AgentView {
         id: agent.id,
+        name,
         role: agent.role,
         chat_id: agent.chat_id,
         status: agent.status,
         brief: agent.brief,
         result: agent.result,
         machine: agent.machine,
+        model: agent.model,
     }
+}
+
+/// Longest display name `agents.send { rename }` keeps.
+const AGENT_NAME_CHARS: usize = 40;
+
+/// `agents.send { rename }`: change a worker's display name. The id, the
+/// folder, and the chat id stay the same.
+pub fn rename_worker(project: &Path, worker_id: &str, name: &str) -> Result<AgentView, String> {
+    let _guard = layout_lock();
+    let name: String = name.trim().chars().take(AGENT_NAME_CHARS).collect();
+    let name = name.trim().to_owned();
+    if name.is_empty() || name.contains(['\n', '\r']) {
+        return Err("the new name is empty".into());
+    }
+    update_worker(project, worker_id, |agent| {
+        agent.name = name;
+        Ok(())
+    })
+}
+
+/// `agents.send { model }`: the model a worker uses from its next turn. A
+/// running turn keeps the model it started with.
+pub fn set_worker_model(project: &Path, worker_id: &str, model: &str) -> Result<AgentView, String> {
+    let _guard = layout_lock();
+    let model = model.trim().to_owned();
+    if model.is_empty() || model.contains(char::is_whitespace) {
+        return Err("name one model".into());
+    }
+    update_worker(project, worker_id, |agent| {
+        agent.model = model;
+        Ok(())
+    })
+}
+
+fn update_worker<F>(project: &Path, worker_id: &str, change: F) -> Result<AgentView, String>
+where
+    F: FnOnce(&mut AgentFile) -> Result<(), String>,
+{
+    let id = slug(worker_id);
+    if id.is_empty() {
+        return Err("name the worker".into());
+    }
+    let path = root_of(project).join("agents").join(&id).join("agent.toml");
+    let mut agent = read_agent(&path).ok_or_else(|| "no such worker".to_string())?;
+    if agent.role != "worker" {
+        return Err("only a worker can be renamed or re-modeled".into());
+    }
+    change(&mut agent)?;
+    write_toml(&path, &agent)?;
+    Ok(agent_view(agent))
 }
 
 fn worker_id(project: &Path, name: &str) -> Result<String, String> {
@@ -1369,6 +1527,7 @@ fn bind_agent(root: &Path, chat_id: &str) -> Result<AgentFile, String> {
                 status: String::new(),
                 result: String::new(),
                 machine: String::new(),
+                name: String::new(),
             };
             let dir = root.join("agents").join(&id);
             fs::create_dir_all(dir.join("fx")).map_err(|e| e.to_string())?;
@@ -1490,4 +1649,168 @@ fn git_clean(root: &Path) -> bool {
         return true;
     };
     output.stdout.iter().all(|byte| byte.is_ascii_whitespace())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arbos_goal::{self, GoalState};
+
+    fn worker_file(id: &str, chat_id: &str, status: &str) -> AgentFile {
+        AgentFile {
+            id: id.into(),
+            role: "worker".into(),
+            chat_id: chat_id.into(),
+            model: "glm-5.3".into(),
+            parent: "main".into(),
+            brief: "the brief".into(),
+            status: status.into(),
+            result: String::new(),
+            machine: "local".into(),
+            name: String::new(),
+        }
+    }
+
+    fn put_agent(project: &Path, agent: &AgentFile) {
+        let dir = root_of(project).join("agents").join(&agent.id);
+        fs::create_dir_all(dir.join("fx")).unwrap();
+        write_toml(&dir.join("agent.toml"), agent).unwrap();
+    }
+
+    #[test]
+    fn rename_changes_the_display_name_and_keeps_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        put_agent(project, &worker_file("oak", "chat-oak", "working"));
+        let mut main = coordinator_agent();
+        main.chat_id = "chat-main".into();
+        put_agent(project, &main);
+
+        let before = worker_result(project, "oak").unwrap();
+        assert_eq!(before.name, "oak");
+        let renamed = rename_worker(project, "oak", "  Oak the tester  ").unwrap();
+        assert_eq!(renamed.id, "oak");
+        assert_eq!(renamed.name, "Oak the tester");
+        assert_eq!(renamed.chat_id, "chat-oak");
+        assert_eq!(
+            worker_result(project, "oak").unwrap().name,
+            "Oak the tester"
+        );
+        assert!(
+            agents(project)
+                .iter()
+                .any(|row| row.id == "oak" && row.name == "Oak the tester")
+        );
+        // A long name is cut; an empty one is refused; Main is not a worker.
+        let long = "x".repeat(100);
+        assert_eq!(
+            rename_worker(project, "oak", &long)
+                .unwrap()
+                .name
+                .chars()
+                .count(),
+            AGENT_NAME_CHARS
+        );
+        assert!(rename_worker(project, "oak", "   ").is_err());
+        assert!(rename_worker(project, "main", "Boss").is_err());
+        assert!(rename_worker(project, "nobody", "x").is_err());
+        // The id-based lookups still work after a rename.
+        assert!(worker_result(project, "Oak").is_ok());
+    }
+
+    #[test]
+    fn model_is_stored_for_the_next_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        put_agent(project, &worker_file("oak", "chat-oak", "working"));
+        assert_eq!(worker_result(project, "oak").unwrap().model, "glm-5.3");
+        let changed = set_worker_model(project, "oak", " claude-x ").unwrap();
+        assert_eq!(changed.model, "claude-x");
+        assert_eq!(worker_result(project, "oak").unwrap().model, "claude-x");
+        assert!(set_worker_model(project, "oak", "").is_err());
+        assert!(set_worker_model(project, "oak", "two words").is_err());
+        assert_eq!(worker_result(project, "oak").unwrap().model, "claude-x");
+        // The rename did not touch the model, and the model did not touch the name.
+        rename_worker(project, "oak", "Oak").unwrap();
+        let view = worker_result(project, "oak").unwrap();
+        assert_eq!(
+            (view.name.as_str(), view.model.as_str()),
+            ("Oak", "claude-x")
+        );
+    }
+
+    #[test]
+    fn a_finishing_worker_does_not_resume_a_paused_goal() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        fs::create_dir_all(root_of(project).join("context")).unwrap();
+        let mut main = coordinator_agent();
+        main.chat_id = "chat-main".into();
+        put_agent(project, &main);
+        put_agent(project, &worker_file("oak", "chat-oak", "working"));
+        arbos_goal::start_goal(project, "Ship the thing").unwrap();
+        arbos_goal::pause_goal(project).unwrap();
+
+        let done = finish_worker(project, "chat-oak", "done", "Oak is ready.").unwrap();
+        assert_eq!(done.main_chat_id, "chat-main");
+        let goal = arbos_goal::read_goal(project).unwrap();
+        assert_eq!(goal.state, GoalState::Paused);
+        assert_eq!(goal.wakes, 0);
+        assert!(arbos_goal::take_goal_wake(project, false).is_none());
+        // A complete goal stays complete through a worker report as well.
+        arbos_goal::complete_goal(project).unwrap();
+        put_agent(project, &worker_file("pine", "chat-pine", "working"));
+        finish_worker(project, "chat-pine", "done", "Pine is ready.").unwrap();
+        assert_eq!(
+            arbos_goal::read_goal(project).unwrap().state,
+            GoalState::Complete
+        );
+    }
+
+    #[test]
+    fn goal_record_is_not_writable_through_context_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        fs::create_dir_all(root_of(project).join("context")).unwrap();
+        assert!(write_context(project, "goal.toml", "state = \"active\"").is_err());
+        assert!(write_context(project, "research/note.md", "fine").is_ok());
+    }
+
+    #[test]
+    fn preferences_read_and_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deeper").join("preferences.md");
+        assert_eq!(read_preferences_at(&path), "");
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
+        assert!(append_preference_at(&path, "   ", date).is_err());
+        assert!(append_preference_at(&path, &"x".repeat(PREFERENCE_CHARS + 1), date).is_err());
+        assert!(!path.exists());
+
+        let first = append_preference_at(&path, "  Short answers.\nNo lists. ", date).unwrap();
+        assert_eq!(first, "- 2026-10-12: Short answers. No lists.");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# Preferences\n"));
+        assert!(text.ends_with("- 2026-10-12: Short answers. No lists.\n"));
+
+        let later = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        append_preference_at(&path, "Ask before deleting.", later).unwrap();
+        assert_eq!(
+            read_preferences_at(&path),
+            "- 2026-10-12: Short answers. No lists.\n- 2026-11-01: Ask before deleting."
+        );
+        // The heading is not a preference line.
+        assert!(!read_preferences_at(&path).contains("# Preferences"));
+    }
+
+    #[test]
+    fn main_prompt_carries_the_preferences_each_turn() {
+        assert_eq!(coordinator_prompt(""), COORDINATOR_PROMPT);
+        assert_eq!(coordinator_prompt("  \n "), COORDINATOR_PROMPT);
+        let prompt = coordinator_prompt("- 2026-10-12: Short answers.");
+        assert!(prompt.starts_with(COORDINATOR_PROMPT));
+        assert!(prompt.ends_with("across every project:\n- 2026-10-12: Short answers."));
+        assert!(COORDINATOR_PROMPT.contains("mcp_arbos_goal_schedule"));
+        assert!(COORDINATOR_PROMPT.contains("mcp_arbos_preferences_write"));
+        assert!(COORDINATOR_PROMPT.contains("make progress or end the turn quietly"));
+    }
 }
