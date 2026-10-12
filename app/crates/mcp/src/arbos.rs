@@ -1,5 +1,6 @@
-//! The `arbos` tool catalog. Main sees `agents.*` and `context.*`.
-//! A worker sees `context.*` only, so a worker cannot spawn another worker.
+//! The `arbos` tool catalog. Main sees `agents.*`, `status.step`, and
+//! `context.*`. A worker sees `context.*` only, so a worker cannot spawn
+//! another worker.
 
 use serde_json::{Value, json};
 
@@ -10,6 +11,7 @@ const ARBOS_INSTRUCTIONS: &str = "\
 This server is the Arbos project. \
 agents.spawn starts a worker and returns at once. \
 machine is local or the name of a registered install. \
+status.step sets the live step the person sees: six words at most, starting with a verb. \
 context.read and context.write use paths under the project context directory, \
 such as research/note.md or status.md. \
 Workers do not have the agents tools.";
@@ -64,6 +66,17 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
                     "required": ["name"]
                 }),
             ),
+            tool(
+                "status.step",
+                "Set the live step the person sees while you work. Six words at most, starting with a verb, such as Checking the gate. It clears when the turn ends.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "The step, six words at most, starting with a verb." }
+                    },
+                    "required": ["text"]
+                }),
+            ),
         ]);
     }
     tools.extend([
@@ -96,8 +109,8 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
 
 pub async fn call(zeron: &Zeron, name: &str, args: Value) -> Result<Value, String> {
     let profile = std::env::var("ARBOS_MCP").unwrap_or_default();
-    if profile != "coordinator" && name.starts_with("agents.") {
-        return Err("workers cannot call agents tools".into());
+    if profile != "coordinator" && (name.starts_with("agents.") || name.starts_with("status.")) {
+        return Err("workers cannot call agents or status tools".into());
     }
     if !catalog(&profile).iter().any(|tool| tool.name == name) {
         return Err(format!("unknown tool: {name}"));
@@ -125,6 +138,7 @@ fn op_for(name: &str) -> &'static str {
         "agents.send" => "send",
         "agents.list" => "list",
         "agents.result" => "result",
+        "status.step" => "step",
         "context.read" => "read",
         "context.write" => "write",
         _ => "",
