@@ -1330,9 +1330,35 @@ fn first_clean_sentence(text: &str) -> Option<String> {
         if !out.ends_with('.') && !out.ends_with('!') && !out.ends_with('?') {
             out.push('.');
         }
+        if !person_can_read(&out) {
+            continue;
+        }
         return Some(out);
     }
     None
+}
+
+/// A plan sentence a person can read. A wake about files, ticks, or a
+/// checklist is not that sentence.
+fn person_can_read(sentence: &str) -> bool {
+    let lower = sentence.to_ascii_lowercase();
+    if lower.contains("on this goal") {
+        return true;
+    }
+    if sentence.chars().count() > 80 {
+        return false;
+    }
+    const HIDDEN: &[&str] = &[
+        "checklist",
+        "tick",
+        "verify",
+        "status",
+        "report",
+        "file",
+        "path",
+        "goal.md",
+    ];
+    !HIDDEN.iter().any(|word| lower.contains(word))
 }
 
 /// Main shows one plan sentence. A paragraph that names a file is not shown.
@@ -4927,9 +4953,26 @@ impl Transcript {
                 0
             };
             let entries = &entries[turn_at..];
+            let mut plan_line = false;
             for entry in entries.iter() {
-                let planned = (main_chat && entry.role == MessageRole::Assistant)
-                    .then(|| plan_entry(entry));
+                let is_plan = main_chat
+                    && entry.role == MessageRole::System
+                    && user_plain_text(entry).contains("on this goal");
+                if is_plan {
+                    if plan_line {
+                        continue;
+                    }
+                    plan_line = true;
+                }
+                let planned = (main_chat && entry.role == MessageRole::Assistant).then(|| {
+                    let mut filtered = plan_entry(entry);
+                    if plan_line {
+                        filtered
+                            .parts
+                            .retain(|part| !matches!(part, MessagePart::Text { .. }));
+                    }
+                    filtered
+                });
                 let shortened = (main_chat && worker_report_line(entry))
                     .then(|| shorten_worker_report(entry));
                 let entry = planned

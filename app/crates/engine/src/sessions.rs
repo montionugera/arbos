@@ -335,6 +335,22 @@ impl SessionsEngine {
         }
     }
 
+    /// One short sentence under the typed `/goal` line. Main keeps this
+    /// sentence. It does not keep a file path.
+    fn write_goal_plan(&self, chat_id: &str, shown: &str, cwd: &str) {
+        let trimmed = shown.trim();
+        if !trimmed.starts_with("/goal ") {
+            return;
+        }
+        let Some(sentence) = crate::arbos_layout::plan_sentence(std::path::Path::new(cwd)) else {
+            return;
+        };
+        let Ok(handle) = self.doc_handle(chat_id) else {
+            return;
+        };
+        let _ = handle.write_system_message(&format!("plan-{}", new_id()), &sentence, now_ms());
+    }
+
     fn doc_handle(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
         let host = self
             .inner
@@ -682,6 +698,7 @@ impl SessionsEngine {
                 }
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &shown, now_ms())?;
+                self.write_goal_plan(chat_id, &shown, &request.cwd);
                 self.note_turn_start(chat_id, &request.cwd);
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
@@ -740,6 +757,7 @@ impl SessionsEngine {
         let user_id = message_id.unwrap_or_else(new_id);
         if !idle {
             handle.write_user_message(&user_id, &shown, now_ms())?;
+            self.write_goal_plan(chat_id, &shown, &request.cwd);
         }
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
@@ -985,6 +1003,9 @@ impl SessionsEngine {
         }
         let handle = self.doc_handle(chat_id)?;
         handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
+        if let Some(request) = self.last_request(chat_id) {
+            self.write_goal_plan(chat_id, prompt, &request.cwd);
+        }
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
         if let Some(request) = self.last_request(chat_id) {
@@ -2126,15 +2147,15 @@ fn wake_if_worker(inner: &Inner, chat_id: &str, cwd: &str, status: &DoneStatus, 
         return;
     };
     let working = lock(&inner.runs).contains_key(&done.main_chat_id);
-    let queued = if working {
-        host.queue_command(
-            &done.main_chat_id,
-            SessionCommandPayload::Steer {
-                prompt,
-                message_id: Some(new_id()),
-            },
-        )
-    } else {
+    if working {
+        let headline = body.trim().lines().next().unwrap_or("").trim();
+        let line = format!("Worked · {headline}");
+        if let Ok(handle) = host.open(&done.main_chat_id) {
+            let _ = handle.write_system_message(&new_id(), &line, now_ms());
+        }
+        return;
+    }
+    let queued = {
         let mut request = lock(&inner.last_requests)
             .get(&done.main_chat_id)
             .cloned()

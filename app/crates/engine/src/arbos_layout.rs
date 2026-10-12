@@ -430,6 +430,12 @@ fn skill_prompt(spec: &SkillSpec, goal: Option<&str>) -> String {
     prompt
 }
 
+/// The one sentence Main shows for the split workers.
+pub fn plan_sentence(project: &Path) -> Option<String> {
+    let spec = load_skill(project, "split").ok()?;
+    Some(worker_plan_sentence(&spec.workers))
+}
+
 fn worker_plan_sentence(workers: &[(String, String, String)]) -> String {
     let names: Vec<String> = workers
         .iter()
@@ -581,6 +587,48 @@ fn set_step_inner(project: &Path, text: &str, done: bool, force: bool) -> Result
         current.push('\n');
     }
     fs::write(path, current).map_err(|e| e.to_string())
+}
+
+/// Mark this worker's checklist line done. A trailing period does not matter.
+fn tick_worker_ready(project: &Path, worker_id: &str) {
+    let mut chars = worker_id.chars();
+    let Some(first) = chars.next() else {
+        return;
+    };
+    let name = first.to_uppercase().collect::<String>() + chars.as_str();
+    let want = format!("{name} is ready");
+    let path = root_of(project).join("context").join("status.md");
+    let Ok(current) = fs::read_to_string(&path) else {
+        return;
+    };
+    let mut changed = false;
+    let lines: Vec<String> = current
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            let rest = trimmed
+                .strip_prefix("- [ ]")
+                .or_else(|| trimmed.strip_prefix("- [x]"))
+                .or_else(|| trimmed.strip_prefix("- [X]"));
+            let Some(rest) = rest else {
+                return line.to_owned();
+            };
+            let text = rest.trim().trim_end_matches('.').trim();
+            if text != want {
+                return line.to_owned();
+            }
+            changed = true;
+            format!("- [x] {}", rest.trim())
+        })
+        .collect();
+    if !changed {
+        return;
+    }
+    let mut out = lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    let _ = fs::write(path, out);
 }
 
 /// Checkbox rows from `context/status.md`, in file order.
@@ -782,6 +830,9 @@ pub fn finish_worker(
     agent.status = status.to_owned();
     agent.result = clip_result(result);
     write_toml(&path, &agent).ok()?;
+    if status == "done" {
+        tick_worker_ready(project, &agent.id);
+    }
     Some(WorkerDone {
         id: agent.id,
         main_chat_id,
