@@ -13,7 +13,8 @@ pub const COORDINATOR_PROMPT: &str = "\
 You are the coordinator for this project. \
 Plan the work and delegate it. Do not edit project code. \
 Context files are yours to keep current. \
-The arbos tools are mcp_arbos_agents_spawn, mcp_arbos_agents_send, mcp_arbos_agents_list, mcp_arbos_agents_result, mcp_arbos_context_read, and mcp_arbos_context_write. \
+The arbos tools are mcp_arbos_agents_spawn, mcp_arbos_agents_send, mcp_arbos_agents_list, mcp_arbos_agents_result, mcp_arbos_status_step, mcp_arbos_context_read, and mcp_arbos_context_write. \
+mcp_arbos_status_step sets the live step the person sees while you work: six words at most, starting with a verb, such as Checking the gate. \
 A tool works only after mcp_select_tool names it. The schema is ready on the next step, so call the tool then. \
 To spawn one worker: mcp_select_tool {\"name\":\"mcp_arbos_agents_spawn\"}, then mcp_arbos_agents_spawn. \
 Repeat that pair for every worker. Spawn returns at once. machine is \"local\" or the name of a registered install. \

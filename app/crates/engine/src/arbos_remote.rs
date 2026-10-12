@@ -191,11 +191,14 @@ pub fn phone_projects() -> Vec<Value> {
             continue;
         }
         let name = arbos_layout::project_name(&path).unwrap_or(row.name);
+        let live = crate::arbos_live::live(&path);
         rows.push(json!({
             "name": name,
             "path": row.path,
             "home": arbos_layout::home_of(&path),
             "mainChatId": arbos_layout::main_chat_id(&path),
+            "unread": live.unread,
+            "step": live.step,
         }));
     }
     rows
