@@ -32,13 +32,13 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
         tools.extend([
             tool(
                 "agents.spawn",
-                "Start a worker and return at once. machine is local or the name of a registered install. The worker runs the brief in its own chat.",
+                "Start a worker and return at once. machine is local or the name of a registered install. The worker runs the brief in its own chat. model must be a model the provider offers; an unknown model is refused and the refusal lists the models on offer, so pick from that list.",
                 json!({
                     "type": "object",
                     "properties": {
                         "brief": { "type": "string", "description": "What the worker should do." },
                         "name": { "type": "string", "description": "Short worker name. A slug is used when this is omitted." },
-                        "model": { "type": "string", "description": "Model id. Defaults to glm-5.3." },
+                        "model": { "type": "string", "description": "Model id, exactly as the provider lists it. Defaults to glm-5.3. Do not guess a slug; pick one from the list you are given." },
                         "readonly": { "type": "boolean", "description": "Run the worker read-only." },
                         "worktree": { "type": "boolean", "description": "Not available. Must be omitted or false." },
                         "machine": { "type": "string", "description": "local, or the name of a registered install." }

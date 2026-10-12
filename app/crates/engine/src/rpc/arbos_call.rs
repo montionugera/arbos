@@ -34,12 +34,12 @@ impl EngineRpc {
             return Err("that folder is not an Arbos project".into());
         }
         match op.as_str() {
-            "spawn" => self.spawn_worker(project_path, &params),
+            "spawn" => {
+                self.check_requested_model(&params).await?;
+                self.spawn_worker(project_path, &params)
+            }
             "send" => {
-                if let Some(model) = text_field(&params, "model") {
-                    let offered = self.offered_worker_models().await?;
-                    check_worker_model(&model, &offered)?;
-                }
+                self.check_requested_model(&params).await?;
                 self.send_worker(project_path, &params)
             }
             "list" => Ok(json!({ "agents": agent_rows(&arbos_layout::agents(project_path)) })),
@@ -154,8 +154,18 @@ impl EngineRpc {
         }
     }
 
+    /// A `model` in a spawn or send must be one the provider offers. A call
+    /// without a model is not checked; spawn keeps its default.
+    async fn check_requested_model(&self, params: &Value) -> Result<(), String> {
+        if text_field(params, "model").is_none() {
+            return Ok(());
+        }
+        let offered = self.offered_worker_models().await?;
+        check_params_model(params, &offered)
+    }
+
     /// The model ids the worker harness offers right now, or the last list it
-    /// fetched. A worker's model is checked against this before it changes.
+    /// fetched. A worker's model is checked against this before it is used.
     async fn offered_worker_models(&self) -> Result<Vec<String>, String> {
         let lease = std::sync::Arc::new(self.registry.execution_lease(HarnessId::Fx).await);
         let harness = self
@@ -579,8 +589,17 @@ fn origin_worker(project: &Path, params: &Value) -> Option<String> {
         .map(|agent| agent.id)
 }
 
-/// A worker's new model must be one the provider offers. The refusal names
-/// the models on offer so Main can pick from them.
+/// The `model` of a spawn or send, checked against the models on offer. No
+/// model means nothing to check.
+fn check_params_model(params: &Value, offered: &[String]) -> Result<(), String> {
+    match text_field(params, "model") {
+        Some(model) => check_worker_model(&model, offered),
+        None => Ok(()),
+    }
+}
+
+/// A worker's model must be one the provider offers. The refusal names the
+/// models on offer so Main can pick from them.
 fn check_worker_model(requested: &str, offered: &[String]) -> Result<(), String> {
     let requested = requested.trim();
     if offered.iter().any(|id| id == requested) {
@@ -729,5 +748,22 @@ mod tests {
         // Close is not the same model.
         assert!(check_worker_model("glm-5", &offered()).is_err());
         assert!(check_worker_model("GLM-5.3", &offered()).is_err());
+    }
+
+    #[test]
+    fn a_spawn_with_a_model_not_on_offer_is_refused_with_the_list() {
+        let spawn = json!({ "op": "spawn", "brief": "Write the note", "model": "glm-4.7" });
+        let err = check_params_model(&spawn, &offered()).unwrap_err();
+        assert_eq!(
+            err,
+            "the model glm-4.7 is not on offer; pick one of: glm-5.3, glm-5.2, kimi-k2"
+        );
+        let known = json!({ "op": "spawn", "brief": "Write the note", "model": "glm-5.2" });
+        assert_eq!(check_params_model(&known, &offered()), Ok(()));
+        // No model: the spawn keeps its default and nothing is checked.
+        let default = json!({ "op": "spawn", "brief": "Write the note" });
+        assert_eq!(check_params_model(&default, &offered()), Ok(()));
+        let blank = json!({ "op": "spawn", "brief": "Write the note", "model": "  " });
+        assert_eq!(check_params_model(&blank, &offered()), Ok(()));
     }
 }
