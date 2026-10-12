@@ -603,7 +603,7 @@ impl Shell {
             .when(!takeover, |el| {
                 el.child(
                     div()
-                        .min_w_0()
+                        .flex_none()
                         .overflow_hidden()
                         .flex()
                         .flex_row()
@@ -635,7 +635,7 @@ impl Shell {
                         ),
                 )
             })
-            .child(div().flex_1())
+            .child(self.render_project_tabs(cx))
             .children(session_info_toggle)
             .children(trailing);
 

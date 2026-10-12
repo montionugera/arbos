@@ -18,6 +18,7 @@ use crate::theme::Theme;
 use super::Shell;
 
 pub(super) const RAIL_WIDTH: f32 = 88.0;
+#[allow(dead_code)]
 pub(super) const TAB_HEIGHT: f32 = 36.0;
 const EXTRA_VISIBLE: usize = 2;
 
@@ -143,19 +144,15 @@ impl Shell {
         let shown_ix = visible_extra_indexes(&extras, selected.as_deref());
         let hidden = extras.len().saturating_sub(shown_ix.len());
         let mut strip = div()
-            .absolute()
-            .top(px(Theme::TITLEBAR_HEIGHT))
-            .left_0()
-            .right_0()
-            .h(px(TAB_HEIGHT))
+            .min_w_0()
+            .flex_1()
+            .h_full()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(4.0))
-            .px(px(8.0))
-            .bg(theme.surface)
-            .border_b_1()
-            .border_color(theme.border)
+            .pl(px(12.0))
+            .overflow_hidden()
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
         if let Some(tab) = main {
             strip = strip.child(self.chat_tab(&tab, selected.as_deref(), surface, &theme, cx));
@@ -328,7 +325,7 @@ impl Shell {
         let Some(project) = self.selected_project(cx) else {
             return div()
                 .size_full()
-                .pt(px(Theme::TITLEBAR_HEIGHT + TAB_HEIGHT))
+                .pt(px(Theme::TITLEBAR_HEIGHT))
                 .child("Add a project to open Context")
                 .into_any_element();
         };
@@ -341,7 +338,7 @@ impl Shell {
             .flex_none()
             .border_r_1()
             .border_color(theme.border)
-            .pt(px(Theme::TITLEBAR_HEIGHT + TAB_HEIGHT + 8.0))
+            .pt(px(Theme::TITLEBAR_HEIGHT + 8.0))
             .px(px(8.0))
             .flex()
             .flex_col()
@@ -384,7 +381,7 @@ impl Shell {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .pt(px(Theme::TITLEBAR_HEIGHT + TAB_HEIGHT + 8.0))
+                    .pt(px(Theme::TITLEBAR_HEIGHT + 8.0))
                     .px(px(12.0))
                     .gap(px(8.0))
                     .child(

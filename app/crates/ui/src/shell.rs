@@ -11042,10 +11042,19 @@ impl Shell {
             self.reduced_motion,
             frame_time,
         );
+        let chat_has_messages = {
+            let state = self.state.read(cx);
+            !state.transcript.is_empty() || !state.pending_echoes().is_empty()
+        };
+        // A new chat has no messages yet, so the bar stays in the center.
+        // Until history arrives, keep the bar down so an existing chat does
+        // not jump. After the first message it sits under the transcript.
+        let composer_docked = has_selection
+            && (chat_has_messages || !self.state.read(cx).transcript_replayed);
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
-                .tick(has_selection, self.reduced_motion, frame_time);
+                .tick(composer_docked, self.reduced_motion, frame_time);
         if dock_frame.active {
             self.motion_active.set(true);
         }
@@ -11302,7 +11311,7 @@ impl Shell {
                             // Fully faded BY the titlebar's bottom edge (the
                             // title text is opaque — overlap read as collision),
                             // ramping in the band just below it.
-                            .inset_top(Theme::TITLEBAR_HEIGHT + project_chrome::TAB_HEIGHT)
+                            .inset_top(Theme::TITLEBAR_HEIGHT)
                             .band_top(Theme::TRANSCRIPT_FADE_BAND)
                             .band_bottom(bottom_band),
                             terminal_geometry.clone(),
@@ -11406,7 +11415,6 @@ impl Shell {
                     })
                     .child(self.render_terminal_container(terminal_geometry, window, cx))
             })
-            .child(self.render_project_tabs(cx))
             .children(self.render_icon_menu(cx))
             .child(Self::attachment_drop_overlay(theme))
             .child(Self::mention_drop_overlay(theme))
