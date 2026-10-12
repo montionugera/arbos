@@ -371,6 +371,34 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_subscriptions_add_writes_becomes_a_row() {
+        let subs = vec![
+            sub("pr-12", "github_pr", "unarbos/arbos#12", false),
+            sub("ci-main", "github_ci", "unarbos/arbos main", false),
+            sub("every-600s", "timer", "Every 600 seconds", false),
+            sub("daily-0830", "timer", "Daily at 08:30", false),
+        ];
+        let rows = listening_rows(&subs, &[], &no_chat);
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Pull request unarbos/arbos#12",
+                "CI on unarbos/arbos main",
+                "Every 600 seconds",
+                "Daily at 08:30",
+            ]
+        );
+        for (row, id) in rows.iter().zip(["pr-12", "ci-main", "every-600s", "daily-0830"]) {
+            assert_eq!(
+                row.waits,
+                Waits::Subscription { id: id.into() },
+                "each row keeps the file's id for its Stop"
+            );
+        }
+    }
+
+    #[test]
     fn the_pill_hides_when_nothing_is_live_or_off_main() {
         assert!(!pill_shown(true, &[]));
         let only_expired = listening_rows(

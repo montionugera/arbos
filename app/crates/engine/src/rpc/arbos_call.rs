@@ -139,6 +139,15 @@ impl EngineRpc {
                 arbos_live::mark_seen(project_path)?;
                 Ok(live_row(project_path))
             }
+            "subscriptions_add" => {
+                let new: arbos_wakes::NewSubscription = serde_json::from_value(params.clone())
+                    .map_err(|_| "the subscription fields were not read".to_string())?;
+                let subscription = arbos_wakes::add_subscription(project_path, &new)?;
+                Ok(json!({
+                    "subscription": subscription,
+                    "subscriptions": arbos_wakes::subscriptions(project_path),
+                }))
+            }
             "subscriptions_list" => Ok(json!({
                 "subscriptions": arbos_wakes::subscriptions(project_path),
             })),

@@ -16,6 +16,7 @@ agents.send steers a running worker, renames it, or changes its model for the ne
 goal.show, goal.schedule, goal.pause, goal.resume, goal.complete, and goal.clear manage the project's durable goal. \
 preferences.write appends one dated line to the person's preferences, shared by every project. \
 status.step sets the live step the person sees: six words at most, starting with a verb. \
+subscriptions.add subscribes Main to a GitHub pull request, a CI branch, or a timer; the Listening pill shows the new row. \
 context.usage reports how full the context window is. \
 context.read and context.write use paths under the project context directory, \
 such as internal/note.md or docs/report.md. status.md is read-only; the engine rewrites it after every turn. \
@@ -152,6 +153,25 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
                 }),
             ),
             tool(
+                "subscriptions.add",
+                "Subscribe Main to a GitHub pull request, a CI branch, or a timer. The Listening pill shows the new row, and the engine wakes Main when it fires. kind is github_pr with repo owner/name and pr, github_ci with repo and branch, or timer with everySeconds, or hour and minute for a daily time. The same subscription twice is refused.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "description": "github_pr, github_ci, or timer." },
+                        "repo": { "type": "string", "description": "owner/name, for github_pr and github_ci." },
+                        "pr": { "type": "integer", "description": "The pull request number, for github_pr." },
+                        "branch": { "type": "string", "description": "The branch, for github_ci." },
+                        "everySeconds": { "type": "integer", "description": "Seconds between wakes, clamped 30 through 86400. A timer without this uses hour and minute." },
+                        "hour": { "type": "integer", "description": "0 through 23, for a daily timer." },
+                        "minute": { "type": "integer", "description": "0 through 59, default 0." },
+                        "name": { "type": "string", "description": "The row id, slugged from this. A default per kind when omitted." },
+                        "prompt": { "type": "string", "description": "One sentence each wake ends with, at most 300 characters." }
+                    },
+                    "required": ["kind"]
+                }),
+            ),
+            tool(
                 "context.usage",
                 "How full your context window is: percent used, tokens and percent of the window per bucket (system prompt, tools, rules, skills, summarized conversation, conversation), whether the buckets are fx's own measurement, and the tokens of recent turns.",
                 no_args(),
@@ -196,6 +216,7 @@ fn main_only(name: &str) -> bool {
         || name.starts_with("goal.")
         || name.starts_with("preferences.")
         || name.starts_with("status.")
+        || name.starts_with("subscriptions.")
         || name == "context.usage"
 }
 
@@ -247,6 +268,7 @@ fn op_for(name: &str) -> &'static str {
         "goal.clear" => "goal_clear",
         "preferences.write" => "preferences_write",
         "status.step" => "step",
+        "subscriptions.add" => "subscriptions_add",
         "context.usage" => "context_usage",
         "context.read" => "read",
         "context.write" => "write",
@@ -287,6 +309,7 @@ mod tests {
             "goal.clear",
             "preferences.write",
             "status.step",
+            "subscriptions.add",
             "context.usage",
             "context.read",
             "context.write",
@@ -345,5 +368,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn subscriptions_add_needs_a_kind_and_names_each_field() {
+        let add = catalog("coordinator")
+            .into_iter()
+            .find(|tool| tool.name == "subscriptions.add")
+            .unwrap();
+        assert_eq!(add.input_schema["required"], json!(["kind"]));
+        for field in [
+            "repo",
+            "pr",
+            "branch",
+            "everySeconds",
+            "hour",
+            "minute",
+            "name",
+            "prompt",
+        ] {
+            assert!(
+                add.input_schema["properties"].get(field).is_some(),
+                "{field} is missing"
+            );
+        }
+        assert!(add.input_schema["properties"].get("force").is_none());
+        assert_eq!(op_for("subscriptions.add"), "subscriptions_add");
+        assert!(
+            main_only("subscriptions.add"),
+            "a worker cannot subscribe for Main"
+        );
     }
 }
