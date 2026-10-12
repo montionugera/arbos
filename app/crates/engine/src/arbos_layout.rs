@@ -13,7 +13,7 @@ pub const COORDINATOR_PROMPT: &str = "\
 You are the coordinator for this project. \
 Plan the work and delegate it. Do not edit project code. \
 Context files are yours to keep current. \
-The arbos tools are mcp_arbos_agents_spawn, mcp_arbos_agents_send, mcp_arbos_agents_list, mcp_arbos_agents_result, mcp_arbos_agents_transcript, mcp_arbos_status_step, mcp_arbos_context_usage, mcp_arbos_context_read, and mcp_arbos_context_write. \
+The arbos tools are mcp_arbos_agents_spawn, mcp_arbos_agents_send, mcp_arbos_agents_list, mcp_arbos_agents_result, mcp_arbos_agents_transcript, mcp_arbos_status_step, mcp_arbos_subscriptions_add, mcp_arbos_context_usage, mcp_arbos_context_read, and mcp_arbos_context_write. \
 mcp_arbos_status_step sets the live step the person sees while you work: six words at most, starting with a verb, such as Checking the gate. \
 A tool works only after mcp_select_tool names it. The schema is ready on the next step, so call the tool then. \
 To spawn one worker: mcp_select_tool {\"name\":\"mcp_arbos_agents_spawn\"}, then mcp_arbos_agents_spawn. \
@@ -27,6 +27,8 @@ Do not poll a worker; its completion will wake you. \
 mcp_arbos_agents_transcript shows a worker's last few turns. Look once, with a small tail, and do not read a worker's files to follow it. \
 When a worker finishes you see a Worked line. \
 A Worked line can also be a subscription wake, with no message from the person. Answer that wake in one sentence. \
+When the person asks to watch something, call mcp_arbos_subscriptions_add once: kind github_pr with repo and pr, kind github_ci with repo and branch, or kind timer with everySeconds or an hour and minute. \
+The Listening pill shows the new row; do not add another for the same wait. \
 The status page is rewritten when a worker reports. Do not write status.md yourself. \
 The person already has one plan sentence. Do not write another paragraph after a worker reports. \
 Do not name a file, a path, GOALS.md, or status.md in text the person reads. \
@@ -1938,7 +1940,9 @@ fn worker_id(project: &Path, name: &str) -> Result<String, String> {
     Err("too many workers".into())
 }
 
-fn slug(name: &str) -> String {
+/// Lowercase the name to `[a-z0-9-]`, at most 32 characters, with runs of
+/// other characters folded to one dash. Empty when nothing survives.
+pub fn slug(name: &str) -> String {
     let mut out = String::new();
     for ch in name.chars() {
         if ch.is_ascii_alphanumeric() {
@@ -2359,6 +2363,8 @@ mod tests {
         );
         assert!(COORDINATOR_PROMPT.contains("Do not poll a worker; its completion will wake you."));
         assert!(COORDINATOR_PROMPT.contains("mcp_arbos_agents_transcript"));
+        assert!(COORDINATOR_PROMPT.contains("mcp_arbos_subscriptions_add"));
+        assert!(COORDINATOR_PROMPT.contains("kind github_pr with repo and pr"));
     }
 
     #[test]
