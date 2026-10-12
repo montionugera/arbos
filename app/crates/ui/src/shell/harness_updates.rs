@@ -355,12 +355,15 @@ impl Shell {
 
     /// One surface, anchored by the Home mount. The bottom edge never moves;
     /// width, height, corner radius and row reveal share the shell resize clock.
+    #[allow(unreachable_code)]
     pub(super) fn render_harness_update_card(
         &mut self,
         window: &mut Window,
         main_width: f32,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let _ = (window, main_width, cx);
+        return None;
         self.refresh_harness_update_watch(cx);
         let marks = visible_rows(&self.harness_update_devices, |id| {
             self.state.read(cx).device_name(id).unwrap_or(id).to_owned()

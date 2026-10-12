@@ -17,7 +17,7 @@ use crate::theme::Theme;
 
 use super::Shell;
 
-pub(super) const RAIL_WIDTH: f32 = 52.0;
+pub(super) const RAIL_WIDTH: f32 = 88.0;
 pub(super) const TAB_HEIGHT: f32 = 36.0;
 const EXTRA_VISIBLE: usize = 2;
 
@@ -716,7 +716,7 @@ impl Shell {
         let icon = self.rail_icon(row, cx);
         div()
             .id(SharedString::from(format!("project-rail-{}", row.id)))
-            .w(px(48.0))
+            .w(px(80.0))
             .py(px(4.0))
             .rounded(px(8.0))
             .flex()
@@ -736,10 +736,12 @@ impl Shell {
             .child(icon)
             .child(
                 div()
-                    .text_size(px(8.0))
-                    .line_height(px(10.0))
-                    .text_color(theme.text_muted)
-                    .child(row.home.clone()),
+                    .max_w(px(76.0))
+                    .overflow_hidden()
+                    .text_size(px(11.0))
+                    .line_height(px(13.0))
+                    .text_color(if active { theme.text } else { theme.text_muted })
+                    .child(row.name.clone()),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_project(&space_id, cx);

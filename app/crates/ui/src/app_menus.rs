@@ -39,6 +39,8 @@ actions!(
 /// Register the global handlers backing the menu bar and its shortcuts. Call
 /// once at boot, before `cx.set_menus`.
 pub fn init(cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    present_as_arbos();
     #[cfg(all(target_os = "macos", not(test)))]
     native_quit::init(cx);
     cx.on_action(quit);
@@ -377,6 +379,20 @@ mod tests {
             Some(combo("ctrl-,"))
         );
         assert_eq!(find(&other, Quit.name()), None);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn present_as_arbos() {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let name: *mut Object = msg_send![
+            class!(NSString),
+            stringWithUTF8String: b"Arbos\0".as_ptr()
+        ];
+        let info: *mut Object = msg_send![class!(NSProcessInfo), processInfo];
+        let _: () = msg_send![info, setProcessName: name];
     }
 }
 

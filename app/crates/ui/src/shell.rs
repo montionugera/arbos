@@ -468,6 +468,9 @@ pub fn apply_keymap(
             NewSession,
             None,
         ),
+        // Command+ opens another chat in the same project.
+        KeyBinding::new(&platform_combo("mod-="), NewSession, None),
+        KeyBinding::new(&platform_combo("mod-shift-="), NewSession, None),
         KeyBinding::new(&platform_combo("mod-shift-c"), OpenContext, None),
         KeyBinding::new(&platform_combo("mod-shift-i"), OpenProjectIcon, None),
         KeyBinding::new(
@@ -1776,7 +1779,11 @@ fn local_work_phrase(chats: usize, spaces: usize) -> Option<String> {
     }
 }
 
+#[allow(unreachable_code)]
 fn account_menu_action(scope: Option<WorkspaceScope>, flow: SyncFlow) -> Option<AccountMenuAction> {
+    // Hosted account sync is not part of this build.
+    let _ = (scope, flow);
+    return None;
     match scope {
         Some(WorkspaceScope::Local) => match flow {
             SyncFlow::Idle => Some(AccountMenuAction::EnableSync),
@@ -3199,7 +3206,7 @@ impl Shell {
         if self.settings.sidebar_collapsed || !fit.sidebar {
             0.0
         } else {
-            project_chrome::RAIL_WIDTH
+            project_chrome::RAIL_WIDTH.min(fit.sidebar_limit)
         }
     }
 
@@ -8906,9 +8913,10 @@ impl Shell {
         )
     }
 
-    #[allow(unreachable_code)]
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // The left bar lists projects. The session list is not this screen.
         return self.render_project_rail(theme, cx);
+        #[allow(unreachable_code)]
         if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
         }) {
@@ -9400,7 +9408,10 @@ impl Shell {
     /// the background download and then "Restart to update"; installs that
     /// can't replace themselves explain why; advisory installs point at
     /// `zeron update` or the GitHub releases page and dismiss per version.
+    #[allow(unreachable_code)]
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let _ = (theme, cx);
+        return None;
         let update = crate::app_update::AppUpdate::global(cx)?;
         let (label, action) = update.read(cx).strip()?;
         let failed = matches!(
@@ -9493,11 +9504,14 @@ impl Shell {
 
     /// The "Check for Updates…" dialog: checking, then the outcome, which
     /// stays live (download progress, ready to restart) while it is open.
+    #[allow(unreachable_code)]
     fn render_update_prompt(
         &mut self,
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let _ = (viewport, cx);
+        return None;
         use crate::app_update::{AppUpdate, Flow, Prompt};
         let update = AppUpdate::global(cx)?;
         let theme = Theme::of(cx).for_popup();
@@ -10018,11 +10032,14 @@ impl Shell {
             .into_any_element()
     }
 
+    #[allow(unreachable_code)]
     fn render_sync_overlay(
         &mut self,
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let _ = (viewport, cx);
+        return None;
         let theme = Theme::of(cx).for_popup();
         let needs_org = matches!(
             self.state.read(cx).auth.as_ref(),

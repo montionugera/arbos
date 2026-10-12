@@ -392,19 +392,10 @@ impl Shell {
         // header over the empty canvas was noise); the bar keeps its height,
         // drag region, and buttons. Where a session runs, and its side-chat
         // and project actions, live in the session card.
-        let (title, harness, on_canvas): (SharedString, Option<zeron_proto::HarnessId>, bool) = {
-            let state = self.state.read(cx);
-            match state.selected_chat_row() {
-                Some(chat) => (
-                    SharedString::from(transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                    )),
-                    chat.config.as_ref().map(|c| c.harness),
-                    false,
-                ),
-                None => (SharedString::from(""), None, true),
-            }
-        };
+        let on_canvas = self.state.read(cx).selected_chat_row().is_none();
+        // The window title is the product name. Chat names live in the tabs.
+        let title = SharedString::from(if on_canvas { "" } else { "Arbos" });
+        let harness: Option<zeron_proto::HarnessId> = None;
 
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
