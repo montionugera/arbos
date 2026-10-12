@@ -10,6 +10,15 @@
 //! `latest.txt` (version only) remains as the fallback. A loopback `edge_url`
 //! still serves `{edge}/releases/*` so the local fixture tests can run.
 //!
+//! Every file the manifest lists carries a SHA-256 digest and an Ed25519
+//! signature over its exact bytes (see [`sign`]): the publish step signs with
+//! the private half — the repository secret `ARBOS_UPDATE_SIGNING_KEY` — and
+//! the public half is compiled in from `update-key.pub`. A download whose
+//! signature is missing or does not verify is refused with one sentence,
+//! before anything it contains is executed; `latest.txt` fallbacks and
+//! pre-signature manifests are refused the same way, which is the point of
+//! signing at all.
+//!
 //! Install kinds and their update paths:
 //! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
 //!   installer and the Linux tarball's `install.sh`): download the headless
@@ -33,7 +42,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context as _, bail};
+use anyhow::{Context as _, anyhow, bail};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -92,7 +101,8 @@ const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct Manifest {
     pub version: String,
     /// Artifact file name → metadata. Empty for pre-manifest releases resolved
-    /// via `latest.txt` — downloads then skip checksum verification (with a log).
+    /// via `latest.txt` — downloads of those are refused (no signature to
+    /// verify), which is the point of signing at all.
     #[serde(default)]
     pub files: BTreeMap<String, FileMeta>,
 }
@@ -101,6 +111,12 @@ pub struct Manifest {
 pub struct FileMeta {
     #[serde(default)]
     pub sha256: Option<String>,
+    /// Base64 Ed25519 over the file's exact bytes, made with the private half
+    /// of the key whose public half is compiled into the app
+    /// ([`sign::built_in_key`]). A file whose signature is missing or does
+    /// not verify is never installed.
+    #[serde(default)]
+    pub signature: Option<String>,
 }
 
 /// Artifact-name platform pair matching the packaging scripts. Unsupported
@@ -618,8 +634,38 @@ fn bundle_short_version(plist: &str) -> Option<String> {
 // Download + verify
 // ---------------------------------------------------------------------------
 
-/// Stream `{edge}/releases/<file>` to `dest`, verifying the manifest sha256 when
-/// present. Writes through a `.partial` sidecar so an interrupted download never
+/// The refusal every file with a bad or missing signature gets. One sentence:
+/// the person reading it needs the verdict and the reason, not a lecture, and
+/// every caller that surfaces it (the update strip, `zeron update`) shows it
+/// as-is.
+fn signature_refusal(file: &str) -> String {
+    format!(
+        "Arbos refuses to install {file}: its signature is missing or does not \
+         verify against the Arbos update signing key."
+    )
+}
+
+/// The refusal a build with no compiled-in key gives instead. Parsing the key
+/// file is separated from reading it so tests can exercise the refusal.
+fn require_built_in_key(key: Option<sign::PublicKey>) -> anyhow::Result<sign::PublicKey> {
+    key.ok_or_else(|| {
+        anyhow!(
+            "This build of Arbos has no update signing key compiled in, so it \
+             refuses every update rather than trusting an unsigned one."
+        )
+    })
+}
+
+/// The public half of the update signing key, compiled into this build.
+fn built_in_verification_key() -> anyhow::Result<sign::PublicKey> {
+    require_built_in_key(sign::built_in_key())
+}
+
+/// Stream `{edge}/releases/<file>` to `dest`. The manifest's digest is checked
+/// for legibility and its Ed25519 signature against the key compiled into
+/// this build for trust — a file with a missing or mismatched signature is
+/// refused before anything it contains is executed, and nothing is left on
+/// disk. Writes through a `.partial` sidecar so an interrupted download never
 /// leaves a plausible-looking artifact behind.
 pub async fn download_release_file(
     edge_url: &str,
@@ -627,14 +673,26 @@ pub async fn download_release_file(
     file: &str,
     dest: &Path,
 ) -> anyhow::Result<()> {
+    download_verified(edge_url, manifest, file, dest, &built_in_verification_key()?).await
+}
+
+/// The download, verified against `key` — the test seam. Tests generate a
+/// key pair and sign their fixtures with it; the app always ends up here
+/// through [`download_release_file`] with the built-in half, which no test
+/// can sign for (the private half lives only in the repository secret).
+async fn download_verified(
+    edge_url: &str,
+    manifest: &Manifest,
+    file: &str,
+    dest: &Path,
+    key: &sign::PublicKey,
+) -> anyhow::Result<()> {
     let url = format!("{}/{file}", release_base(edge_url)?);
-    let expected = manifest.files.get(file).and_then(|m| m.sha256.as_deref());
-    if expected.is_none() {
-        tracing::warn!(
-            file,
-            "no checksum in release metadata; skipping verification"
-        );
-    }
+    let meta = manifest.files.get(file);
+    let expected = meta.and_then(|m| m.sha256.as_deref());
+    let signature = meta
+        .and_then(|m| m.signature.as_deref())
+        .context(signature_refusal(file))?;
     let partial = dest.with_extension("partial");
     let resp = http_client()?
         .get(&url)
@@ -655,12 +713,23 @@ pub async fn download_release_file(
     }
     out.flush().await.context("flushing download")?;
     drop(out);
+    // The digest first: a mismatch here is a publisher bug a person can check
+    // by hand, while the signature is the verdict on the bytes themselves.
     if let Some(expected) = expected {
         let actual = format!("{:x}", hasher.finalize());
         if !actual.eq_ignore_ascii_case(expected.trim()) {
             tokio::fs::remove_file(&partial).await.ok();
             bail!("checksum mismatch for {file}: expected {expected}, got {actual}");
         }
+    }
+    let bytes = tokio::fs::read(&partial)
+        .await
+        .with_context(|| format!("reading back {}", partial.display()))?;
+    // The signature's own error text stays internal: every refusal a person
+    // can read gets the same one sentence, whatever made it false.
+    if key.verify(&bytes, signature).is_err() {
+        tokio::fs::remove_file(&partial).await.ok();
+        bail!(signature_refusal(file));
     }
     tokio::fs::rename(&partial, dest)
         .await
@@ -705,7 +774,7 @@ async fn verify_staged_binary(binary: &Path, version: &str) -> anyhow::Result<()
         || reported == format!("Arbos {version}");
     anyhow::ensure!(
         output.status.success() && named,
-        "staged binary reported {reported:?} (exit {}), expected \"zeron {version}\"",
+        "staged binary reported {reported:?} (exit {}), expected \"Arbos {version}\"",
         output.status
     );
     Ok(())
@@ -721,6 +790,17 @@ pub async fn stage_headless(
     edge_url: &str,
     manifest: &Manifest,
     app_root: &Path,
+) -> anyhow::Result<PathBuf> {
+    stage_headless_verified(edge_url, manifest, app_root, &built_in_verification_key()?).await
+}
+
+/// The staging, verified against `key` — the same test seam as
+/// [`download_verified`].
+async fn stage_headless_verified(
+    edge_url: &str,
+    manifest: &Manifest,
+    app_root: &Path,
+    key: &sign::PublicKey,
 ) -> anyhow::Result<PathBuf> {
     // Reject unsupported targets before creating a stage or making a request.
     require_managed_update_platform()?;
@@ -739,7 +819,7 @@ pub async fn stage_headless(
     std::fs::create_dir_all(&stage).with_context(|| format!("creating {}", stage.display()))?;
     let result = async {
         let tarball = stage.join(&file);
-        download_release_file(edge_url, manifest, &file, &tarball).await?;
+        download_verified(edge_url, manifest, &file, &tarball, key).await?;
         let unpacked = stage.join("unpacked");
         std::fs::create_dir_all(&unpacked)?;
         // Tarball root is the versioned stage dir (see scripts/package-linux.sh);
@@ -842,14 +922,26 @@ pub fn restart_service() -> anyhow::Result<()> {
 // macOS app-bundle installs — the desktop path
 // ---------------------------------------------------------------------------
 
-/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/Zeron.app`
-/// (idempotent). The bundle is unpacked beside its final name and renamed in
-/// only after its binary answers with the expected version, so an interrupted
-/// unpack can never be mistaken for a staged update. Returns the staged bundle.
+/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/` (the
+/// staged bundle — idempotent). The bundle is unpacked beside its final name
+/// and renamed in only after its binary answers with the expected version, so
+/// an interrupted unpack can never be mistaken for a staged update. Returns
+/// the staged bundle.
 pub async fn stage_mac_app(
     edge_url: &str,
     manifest: &Manifest,
     data_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    stage_mac_app_verified(edge_url, manifest, data_dir, &built_in_verification_key()?).await
+}
+
+/// The staging, verified against `key` — the same test seam as
+/// [`download_verified`].
+async fn stage_mac_app_verified(
+    edge_url: &str,
+    manifest: &Manifest,
+    data_dir: &Path,
+    key: &sign::PublicKey,
 ) -> anyhow::Result<PathBuf> {
     // Reject unsupported targets before creating a stage or making a request.
     require_mac_app_update_platform()?;
@@ -870,7 +962,7 @@ pub async fn stage_mac_app(
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let file = mac_app_artifact(version);
     let tarball = dir.join(&file);
-    download_release_file(edge_url, manifest, &file, &tarball).await?;
+    download_verified(edge_url, manifest, &file, &tarball, key).await?;
     let unpack = dir.join(".unpack");
     std::fs::create_dir_all(&unpack)?;
     let unpacked = run(
@@ -1777,7 +1869,7 @@ mod tests {
     #[test]
     fn manifest_parses_with_and_without_files() {
         let full: Manifest = serde_json::from_str(
-            r#"{"version":"0.1.1","files":{"arbos-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
+            r#"{"version":"0.1.1","files":{"arbos-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc","signature":"AAA="}}}"#,
         )
         .unwrap();
         assert_eq!(full.version, "0.1.1");
@@ -1786,6 +1878,24 @@ mod tests {
                 .sha256
                 .as_deref(),
             Some("abc")
+        );
+        assert_eq!(
+            full.files["arbos-0.1.1-linux-x86_64.tar.gz"]
+                .signature
+                .as_deref(),
+            Some("AAA=")
+        );
+        // A pre-signature manifest still parses; downloading from it is
+        // refused later, which is a different (and enforced) failure.
+        let unsigned: Manifest = serde_json::from_str(
+            r#"{"version":"0.1.1","files":{"arbos-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unsigned.files["arbos-0.1.1-linux-x86_64.tar.gz"]
+                .signature
+                .as_deref(),
+            None
         );
         let bare: Manifest = serde_json::from_str(r#"{"version":"0.1.1"}"#).unwrap();
         assert!(bare.files.is_empty());
@@ -2032,12 +2142,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let app_root = tmp.path().join("app");
         std::fs::create_dir_all(&app_root).unwrap();
+        // The staging is verified against this pair's public half — the same
+        // seam the app drives with the built-in key, which no test can sign
+        // for (the private half lives only in the repository secret).
+        let (secret, public) = sign::generate().unwrap();
         let manifest = |bytes: &[u8]| Manifest {
             version: "9.9.9".into(),
             files: [(
                 headless_artifact("9.9.9"),
                 FileMeta {
                     sha256: Some(format!("{:x}", Sha256::digest(bytes))),
+                    signature: Some(secret.sign(bytes).unwrap()),
                 },
             )]
             .into(),
@@ -2045,12 +2160,12 @@ mod tests {
 
         let wrong = fake_headless_tarball(&tmp.path().join("wrong"), "1.0.0");
         let (base, server) = serve_forever(wrong.clone()).await;
-        let error = stage_headless(&base, &manifest(&wrong), &app_root)
+        let error = stage_headless_verified(&base, &manifest(&wrong), &app_root, &public)
             .await
             .unwrap_err();
         server.abort();
         assert!(
-            format!("{error:#}").contains("expected \"zeron 9.9.9\""),
+            format!("{error:#}").contains("expected \"Arbos 9.9.9\""),
             "unexpected error: {error:#}"
         );
         assert!(!app_root.join("9.9.9").exists());
@@ -2058,11 +2173,138 @@ mod tests {
 
         let right = fake_headless_tarball(&tmp.path().join("right"), "9.9.9");
         let (base, server) = serve_forever(right.clone()).await;
-        let staged = stage_headless(&base, &manifest(&right), &app_root)
+        let staged = stage_headless_verified(&base, &manifest(&right), &app_root, &public)
             .await
             .unwrap();
         server.abort();
         assert_eq!(staged, app_root.join("9.9.9"));
         assert!(staged.join("zeron").is_file());
+    }
+
+    /// The one sentence every bad-or-missing-signature refusal uses, built for
+    /// the file under test so the three refusal tests share it.
+    fn refusal(file: &str) -> String {
+        format!(
+            "Arbos refuses to install {file}: its signature is missing or does not \
+             verify against the Arbos update signing key."
+        )
+    }
+
+    #[tokio::test]
+    async fn a_release_file_with_no_signature_is_refused_with_one_sentence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = b"a payload nobody signed".to_vec();
+        let file = headless_artifact("9.9.9");
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                file.clone(),
+                FileMeta {
+                    sha256: Some(format!("{:x}", Sha256::digest(&payload))),
+                    signature: None,
+                },
+            )]
+            .into(),
+        };
+        let (base, server) = serve_forever(payload).await;
+        let dest = tmp.path().join(&file);
+        let error = download_release_file(&base, &manifest, &file, &dest)
+            .await
+            .unwrap_err();
+        server.abort();
+        assert_eq!(error.to_string(), refusal(&file));
+        // Refused means refused: neither the artifact nor its partial exists.
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("partial").exists());
+    }
+
+    #[tokio::test]
+    async fn a_release_file_no_manifest_entry_mentions_is_refused_before_downloading() {
+        // `latest.txt` fallbacks resolve to a manifest with no files at all —
+        // the file never gets a chance to be fetched.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = headless_artifact("9.9.9");
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: BTreeMap::new(),
+        };
+        let (base, server) = serve_forever(b"never asked for".to_vec()).await;
+        let dest = tmp.path().join(&file);
+        let error = download_release_file(&base, &manifest, &file, &dest)
+            .await
+            .unwrap_err();
+        server.abort();
+        assert_eq!(error.to_string(), refusal(&file));
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("partial").exists());
+    }
+
+    #[tokio::test]
+    async fn a_signature_from_another_key_is_refused_with_the_same_sentence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = b"a payload somebody else built".to_vec();
+        let file = headless_artifact("9.9.9");
+        let (other, _) = sign::generate().unwrap();
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                file.clone(),
+                FileMeta {
+                    sha256: Some(format!("{:x}", Sha256::digest(&payload))),
+                    signature: Some(other.sign(&payload).unwrap()),
+                },
+            )]
+            .into(),
+        };
+        let (base, server) = serve_forever(payload).await;
+        let dest = tmp.path().join(&file);
+        let error = download_release_file(&base, &manifest, &file, &dest)
+            .await
+            .unwrap_err();
+        server.abort();
+        assert_eq!(error.to_string(), refusal(&file));
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("partial").exists());
+    }
+
+    #[tokio::test]
+    async fn a_signed_release_file_downloads_and_verifies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = b"the bytes the publisher signed".to_vec();
+        let file = headless_artifact("9.9.9");
+        let (secret, public) = sign::generate().unwrap();
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                file.clone(),
+                FileMeta {
+                    sha256: Some(format!("{:x}", Sha256::digest(&payload))),
+                    signature: Some(secret.sign(&payload).unwrap()),
+                },
+            )]
+            .into(),
+        };
+        let (base, server) = serve_forever(payload.clone()).await;
+        let dest = tmp.path().join(&file);
+        download_verified(&base, &manifest, &file, &dest, &public)
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        assert!(!dest.with_extension("partial").exists());
+    }
+
+    #[test]
+    fn a_build_with_no_signing_key_refuses_every_update() {
+        // What a fork sees before running keygen: a message, never a silent
+        // acceptance. Parsing is separated from the file for exactly this.
+        let error = require_built_in_key(None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "This build of Arbos has no update signing key compiled in, so it \
+             refuses every update rather than trusting an unsigned one."
+        );
+        // This repository carries the key, so the app takes the other path.
+        require_built_in_key(sign::built_in_key()).unwrap();
     }
 }

@@ -92,10 +92,13 @@ pub async fn stage(
     )
     .await
     .context("staged executable version check timed out")??;
+    let reported = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    // Current builds print "Arbos <version>"; payloads from before the
+    // rebrand print "zeron <version>". Both are this build's promise.
     ensure!(
         output.status.success()
-            && String::from_utf8_lossy(&output.stdout).trim()
-                == format!("zeron {}", manifest.version),
+            && (reported == format!("Arbos {}", manifest.version)
+                || reported == format!("zeron {}", manifest.version)),
         "staged executable has the wrong version or cannot run"
     );
     let _ = temporary.keep();
@@ -497,6 +500,10 @@ mod tests {
                 artifact("1.2.3"),
                 super::super::FileMeta {
                     sha256: Some(format!("{:x}", Sha256::digest(b"expected"))),
+                    // Present but never parsed: the corrupt body fails the
+                    // digest check before the signature is looked at.
+                    signature: Some("AAAA".into()),
+                    ..Default::default()
                 },
             )]
             .into(),
