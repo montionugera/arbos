@@ -37,6 +37,7 @@ const session_child_store = @import("../session/session_child_store.zig");
 const command_replay_store = @import("../session/command_replay_store.zig");
 const session_store = @import("../session/session_store.zig");
 const text_utils = @import("../shared/text_utils.zig");
+const secret_env = @import("../shared/secret_env.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const mcp_access_policy = @import("../mcp/access_policy.zig");
 const tool_admission = @import("tool_admission.zig");
@@ -433,7 +434,7 @@ pub fn executeToolCallAuthorized(
         spec.take_file_mutation_input_fn != null
     else
         false;
-    const result = (if (comptime builtin.os.tag == .wasi)
+    const inner_result = (if (comptime builtin.os.tag == .wasi)
         executeWorkspaceToolCallInner(
             execution_ctx,
             request.result_allocator,
@@ -472,6 +473,7 @@ pub fn executeToolCallAuthorized(
         });
         return if (err == error.CancelledBeforeExecution) error.Cancelled else err;
     };
+    const result = try redactSecretEnvValues(request.result_allocator, inner_result);
     diagnostics.recordToolCallResult(.{
         .name = request.call.name,
         .arguments_json = request.call.arguments_json,
@@ -484,6 +486,16 @@ pub fn executeToolCallAuthorized(
         replay_continuation_transferred = result.command_replay_capture == continued;
     }
     return result;
+}
+
+/// The one place every executed tool result passes before the model, the
+/// session events, diagnostics, or the ACP client can read it: exact secret
+/// environment values are replaced with `[redacted:<VAR_NAME>]`. The
+/// original output stays owned by `alloc` because it may be a static string.
+fn redactSecretEnvValues(alloc: Allocator, result: ToolExecutionResult) Allocator.Error!ToolExecutionResult {
+    var redacted = result;
+    redacted.model_output = try secret_env.redactSecretValues(alloc, result.model_output);
+    return redacted;
 }
 
 fn classifyToolExecutionError(err: anyerror) diagnostics.ToolCallOutcome {
@@ -618,7 +630,10 @@ pub fn executeHostToolCallAuthorized(
         execution_ctx.tool_registry,
         request.call,
     );
-    return toolExecutionResultFromDispatch(dispatched, .{});
+    return redactSecretEnvValues(
+        request.result_allocator,
+        toolExecutionResultFromDispatch(dispatched, .{}),
+    );
 }
 
 fn rebindMcpAuthorityGeneration(

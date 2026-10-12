@@ -1,6 +1,7 @@
 const std = @import("std");
 const debug_trace = @import("debug_trace.zig");
 const display_width = @import("display_width.zig");
+const secret_env = @import("secret_env.zig");
 
 pub fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
@@ -454,7 +455,16 @@ pub fn sanitizeModelText(arena: std.mem.Allocator, text: []const u8) ![]const u8
     return std.fmt.allocPrint(arena, "binary or non-utf8 tool output omitted ({d} bytes)", .{text.len});
 }
 
+/// Redacts exact secret environment values, then masks pattern-shaped
+/// secrets. Returns `text` itself when nothing changed.
 pub fn maskSecrets(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const exact = try secret_env.redactSecretValues(arena, text);
+    const masked = try maskSecretPatterns(arena, exact);
+    if (masked.ptr != exact.ptr and exact.ptr != text.ptr) arena.free(exact);
+    return masked;
+}
+
+fn maskSecretPatterns(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);
     defer out.deinit();
     var modified = false;
@@ -974,6 +984,23 @@ test "maskSecrets masks env-style secrets" {
     defer if (masked.ptr != input.ptr) alloc.free(masked);
 
     try std.testing.expectEqualStrings("AI_GATEWAY_API_KEY=[redacted] end", masked);
+}
+
+test "maskSecrets redacts exact secret env values before pattern masking" {
+    const alloc = std.testing.allocator;
+    const token = "opaque-service-account-value";
+    const list = [_]secret_env.Secret{.{ .name = "OP_SERVICE_ACCOUNT_TOKEN", .value = token }};
+    secret_env.overrideForTesting(&list);
+    defer secret_env.overrideForTesting(null);
+    const input = "value " ++ token ++ " and AI_GATEWAY_API_KEY=abcdefghijklmnop end";
+
+    const masked = try maskSecrets(alloc, input);
+    defer if (masked.ptr != input.ptr) alloc.free(masked);
+
+    try std.testing.expectEqualStrings(
+        "value [redacted:OP_SERVICE_ACCOUNT_TOKEN] and AI_GATEWAY_API_KEY=[redacted] end",
+        masked,
+    );
 }
 
 test "maskSecrets masks quoted sensitive assignments" {
