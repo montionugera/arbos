@@ -9,7 +9,9 @@
 //! statuses are snake_case).
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, SlashCommand, TodoItem, TodoStatus, ToolCall, ToolDiff};
+use zeron_proto::{
+    AgentEvent, ModelRecoveryState, SlashCommand, TodoItem, TodoStatus, ToolCall, ToolDiff,
+};
 
 /// Byte cap applied to tool output text at the harness boundary. The doc-side
 /// fold applies its own (smaller) cap before anything persists; this one only
@@ -441,9 +443,57 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                 Vec::new()
             }
         }
-        "current_mode_update" | "config_option_update" | "session_info_update" => Vec::new(),
+        // fx reports model-response recovery under `_meta.fx`; the rest of
+        // a session info update (title, mode) is not shown.
+        "session_info_update" => model_recovery(update).into_iter().collect(),
+        "current_mode_update" | "config_option_update" => Vec::new(),
         _ => Vec::new(),
     }
+}
+
+/// `_meta.fx.modelResponseRecovery` on a `session_info_update`. `null`
+/// means the recovery is over (fx clears it once a retry goes through); a
+/// missing key means the update is about something else.
+fn model_recovery(update: &Value) -> Option<AgentEvent> {
+    let recovery = update.get("_meta")?.get("fx")?.get("modelResponseRecovery")?;
+    if recovery.is_null() {
+        return Some(AgentEvent::ModelRecovery {
+            state: ModelRecoveryState::Recovered,
+            cause: None,
+            action: None,
+            required_action: None,
+            failed_attempt: None,
+            attempt_limit: None,
+            delay_seconds: None,
+            retry_deadline: None,
+            diagnostic: None,
+        });
+    }
+    let state = ModelRecoveryState::parse(recovery.get("state")?.as_str()?)?;
+    let text = |key: &str| {
+        recovery
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let count = |key: &str| recovery.get(key).and_then(Value::as_u64).filter(|n| *n > 0);
+    Some(AgentEvent::ModelRecovery {
+        state,
+        cause: text("cause"),
+        action: text("action"),
+        required_action: text("requiredAction"),
+        // fx writes `attempt`; `failedAttempt` is the CLI JSON name.
+        failed_attempt: count("attempt").or_else(|| count("failedAttempt")),
+        attempt_limit: count("attemptLimit"),
+        delay_seconds: count("delaySeconds"),
+        retry_deadline: recovery.get("retryDeadline").and_then(|v| match v {
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }),
+        diagnostic: text("message").or_else(|| text("diagnostic")),
+    })
 }
 
 /// A terminal `status` on a tool_call/tool_call_update resolves the call:
@@ -696,6 +746,167 @@ mod tests {
                 ]
             }]
         );
+    }
+
+    /// The shapes `fx/src/acp/types.zig` `writeModelRecoveryInfoUpdate`
+    /// writes: an in-flight retry, a resumable pause, a terminal stop, and
+    /// the `null` that clears the status.
+    #[test]
+    fn fx_model_recovery_active_retry_maps_with_attempt_and_delay() {
+        let update = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": { "fx": { "modelResponseRecovery": {
+                "state": "active",
+                "kind": "auto_retry",
+                "cause": "provider_unavailable",
+                "action": "retrying_request",
+                "attempt": 3,
+                "attemptLimit": 8,
+                "delaySeconds": 32,
+                "durable": true,
+                "message": "⚠ Provider unavailable · HTTP 503 · retrying request in 32s",
+            } } },
+        });
+        assert_eq!(
+            map_update(&update),
+            vec![AgentEvent::ModelRecovery {
+                state: ModelRecoveryState::Active,
+                cause: Some("provider_unavailable".into()),
+                action: Some("retrying_request".into()),
+                required_action: None,
+                failed_attempt: Some(3),
+                attempt_limit: Some(8),
+                delay_seconds: Some(32),
+                retry_deadline: None,
+                diagnostic: Some(
+                    "⚠ Provider unavailable · HTTP 503 · retrying request in 32s".into()
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn fx_model_recovery_paused_carries_continue_later() {
+        let update = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": { "fx": { "modelResponseRecovery": {
+                "state": "paused",
+                "kind": "terminal_provider_error",
+                "cause": "system_resumed",
+                "action": "paused",
+                "requiredAction": "continue_later",
+                "attempt": 4,
+                "attemptLimit": 10,
+                "delaySeconds": 4,
+                "durable": true,
+                "message": "⚠ Mac woke from sleep · ConnectionResetByPeer · connection still unavailable · recovery paused · attempt 4",
+            } } },
+        });
+        assert_eq!(
+            map_update(&update),
+            vec![AgentEvent::ModelRecovery {
+                state: ModelRecoveryState::Paused,
+                cause: Some("system_resumed".into()),
+                action: Some("paused".into()),
+                required_action: Some("continue_later".into()),
+                failed_attempt: Some(4),
+                attempt_limit: Some(10),
+                delay_seconds: Some(4),
+                retry_deadline: None,
+                diagnostic: Some(
+                    "⚠ Mac woke from sleep · ConnectionResetByPeer · connection still unavailable · recovery paused · attempt 4".into()
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn fx_model_recovery_failed_stop_maps_without_an_action() {
+        let update = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": { "fx": { "modelResponseRecovery": {
+                "state": "failed",
+                "kind": "terminal_provider_error",
+                "cause": "response_interrupted",
+                "requiredAction": "surface_stall",
+                "attempt": 4,
+                "attemptLimit": 10,
+                "durable": false,
+                "message": "⚠ Response ended early · stream interrupted · kept failing at the same point · stopped",
+            } } },
+        });
+        assert_eq!(
+            map_update(&update),
+            vec![AgentEvent::ModelRecovery {
+                state: ModelRecoveryState::Failed,
+                cause: Some("response_interrupted".into()),
+                action: None,
+                required_action: Some("surface_stall".into()),
+                failed_attempt: Some(4),
+                attempt_limit: Some(10),
+                delay_seconds: None,
+                retry_deadline: None,
+                diagnostic: Some(
+                    "⚠ Response ended early · stream interrupted · kept failing at the same point · stopped".into()
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn fx_model_recovery_null_clears_as_recovered() {
+        let update = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": { "fx": { "modelResponseRecovery": null } },
+        });
+        assert_eq!(
+            map_update(&update),
+            vec![AgentEvent::ModelRecovery {
+                state: ModelRecoveryState::Recovered,
+                cause: None,
+                action: None,
+                required_action: None,
+                failed_attempt: None,
+                attempt_limit: None,
+                delay_seconds: None,
+                retry_deadline: None,
+                diagnostic: None,
+            }]
+        );
+        let recovered = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": { "fx": { "modelResponseRecovery": {
+                "state": "recovered",
+                "kind": "auto_recovered",
+                "attempt": 5,
+                "attemptLimit": 10,
+                "durable": true,
+                "message": "✓ recovered · succeeded on attempt 5",
+            } } },
+        });
+        assert!(matches!(
+            map_update(&recovered).as_slice(),
+            [AgentEvent::ModelRecovery {
+                state: ModelRecoveryState::Recovered,
+                failed_attempt: Some(5),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn other_session_info_updates_stay_ignored() {
+        let title = json!({
+            "sessionUpdate": "session_info_update",
+            "title": "Fix the tests",
+            "_meta": { "fx": { "effort": "high" } },
+        });
+        assert_eq!(map_update(&title), Vec::new());
+        let unknown_state = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": { "fx": { "modelResponseRecovery": { "state": "mystery" } } },
+        });
+        assert_eq!(map_update(&unknown_state), Vec::new());
     }
 
     #[test]

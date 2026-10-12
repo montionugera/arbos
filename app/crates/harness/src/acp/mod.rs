@@ -3266,12 +3266,26 @@ fn split_arbos_wake(text: &str) -> (&str, bool) {
     }
 }
 
+/// The `session/prompt` that resumes a paused fx model response: no prompt
+/// text (fx refuses a continuation that carries one) and
+/// `_meta.fx.continueRecovery`. fx resumes from its saved checkpoint.
+pub(crate) fn fx_continue_params(session_id: &str) -> Value {
+    json!({
+        "sessionId": session_id,
+        "prompt": [],
+        "_meta": { "fx": { "continueRecovery": true } },
+    })
+}
+
 fn prompt_turn(
     client: RpcClient,
     session_id: String,
     text: String,
     prompt_id: Option<String>,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
+    if text.starts_with(zeron_proto::ARBOS_CONTINUE_MARK) {
+        return client.request_now("session/prompt", fx_continue_params(&session_id));
+    }
     let (text, wake) = split_arbos_wake(&text);
     let mut params = json!({
         "sessionId": session_id,
@@ -5972,6 +5986,15 @@ mod tests {
         assert_eq!(params["sessionId"], "sess-1");
         assert_eq!(params["prompt"][0]["text"], "hold on");
         assert_eq!(params["_meta"]["fx"]["steer"], true);
+    }
+
+    #[test]
+    fn fx_continue_sends_an_empty_prompt_with_the_recovery_flag() {
+        let params = fx_continue_params("sess-1");
+        assert_eq!(params["sessionId"], "sess-1");
+        assert_eq!(params["prompt"], json!([]));
+        assert_eq!(params["_meta"]["fx"]["continueRecovery"], true);
+        assert!(params["_meta"]["fx"].get("steer").is_none());
     }
 
     #[test]

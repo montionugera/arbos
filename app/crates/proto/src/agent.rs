@@ -303,6 +303,39 @@ pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
 /// `_meta.fx.wake`.
 pub const ARBOS_WAKE_MARK: &str = "\u{E000}arbos-wake\n";
 
+/// A prompt that only resumes a paused model response. The fx
+/// `session/prompt` sends an empty prompt with `_meta.fx.continueRecovery`;
+/// the transcript draws a system line instead of a user message.
+pub const ARBOS_CONTINUE_MARK: &str = "\u{E000}arbos-continue\n";
+
+/// Where fx's model-response recovery stands (ACP `session_info_update`
+/// with `_meta.fx.modelResponseRecovery`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelRecoveryState {
+    /// Retries, connectivity waits, and liveness probes are under way.
+    Active,
+    /// The turn stopped and can continue later with an empty prompt.
+    Paused,
+    /// The turn stopped for good.
+    Failed,
+    /// A retry went through; also what a cleared (`null`) recovery means.
+    Recovered,
+}
+
+impl ModelRecoveryState {
+    /// Decode fx's wire word. Unknown words are `None`.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "active" => Some(Self::Active),
+            "paused" => Some(Self::Paused),
+            "failed" => Some(Self::Failed),
+            "recovered" => Some(Self::Recovered),
+            _ => None,
+        }
+    }
+}
+
 /// A decoded tool invocation, reduced to the fields each kind renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -617,6 +650,31 @@ pub enum AgentEvent {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+    },
+    /// fx is retrying, has paused, or has given up on a model response —
+    /// or recovered (`state: Recovered`, also for a cleared `null`). The
+    /// engine turns it into the live step and the worker's status; never
+    /// persisted to docs.
+    #[serde(rename_all = "camelCase")]
+    ModelRecovery {
+        state: ModelRecoveryState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        required_action: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_attempt: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_limit: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delay_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_deadline: Option<String>,
+        /// fx's one-line label for the person (`message` on the wire).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<String>,
     },
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per
