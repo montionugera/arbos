@@ -212,9 +212,9 @@ jobs:
         uses: ./.github/actions/linux-payload
         with:
           build: ${{ needs.plan.outputs.build }}
-          # What the Linux tarball workflow this replaces shipped. Switch to
-          # `release` for an optimised desktop at the price of a longer job.
-          profile: debug
+          # An optimised desktop. The debug profile the retired Linux tarball
+          # workflow shipped weighed 879 MB on the edge release.
+          profile: release
       - name: Collect
         env:
           PAYLOAD: ${{ steps.payload.outputs.path }}
