@@ -614,7 +614,7 @@ fn tick_worker_ready(project: &Path, worker_id: &str) {
                 return line.to_owned();
             };
             let text = rest.trim().trim_end_matches('.').trim();
-            if text != want {
+            if text != want || !trimmed.starts_with("- [ ]") {
                 return line.to_owned();
             }
             changed = true;
@@ -632,7 +632,10 @@ fn tick_worker_ready(project: &Path, worker_id: &str) {
 }
 
 /// Checkbox rows from `context/status.md`, in file order.
+/// A worker that already finished keeps its line checked.
 pub fn status_items(project: &Path) -> Vec<(bool, String)> {
+    let _guard = layout_lock();
+    reconcile_done_workers(project);
     let Ok(text) = fs::read_to_string(root_of(project).join("context").join("status.md")) else {
         return Vec::new();
     };
@@ -647,6 +650,15 @@ pub fn status_items(project: &Path) -> Vec<(bool, String)> {
             Some((rest.0, rest.1.trim().to_string()))
         })
         .collect()
+}
+
+fn reconcile_done_workers(project: &Path) {
+    let root = root_of(project);
+    for agent in list_agents(&root) {
+        if agent.role == "worker" && agent.status == "done" {
+            tick_worker_ready(project, &agent.id);
+        }
+    }
 }
 
 /// Bind this chat to an agent directory and return the fx home plus the

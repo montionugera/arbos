@@ -4668,6 +4668,18 @@ impl Transcript {
         self.engage_pin(cx);
     }
 
+    /// The current goal turn starts with the typed `/goal` line.
+    fn goal_line_is_first(&self) -> bool {
+        let Some(row) = self.rows.first() else {
+            return false;
+        };
+        let RowKind::User { text, .. } = &row.kind else {
+            return false;
+        };
+        let trimmed = text.trim();
+        trimmed.starts_with("/goal ") || trimmed == "/goal"
+    }
+
     /// Re-engage the bottom pin with a glide. Long jumps teleport to within
     /// [`GLIDE_MAX_VIEWPORTS`] of the end first (mugen `springToBottom`);
     /// reduced motion snaps.
@@ -5340,7 +5352,21 @@ impl Transcript {
         if self.own_turn.is_some() {
             self.own_turn_kick = true;
         }
-        if self.pinned {
+        if self.pinned && self.goal_line_is_first() {
+            // The typed `/goal` line stays at the top. A full thread must
+            // not push it off.
+            self.list.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            self.pinned = false;
+            self.spring.reset();
+            self.spring_last_tick = None;
+            self.spring_settled_at = None;
+            self.spring_kick = false;
+            self.last_scroll_distance = 0.0;
+            self.show_jump_button = false;
+        } else if self.pinned {
             if live_following || baseline_changed {
                 self.list.scroll_to_end();
                 self.spring.reset();
