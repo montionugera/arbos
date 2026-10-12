@@ -56,6 +56,7 @@ pub async fn stage(
     edge_url: &str,
     manifest: &super::Manifest,
     directory: &Path,
+    progress: Option<super::ProgressFn>,
 ) -> anyhow::Result<PathBuf> {
     ensure!(
         manifest
@@ -78,7 +79,7 @@ pub async fn stage(
         .prefix(".zeron-update-")
         .tempdir_in(directory)?;
     let staged = temporary.path().join("zeron.exe");
-    super::download_release_file(edge_url, manifest, &file, &staged).await?;
+    super::download_release_file(edge_url, manifest, &file, &staged, progress).await?;
     std::fs::write(temporary.path().join("sha256"), expected)?;
     std::fs::write(temporary.path().join("version"), &manifest.version)?;
     verify(&staged)?;
@@ -508,7 +509,9 @@ mod tests {
             )]
             .into(),
         };
-        let error = stage(&base, &manifest, dir.path()).await.unwrap_err();
+        let error = stage(&base, &manifest, dir.path(), None)
+            .await
+            .unwrap_err();
         server.join().unwrap();
         assert!(error.to_string().contains("checksum mismatch"));
         assert_eq!(std::fs::read(&installed).unwrap(), b"existing installation");

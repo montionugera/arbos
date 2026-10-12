@@ -466,15 +466,16 @@ impl InstallKind {
         edge_url: &str,
         manifest: &Manifest,
         data_dir: &Path,
+        progress: Option<ProgressFn>,
     ) -> anyhow::Result<PathBuf> {
         match self {
-            Self::MacApp { .. } => stage_mac_app(edge_url, manifest, data_dir).await,
+            Self::MacApp { .. } => stage_mac_app(edge_url, manifest, data_dir, progress).await,
             Self::Managed { app_root } if self.supports_desktop_update() => {
-                stage_headless(edge_url, manifest, app_root).await
+                stage_headless(edge_url, manifest, app_root, progress).await
             }
             #[cfg(windows)]
             Self::WindowsPortable { directory } => {
-                windows::stage(edge_url, manifest, directory).await
+                windows::stage(edge_url, manifest, directory, progress).await
             }
             _ => bail!("this installation does not support desktop updates"),
         }
@@ -634,6 +635,11 @@ fn bundle_short_version(plist: &str) -> Option<String> {
 // Download + verify
 // ---------------------------------------------------------------------------
 
+/// A progress report from a download: bytes moved so far, and the total when
+/// the server announced one (`None` until then, or for a chunked stream). The
+/// strip renders this live; the CLI ignores it.
+pub type ProgressFn = std::sync::Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
+
 /// The refusal every file with a bad or missing signature gets. One sentence:
 /// the person reading it needs the verdict and the reason, not a lecture, and
 /// every caller that surfaces it (the update strip, `zeron update`) shows it
@@ -665,15 +671,25 @@ fn built_in_verification_key() -> anyhow::Result<sign::PublicKey> {
 /// for legibility and its Ed25519 signature against the key compiled into
 /// this build for trust — a file with a missing or mismatched signature is
 /// refused before anything it contains is executed, and nothing is left on
-/// disk. Writes through a `.partial` sidecar so an interrupted download never
-/// leaves a plausible-looking artifact behind.
+/// disk. `progress`, when given, hears `(bytes so far, total when known)` as
+/// the body streams. Writes through a `.partial` sidecar so an interrupted
+/// download never leaves a plausible-looking artifact behind.
 pub async fn download_release_file(
     edge_url: &str,
     manifest: &Manifest,
     file: &str,
     dest: &Path,
+    progress: Option<ProgressFn>,
 ) -> anyhow::Result<()> {
-    download_verified(edge_url, manifest, file, dest, &built_in_verification_key()?).await
+    download_verified(
+        edge_url,
+        manifest,
+        file,
+        dest,
+        &built_in_verification_key()?,
+        progress,
+    )
+    .await
 }
 
 /// The download, verified against `key` — the test seam. Tests generate a
@@ -686,6 +702,7 @@ async fn download_verified(
     file: &str,
     dest: &Path,
     key: &sign::PublicKey,
+    progress: Option<ProgressFn>,
 ) -> anyhow::Result<()> {
     let url = format!("{}/{file}", release_base(edge_url)?);
     let meta = manifest.files.get(file);
@@ -704,12 +721,21 @@ async fn download_verified(
     let mut out = tokio::fs::File::create(&partial)
         .await
         .with_context(|| format!("creating {}", partial.display()))?;
+    let total = resp.content_length();
     let mut hasher = Sha256::new();
+    let mut moved: u64 = 0;
+    if let Some(progress) = progress.as_ref() {
+        progress(moved, total);
+    }
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading download stream")?;
         hasher.update(&chunk);
         out.write_all(&chunk).await.context("writing download")?;
+        moved = moved.saturating_add(chunk.len() as u64);
+        if let Some(progress) = progress.as_ref() {
+            progress(moved, total);
+        }
     }
     out.flush().await.context("flushing download")?;
     drop(out);
@@ -790,8 +816,16 @@ pub async fn stage_headless(
     edge_url: &str,
     manifest: &Manifest,
     app_root: &Path,
+    progress: Option<ProgressFn>,
 ) -> anyhow::Result<PathBuf> {
-    stage_headless_verified(edge_url, manifest, app_root, &built_in_verification_key()?).await
+    stage_headless_verified(
+        edge_url,
+        manifest,
+        app_root,
+        &built_in_verification_key()?,
+        progress,
+    )
+    .await
 }
 
 /// The staging, verified against `key` — the same test seam as
@@ -801,6 +835,7 @@ async fn stage_headless_verified(
     manifest: &Manifest,
     app_root: &Path,
     key: &sign::PublicKey,
+    progress: Option<ProgressFn>,
 ) -> anyhow::Result<PathBuf> {
     // Reject unsupported targets before creating a stage or making a request.
     require_managed_update_platform()?;
@@ -819,7 +854,7 @@ async fn stage_headless_verified(
     std::fs::create_dir_all(&stage).with_context(|| format!("creating {}", stage.display()))?;
     let result = async {
         let tarball = stage.join(&file);
-        download_verified(edge_url, manifest, &file, &tarball, key).await?;
+        download_verified(edge_url, manifest, &file, &tarball, key, progress).await?;
         let unpacked = stage.join("unpacked");
         std::fs::create_dir_all(&unpacked)?;
         // Tarball root is the versioned stage dir (see scripts/package-linux.sh);
@@ -931,8 +966,16 @@ pub async fn stage_mac_app(
     edge_url: &str,
     manifest: &Manifest,
     data_dir: &Path,
+    progress: Option<ProgressFn>,
 ) -> anyhow::Result<PathBuf> {
-    stage_mac_app_verified(edge_url, manifest, data_dir, &built_in_verification_key()?).await
+    stage_mac_app_verified(
+        edge_url,
+        manifest,
+        data_dir,
+        &built_in_verification_key()?,
+        progress,
+    )
+    .await
 }
 
 /// The staging, verified against `key` — the same test seam as
@@ -942,6 +985,7 @@ async fn stage_mac_app_verified(
     manifest: &Manifest,
     data_dir: &Path,
     key: &sign::PublicKey,
+    progress: Option<ProgressFn>,
 ) -> anyhow::Result<PathBuf> {
     // Reject unsupported targets before creating a stage or making a request.
     require_mac_app_update_platform()?;
@@ -962,7 +1006,7 @@ async fn stage_mac_app_verified(
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let file = mac_app_artifact(version);
     let tarball = dir.join(&file);
-    download_verified(edge_url, manifest, &file, &tarball, key).await?;
+    download_verified(edge_url, manifest, &file, &tarball, key, progress).await?;
     let unpack = dir.join(".unpack");
     std::fs::create_dir_all(&unpack)?;
     let unpacked = run(
@@ -1318,7 +1362,9 @@ impl Updater {
         if let InstallKind::Managed { app_root } = detect_install() {
             match fetch_latest(&self.edge_url).await {
                 Ok(manifest) if version_newer(&manifest.version, current_version()) => {
-                    if let Err(err) = stage_headless(&self.edge_url, &manifest, &app_root).await {
+                    if let Err(err) =
+                        stage_headless(&self.edge_url, &manifest, &app_root, None).await
+                    {
                         tracing::warn!(error = %err, "auto-update staging failed");
                         return;
                     }
@@ -1430,7 +1476,7 @@ impl Updater {
         if !version_newer(&manifest.version, current_version()) {
             bail!("already up to date ({})", current_version());
         }
-        stage_headless(&self.edge_url, &manifest, &app_root).await?;
+        stage_headless(&self.edge_url, &manifest, &app_root, None).await?;
         if require_quiescent && !self.quiescent_now() {
             return Ok(None);
         }
@@ -2160,9 +2206,10 @@ mod tests {
 
         let wrong = fake_headless_tarball(&tmp.path().join("wrong"), "1.0.0");
         let (base, server) = serve_forever(wrong.clone()).await;
-        let error = stage_headless_verified(&base, &manifest(&wrong), &app_root, &public)
-            .await
-            .unwrap_err();
+        let error =
+            stage_headless_verified(&base, &manifest(&wrong), &app_root, &public, None)
+                .await
+                .unwrap_err();
         server.abort();
         assert!(
             format!("{error:#}").contains("expected \"Arbos 9.9.9\""),
@@ -2173,9 +2220,10 @@ mod tests {
 
         let right = fake_headless_tarball(&tmp.path().join("right"), "9.9.9");
         let (base, server) = serve_forever(right.clone()).await;
-        let staged = stage_headless_verified(&base, &manifest(&right), &app_root, &public)
-            .await
-            .unwrap();
+        let staged =
+            stage_headless_verified(&base, &manifest(&right), &app_root, &public, None)
+                .await
+                .unwrap();
         server.abort();
         assert_eq!(staged, app_root.join("9.9.9"));
         assert!(staged.join("zeron").is_file());
@@ -2208,7 +2256,7 @@ mod tests {
         };
         let (base, server) = serve_forever(payload).await;
         let dest = tmp.path().join(&file);
-        let error = download_release_file(&base, &manifest, &file, &dest)
+        let error = download_release_file(&base, &manifest, &file, &dest, None)
             .await
             .unwrap_err();
         server.abort();
@@ -2230,7 +2278,7 @@ mod tests {
         };
         let (base, server) = serve_forever(b"never asked for".to_vec()).await;
         let dest = tmp.path().join(&file);
-        let error = download_release_file(&base, &manifest, &file, &dest)
+        let error = download_release_file(&base, &manifest, &file, &dest, None)
             .await
             .unwrap_err();
         server.abort();
@@ -2258,7 +2306,7 @@ mod tests {
         };
         let (base, server) = serve_forever(payload).await;
         let dest = tmp.path().join(&file);
-        let error = download_release_file(&base, &manifest, &file, &dest)
+        let error = download_release_file(&base, &manifest, &file, &dest, None)
             .await
             .unwrap_err();
         server.abort();
@@ -2286,12 +2334,53 @@ mod tests {
         };
         let (base, server) = serve_forever(payload.clone()).await;
         let dest = tmp.path().join(&file);
-        download_verified(&base, &manifest, &file, &dest, &public)
+        download_verified(&base, &manifest, &file, &dest, &public, None)
             .await
             .unwrap();
         server.abort();
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
         assert!(!dest.with_extension("partial").exists());
+    }
+
+    #[tokio::test]
+    async fn a_downloading_file_reports_its_progress_as_it_streams() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = vec![7u8; 300 * 1024];
+        let file = headless_artifact("9.9.9");
+        let (secret, public) = sign::generate().unwrap();
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                file.clone(),
+                FileMeta {
+                    sha256: Some(format!("{:x}", Sha256::digest(&payload))),
+                    signature: Some(secret.sign(&payload).unwrap()),
+                },
+            )]
+            .into(),
+        };
+        let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink: ProgressFn = {
+            let reports = reports.clone();
+            std::sync::Arc::new(move |moved: u64, total: Option<u64>| {
+                reports.lock().unwrap().push((moved, total));
+            })
+        };
+        let total = payload.len() as u64;
+        let (base, server) = serve_forever(payload).await;
+        let dest = tmp.path().join(&file);
+        download_verified(&base, &manifest, &file, &dest, &public, Some(sink))
+            .await
+            .unwrap();
+        server.abort();
+        let reports = reports.lock().unwrap();
+        // serve_forever announces Content-Length, so the first report already
+        // knows the total and the last one has moved all of it.
+        assert_eq!(reports.first().unwrap(), &(0, Some(total)));
+        assert_eq!(reports.last().unwrap(), &(total, Some(total)));
+        // Byte counts only grow.
+        assert!(reports.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        assert!(reports.len() >= 2, "{reports:?}");
     }
 
     #[test]

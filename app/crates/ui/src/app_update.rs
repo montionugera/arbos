@@ -225,7 +225,7 @@ impl AppUpdate {
                 "the release feed no longer offers a newer version"
             );
             let staged = install
-                .stage_desktop(&edge_url, &manifest, &data_dir)
+                .stage_desktop(&edge_url, &manifest, &data_dir, None)
                 .await?;
             anyhow::Ok((manifest.version, staged))
         });

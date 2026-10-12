@@ -33,7 +33,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
                 "downloading {}…",
                 zeron_update::headless_artifact(&manifest.version)
             );
-            zeron_update::stage_headless(edge_url, &manifest, &app_root).await?;
+            zeron_update::stage_headless(edge_url, &manifest, &app_root, None).await?;
             zeron_update::apply_headless(&app_root, &manifest.version)?;
             println!(
                 "installed {} (current → {})",
@@ -54,14 +54,16 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
                 zeron_update::mac_app_artifact(&manifest.version)
             );
             let data_dir = super::paths::data_dir();
-            let staged = zeron_update::stage_mac_app(edge_url, &manifest, &data_dir).await?;
+            let staged =
+                zeron_update::stage_mac_app(edge_url, &manifest, &data_dir, None).await?;
             zeron_update::apply_mac_app(&staged, &bundle)?;
             println!("updated {} — relaunch Zeron to finish.", bundle.display());
             Ok(())
         }
         #[cfg(windows)]
         InstallKind::WindowsPortable { directory } => {
-            let staged = zeron_update::windows::stage(edge_url, &manifest, &directory).await?;
+            let staged =
+                zeron_update::windows::stage(edge_url, &manifest, &directory, None).await?;
             zeron_update::windows::apply(&staged, &directory, false)?;
             println!(
                 "updated to {} — relaunch Zeron to finish.",
