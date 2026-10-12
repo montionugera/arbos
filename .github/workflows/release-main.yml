@@ -1,0 +1,383 @@
+name: Release main
+
+# Every green commit on `main` becomes an installable, signed build of Arbos,
+# with no human picking a version number and no human pressing anything.
+#
+# There is one channel, `main`, and one document the app fetches:
+#   https://github.com/unarbos/arbos/releases/download/edge/manifest.json
+#
+# ── the version ──────────────────────────────────────────────────────────────
+# `0.2.112` out of app/Cargo.toml, and behind it the count of commits on the
+# branch: `0.2.112.1877`. The pair is what the binary already reports
+# (ARBOS_BUILD at compile time) and what the bundle carries, so nothing is
+# invented for the manifest, and `0.2.112.1877` sorts above `0.2.112.1876`
+# without anybody deciding anything. The short SHA rides along so a build can
+# be traced to its commit.
+#
+# ── never a red build ────────────────────────────────────────────────────────
+# The trigger is `workflow_run` on CI, and the jobs run only when that run
+# concluded `success` on a push to `main`. There is no path from a red commit
+# to a published payload.
+#
+# ── safe to re-run ───────────────────────────────────────────────────────────
+# Re-running publishes the same version and build again: the manifest is
+# rewritten, the assets are uploaded with --clobber, and the rolling release
+# is created only if it is missing. Running it twice leaves exactly what
+# running it once leaves.
+#
+# ── one writer ───────────────────────────────────────────────────────────────
+# This is the only workflow that touches the `edge` release. Several commits
+# can land at once and each starts a run; the concurrency group serialises
+# them and never cancels a running publish, and GitHub keeps only the newest
+# run waiting, so a burst of merges collapses into the newest build.
+#
+# ── signing ──────────────────────────────────────────────────────────────────
+# What makes a payload safe to install is the Ed25519 signature the manifest
+# carries over its bytes, checked by the app against the public key compiled
+# into it (app/crates/update/update-key.pub). That promise is ours to make and
+# needs nothing from Apple, which is why this works today.
+#
+# Apple's signature is a second, separate promise, about what Gatekeeper does
+# to a copy somebody downloads in a browser. `.github/actions/macos-payload`
+# makes whichever of it is possible:
+#
+#   a "Developer ID Application" certificate   signed, notarized, stapled
+#   any other Apple certificate                signed (notarytool takes only a
+#                                              Developer ID certificate)
+#   none                                       ad-hoc signed — what a fork gets,
+#                                              and the updater installs it
+#
+# Notarization, once it is possible, is not allowed to fail quietly: the macOS
+# job fails and nothing is published, rather than a payload going out that
+# Gatekeeper would reject.
+#
+# ── secrets ──────────────────────────────────────────────────────────────────
+#   ARBOS_UPDATE_SIGNING_KEY   required: the private half of the update key,
+#                              base64. Without it this workflow skips itself
+#                              with a note rather than publishing something
+#                              every app would refuse.
+#   DEVELOPER_ID_CERT_P12 + P12_PASSWORD           the Apple certificate
+#   NOTARY_KEY_P8 + NOTARY_KEY_ID + NOTARY_ISSUER_ID   App Store Connect API
+#                                                      key, for notarization
+#
+# Everything hangs off one rolling pre-release tagged `edge`. The tag is a
+# container, not a version: it is made once and never moved, and what changes
+# is the assets on it. That is what keeps the manifest URL constant, so a
+# shipped app never has to be told where to look next.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  TAG: edge
+
+jobs:
+  # What is being published, worked out once so the three jobs below name the
+  # same files. The build number is a commit count, and a shallow checkout
+  # would count differently in each job.
+  plan:
+    name: What to publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    env:
+      HAVE_KEY: ${{ secrets.ARBOS_UPDATE_SIGNING_KEY != '' }}
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      sha: ${{ steps.plan.outputs.sha }}
+      short: ${{ steps.plan.outputs.short }}
+      version: ${{ steps.plan.outputs.version }}
+      build: ${{ steps.plan.outputs.build }}
+      notes: ${{ steps.plan.outputs.notes }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+      - id: plan
+        run: |
+          set -euo pipefail
+          if [ "$HAVE_KEY" != "true" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Release main not set up::ARBOS_UPDATE_SIGNING_KEY is not set, so nothing was published. Run \`cargo run -p zeron-update --bin arbos-updatectl -- keygen\` once, commit the public line to app/crates/update/update-key.pub, and store the secret."
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' app/Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+          # The subject of the commit. For a merge that is the PR's own title,
+          # which is the sentence worth showing next to an Update button.
+          {
+            echo "notes<<ARBOS_EOF"
+            git log -1 --format=%s
+            echo "ARBOS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: Arbos app (macOS arm64)
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: macos-15
+    timeout-minutes: 120
+    outputs:
+      signing: ${{ steps.payload.outputs.signing }}
+      notarized: ${{ steps.payload.outputs.notarized }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Rust toolchain
+        working-directory: app
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: app
+          key: release-main-macos
+          cache-on-failure: true
+      - id: payload
+        uses: ./.github/actions/macos-payload
+        with:
+          build: ${{ needs.plan.outputs.build }}
+          developer-id-p12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          developer-id-p12-password: ${{ secrets.P12_PASSWORD }}
+          notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
+      - name: Collect
+        env:
+          PAYLOAD: ${{ steps.payload.outputs.path }}
+          SIGNING: ${{ steps.payload.outputs.signing }}
+          NOTARIZED: ${{ steps.payload.outputs.notarized }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "$PAYLOAD" dist/
+          ls -la dist
+          echo "macOS payload \`$(basename "$PAYLOAD")\` — Apple signature \`$SIGNING\`, notarized \`$NOTARIZED\`." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload-macos
+          # Only the tarball. Nothing secret is ever in the workspace — the
+          # certificate is decoded into $RUNNER_TEMP and deleted — but the
+          # glob is narrow anyway.
+          path: dist/*.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  linux:
+    name: Arbos (Linux x86_64)
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Rust toolchain
+        working-directory: app
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: app
+          key: release-main-linux
+          cache-on-failure: true
+      - id: payload
+        uses: ./.github/actions/linux-payload
+        with:
+          build: ${{ needs.plan.outputs.build }}
+          # What the Linux tarball workflow this replaces shipped. Switch to
+          # `release` for an optimised desktop at the price of a longer job.
+          profile: debug
+      - name: Collect
+        env:
+          PAYLOAD: ${{ steps.payload.outputs.path }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "$PAYLOAD" dist/
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload-linux
+          path: dist/*.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Sign and publish
+    needs: [plan, macos, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}.${{ needs.plan.outputs.build }}
+      SHA: ${{ needs.plan.outputs.sha }}
+      SHORT: ${{ needs.plan.outputs.short }}
+      SIGNING: ${{ needs.macos.outputs.signing }}
+      NOTARIZED: ${{ needs.macos.outputs.notarized }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Rust toolchain
+        working-directory: app
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: app
+          key: release-main-publish
+          cache-on-failure: true
+      # The tool that measures and signs, built from the same commit as the
+      # app, so the public key it verifies against is the one that app has.
+      - name: Build arbos-updatectl
+        working-directory: app
+        run: cargo build --locked -p zeron-update --bin arbos-updatectl
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: The rolling pre-release the channel hangs off
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --prerelease \
+              --target "$SHA" \
+              --title "Arbos edge" \
+              --notes "The first build is on its way."
+          fi
+      # What is on the release now, for the log and for a warning if this run
+      # would publish something older than it.
+      - name: The manifest already published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p previous
+          if gh release download "$TAG" --pattern manifest.json --dir previous 2>/dev/null; then
+            was="$(jq -r '.version // empty' previous/manifest.json)"
+            echo "replacing $was with $VERSION"
+            if [ -n "$was" ] && [ "$(printf '%s\n%s\n' "$was" "$VERSION" | sort -V | tail -1)" != "$VERSION" ] && [ "$was" != "$VERSION" ]; then
+              echo "::warning title=Publishing an older build::The release carries $was and this run publishes $VERSION, which sorts below it. Installed apps will not downgrade; a fresh install would get the older build until the next merge."
+            fi
+          else
+            echo "no manifest on the release yet; this is the first"
+          fi
+          rm -rf previous
+      - name: Measure, sign, and write the manifest
+        working-directory: dist
+        env:
+          ARBOS_UPDATE_SIGNING_KEY: ${{ secrets.ARBOS_UPDATE_SIGNING_KEY }}
+          NOTES: ${{ needs.plan.outputs.notes }}
+        run: |
+          set -euo pipefail
+          ls -la
+          shopt -s nullglob
+          mac=(*-macos-*-app.tar.gz)
+          linux=(*-linux-*.tar.gz)
+          if [ "${#mac[@]}" -ne 1 ] || [ "${#linux[@]}" -ne 1 ]; then
+            echo "::error title=Payloads missing::expected one macOS app tarball and one Linux tarball, found: $(ls)"
+            exit 1
+          fi
+          printf '%s\n' "$NOTES" > notes.txt
+          ../app/target/debug/arbos-updatectl sign \
+            --manifest manifest.json \
+            --version "$VERSION" \
+            --commit "$SHORT" \
+            --notes-file notes.txt \
+            --artifact "${mac[0]}" \
+            --artifact "${linux[0]}"
+          rm -f notes.txt
+          cat manifest.json
+      # The key that signed is the key the app has, proven here and not on a
+      # user's machine. A manifest that fails this never leaves the runner.
+      - name: Verify the manifest against the compiled-in public key
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          if ! ../app/target/debug/arbos-updatectl verify --manifest manifest.json --dir .; then
+            echo "::error title=Signing key mismatch::The manifest signed with ARBOS_UPDATE_SIGNING_KEY does not verify against app/crates/update/update-key.pub. The secret and the committed public key are not two halves of one key; nothing was published."
+            exit 1
+          fi
+      - name: Attach
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" ./*.tar.gz manifest.json latest.txt --clobber
+          # Drop the payloads the manifest no longer names, so the pre-release
+          # does not grow a payload per commit forever. The two documents the
+          # app reads are never pruned.
+          keep="$(jq -r '.files | keys[]' manifest.json)"
+          gh release view "$TAG" --json assets -q '.assets[].name' | while read -r name; do
+            case "$name" in
+              manifest.json|latest.txt) continue ;;
+            esac
+            if ! printf '%s\n' "$keep" | grep -qxF "$name"; then
+              echo "pruning $name"
+              gh release delete-asset "$TAG" "$name" -y
+            fi
+          done
+      - name: Say what went out
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ needs.plan.outputs.notes }}
+        run: |
+          set -euo pipefail
+          commit_url="https://github.com/${{ github.repository }}/commit/$SHA"
+          manifest_url="https://github.com/${{ github.repository }}/releases/download/$TAG/manifest.json"
+          # The page says what the newest build is, so the releases list reads
+          # as a release and not as a bucket.
+          {
+            printf '**%s** — [`%s`](%s)\n\n' "$VERSION" "$SHORT" "$commit_url"
+            printf '%s\n\n' "$NOTES"
+            printf 'Every green commit on `main`, published for the Arbos app'"'"'s own updater. The tag is a container, not a version: what changes is the assets on it.\n\n'
+            printf 'macOS signature: `%s`. Notarized: `%s`.\n\n' "${SIGNING:-unknown}" "${NOTARIZED:-false}"
+            printf 'Manifest: <%s>\n' "$manifest_url"
+          } > release-notes.md
+          gh release edit "$TAG" --prerelease --title "Arbos edge" --notes-file release-notes.md
+          rm -f release-notes.md
+          {
+            echo "### Release main"
+            echo
+            echo "Published \`$VERSION\` (\`$SHORT\`)."
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| macOS signature | \`${SIGNING:-unknown}\` |"
+            echo "| Notarized | \`${NOTARIZED:-false}\` |"
+            echo "| Manifest | <$manifest_url> |"
+            if [ "${NOTARIZED:-false}" != "true" ]; then
+              echo
+              echo "> The in-app updater installs this. A copy downloaded in a browser would be stopped by Gatekeeper until a Developer ID Application certificate is in \`DEVELOPER_ID_CERT_P12\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -4,11 +4,14 @@
 //! sidebar update strip, and the desktop install paths).
 //!
 //! Release layout: the checker reads `manifest.json` from the GitHub Release
-//! tagged `edge` (`releases/download/edge/manifest.json`). A Linux tarball may
-//! be attached there when its build is green. A Mac disk image is not
-//! published from this repo, and an unsigned Mac artifact is not uploaded.
-//! `latest.txt` (version only) remains as the fallback. A loopback `edge_url`
-//! still serves `{edge}/releases/*` so the local fixture tests can run.
+//! tagged `edge` (`releases/download/edge/manifest.json`). The "Release main"
+//! workflow writes it on every green commit to `main`, attaching the Mac app
+//! tarball (Apple-signed with the best certificate the repository holds) and
+//! the Linux tarball; every payload also carries Arbos's own Ed25519 signature
+//! over its bytes (`sign`, `update-key.pub`), which the app verifies before it
+//! installs anything. `latest.txt` (version only) remains as the fallback for
+//! reporting. A loopback `edge_url` still serves `{edge}/releases/*` so the
+//! local fixture tests can run.
 //!
 //! Install kinds and their update paths:
 //! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
@@ -40,6 +43,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 
+pub mod sign;
 #[cfg(windows)]
 pub mod windows;
 
@@ -83,12 +87,20 @@ const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 // Release metadata
 // ---------------------------------------------------------------------------
 
-/// GitHub Release `manifest.json` — written by the Linux tarball workflow.
+/// GitHub Release `manifest.json` — written by the "Release main" workflow
+/// through `arbos-updatectl sign`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: String,
+    /// The short SHA of the commit this build is, so a release can be traced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The commit subject — the sentence worth showing next to an Update button.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
     /// Artifact file name → metadata. Empty for pre-manifest releases resolved
-    /// via `latest.txt` — downloads then skip checksum verification (with a log).
+    /// via `latest.txt`; such a release can be reported but never installed,
+    /// because nothing in it is signed.
     #[serde(default)]
     pub files: BTreeMap<String, FileMeta>,
 }
@@ -97,6 +109,10 @@ pub struct Manifest {
 pub struct FileMeta {
     #[serde(default)]
     pub sha256: Option<String>,
+    /// Base64 Ed25519 signature over the file's bytes, made with the private
+    /// half of [`sign::built_in_key`]. A file without one is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// Artifact-name platform pair matching the packaging scripts. Unsupported
@@ -214,7 +230,7 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
     }
     Ok(Manifest {
         version,
-        files: BTreeMap::new(),
+        ..Manifest::default()
     })
 }
 
@@ -614,9 +630,24 @@ fn bundle_short_version(plist: &str) -> Option<String> {
 // Download + verify
 // ---------------------------------------------------------------------------
 
+/// The key every downloaded payload must be signed with: the one compiled in
+/// from `update-key.pub`, or under test the fixture pair's public half.
+fn update_key() -> Option<sign::PublicKey> {
+    #[cfg(test)]
+    {
+        Some(tests::fixture_keys().1)
+    }
+    #[cfg(not(test))]
+    {
+        sign::built_in_key()
+    }
+}
+
 /// Stream `{edge}/releases/<file>` to `dest`, verifying the manifest sha256 when
-/// present. Writes through a `.partial` sidecar so an interrupted download never
-/// leaves a plausible-looking artifact behind.
+/// present and then the manifest's Ed25519 signature over the bytes, which is
+/// not optional: a file the manifest does not sign, or signs with another key,
+/// is refused and deleted. Writes through a `.partial` sidecar so an
+/// interrupted download never leaves a plausible-looking artifact behind.
 pub async fn download_release_file(
     edge_url: &str,
     manifest: &Manifest,
@@ -624,13 +655,23 @@ pub async fn download_release_file(
     dest: &Path,
 ) -> anyhow::Result<()> {
     let url = format!("{}/{file}", release_base(edge_url)?);
-    let expected = manifest.files.get(file).and_then(|m| m.sha256.as_deref());
+    let meta = manifest.files.get(file);
+    let expected = meta.and_then(|m| m.sha256.as_deref());
     if expected.is_none() {
         tracing::warn!(
             file,
-            "no checksum in release metadata; skipping verification"
+            "no checksum in release metadata; relying on the signature alone"
         );
     }
+    let signature = meta.and_then(|m| m.signature.as_deref());
+    // Refused before a byte is fetched: a manifest that does not sign the
+    // file cannot be made to by downloading it.
+    let Some(signature) = signature else {
+        bail!(
+            "the update is not signed by Arbos: the release manifest carries no signature for {file}"
+        );
+    };
+    let key = update_key().context("this build of Arbos has no update key compiled in")?;
     let partial = dest.with_extension("partial");
     let resp = http_client()?
         .get(&url)
@@ -657,6 +698,15 @@ pub async fn download_release_file(
             tokio::fs::remove_file(&partial).await.ok();
             bail!("checksum mismatch for {file}: expected {expected}, got {actual}");
         }
+    }
+    // Ed25519 verifies a whole message, not a stream, so the bytes come back
+    // off disk once they are all there.
+    let bytes = tokio::fs::read(&partial)
+        .await
+        .with_context(|| format!("reading back {}", partial.display()))?;
+    if let Err(err) = key.verify(&bytes, signature) {
+        tokio::fs::remove_file(&partial).await.ok();
+        return Err(err).with_context(|| format!("the update is not signed by Arbos: {file}"));
     }
     tokio::fs::rename(&partial, dest)
         .await
@@ -1453,6 +1503,25 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
+    /// The pair every fixture in this module is signed with. Fixed, so
+    /// [`update_key`] can hand out the public half without any test having to
+    /// thread a key through the production path; the shipped build uses the
+    /// compiled-in key instead and never sees this one.
+    pub(super) fn fixture_keys() -> (sign::SecretKey, sign::PublicKey) {
+        let secret = sign::SecretKey::from_base64("dGhlIEFyYm9zIHRlc3Qgc2lnbmluZyBzZWVkLi4uLi4=")
+            .expect("the fixture seed is 32 bytes of base64");
+        let public = secret.public().expect("a seed always has a public half");
+        (secret, public)
+    }
+
+    /// Metadata for `bytes` as `arbos-updatectl sign` would write it.
+    fn signed_meta(bytes: &[u8]) -> FileMeta {
+        FileMeta {
+            sha256: Some(sign::sha256_hex(bytes)),
+            signature: Some(fixture_keys().0.sign(bytes).unwrap()),
+        }
+    }
+
     #[tokio::test]
     async fn stalled_update_headers_and_body_time_out_but_progressing_body_survives() {
         use std::time::Duration;
@@ -1733,7 +1802,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manifest = Manifest {
             version: "9.9.9".into(),
-            files: BTreeMap::new(),
+            ..Manifest::default()
         };
         let app_root = tmp.path().join("app");
         let data_dir = tmp.path().join("data");
@@ -1773,18 +1842,106 @@ mod tests {
     #[test]
     fn manifest_parses_with_and_without_files() {
         let full: Manifest = serde_json::from_str(
-            r#"{"version":"0.1.1","files":{"arbos-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
+            r#"{"version":"0.1.1","commit":"abc1234","notes":"Fix the thing","files":{"arbos-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc","signature":"c2ln"}}}"#,
         )
         .unwrap();
         assert_eq!(full.version, "0.1.1");
+        assert_eq!(full.commit.as_deref(), Some("abc1234"));
+        assert_eq!(full.notes.as_deref(), Some("Fix the thing"));
+        let meta = &full.files["arbos-0.1.1-linux-x86_64.tar.gz"];
+        assert_eq!(meta.sha256.as_deref(), Some("abc"));
+        assert_eq!(meta.signature.as_deref(), Some("c2ln"));
+        // What the Linux-only workflow used to write: still readable, so the
+        // checker can report the version, and never installable.
+        let legacy: Manifest = serde_json::from_str(
+            r#"{"version":"0.1.1","files":{"arbos-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.commit, None);
         assert_eq!(
-            full.files["arbos-0.1.1-linux-x86_64.tar.gz"]
-                .sha256
-                .as_deref(),
-            Some("abc")
+            legacy.files["arbos-0.1.1-linux-x86_64.tar.gz"].signature,
+            None
         );
         let bare: Manifest = serde_json::from_str(r#"{"version":"0.1.1"}"#).unwrap();
         assert!(bare.files.is_empty());
+        // Absent optionals stay out of the JSON the signer writes.
+        let written = serde_json::to_string(&bare).unwrap();
+        assert!(!written.contains("commit"), "{written}");
+        assert!(!written.contains("notes"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn downloads_refuse_files_the_manifest_does_not_sign_with_our_key() {
+        let payload = b"a payload somebody published".to_vec();
+        let (base, server) = serve_forever(payload.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("payload.tar.gz");
+        let file = "payload.tar.gz";
+        let manifest = |meta: FileMeta| Manifest {
+            version: "9.9.9".into(),
+            files: [(file.to_owned(), meta)].into(),
+            ..Manifest::default()
+        };
+
+        // No entry at all, and an entry with a checksum but no signature.
+        for bad in [
+            Manifest {
+                version: "9.9.9".into(),
+                ..Manifest::default()
+            },
+            manifest(FileMeta {
+                sha256: Some(sign::sha256_hex(&payload)),
+                signature: None,
+            }),
+        ] {
+            let error = download_release_file(&base, &bad, file, &dest)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("the update is not signed by Arbos"),
+                "unexpected error: {error:#}"
+            );
+        }
+
+        // Signed, but by somebody else's key.
+        let (other, _) = sign::generate().unwrap();
+        let wrong = manifest(FileMeta {
+            sha256: Some(sign::sha256_hex(&payload)),
+            signature: Some(other.sign(&payload).unwrap()),
+        });
+        let error = download_release_file(&base, &wrong, file, &dest)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("the update is not signed by Arbos"),
+            "unexpected error: {error:#}"
+        );
+
+        // Our signature over different bytes.
+        let tampered = manifest(FileMeta {
+            sha256: None,
+            signature: Some(fixture_keys().0.sign(b"other bytes").unwrap()),
+        });
+        let error = download_release_file(&base, &tampered, file, &dest)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("the update is not signed by Arbos"),
+            "unexpected error: {error:#}"
+        );
+        assert!(!dest.exists(), "a refused payload must not land");
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            0,
+            "a refused payload must not leave a .partial behind"
+        );
+
+        // Properly signed: installed.
+        download_release_file(&base, &manifest(signed_meta(&payload)), file, &dest)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        server.abort();
     }
 
     #[cfg(unix)]
@@ -2030,13 +2187,8 @@ mod tests {
         std::fs::create_dir_all(&app_root).unwrap();
         let manifest = |bytes: &[u8]| Manifest {
             version: "9.9.9".into(),
-            files: [(
-                headless_artifact("9.9.9"),
-                FileMeta {
-                    sha256: Some(format!("{:x}", Sha256::digest(bytes))),
-                },
-            )]
-            .into(),
+            files: [(headless_artifact("9.9.9"), signed_meta(bytes))].into(),
+            ..Manifest::default()
         };
 
         let wrong = fake_headless_tarball(&tmp.path().join("wrong"), "1.0.0");

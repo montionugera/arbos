@@ -497,9 +497,11 @@ mod tests {
                 artifact("1.2.3"),
                 super::super::FileMeta {
                     sha256: Some(format!("{:x}", Sha256::digest(b"expected"))),
+                    signature: Some(String::new()),
                 },
             )]
             .into(),
+            ..Default::default()
         };
         let error = stage(&base, &manifest, dir.path()).await.unwrap_err();
         server.join().unwrap();
