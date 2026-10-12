@@ -3688,10 +3688,17 @@ async fn drive_run(
                 wake_if_worker(&inner, &chat_id, &run_cwd, status, &folded_text(&folded));
                 if main_turn {
                     // The step clears with the turn. Unread is set only when
-                    // the person has text to read.
+                    // the transcript will show a sentence. "Done." is text,
+                    // and it is not a message.
+                    let showed_person = folded.iter().any(|part| match part {
+                        MessagePart::Text { text, .. } => {
+                            crate::arbos_live::shows_the_person(text)
+                        }
+                        _ => false,
+                    });
                     crate::arbos_live::end_main_turn(
                         std::path::Path::new(&run_cwd),
-                        visible_reply,
+                        showed_person,
                     );
                 }
             }

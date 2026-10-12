@@ -222,8 +222,65 @@ pub fn mark_seen(project: &Path) -> Result<(), String> {
     write_live(project, &file)
 }
 
+/// True when `text` contains a sentence Main will actually draw.
+///
+/// The transcript drops a short acknowledgement ("Done."), a line that names
+/// a file, and a sentence longer than eighty characters. Those turns send no
+/// message, so they must not light the project. The checks match the
+/// transcript's sentence filter.
+pub fn shows_the_person(text: &str) -> bool {
+    for raw in text.split('\n') {
+        let line = raw
+            .trim()
+            .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | '>' | '#'))
+            .trim();
+        if line.len() < 12 || mentions_file_name(line) {
+            continue;
+        }
+        let sentence = line.split(". ").next().unwrap_or(line).trim();
+        if sentence.len() < 12 || mentions_file_name(sentence) || sentence.chars().count() > 160
+        {
+            continue;
+        }
+        let mut shown = sentence.to_owned();
+        if !shown.ends_with('.') && !shown.ends_with('!') && !shown.ends_with('?') {
+            shown.push('.');
+        }
+        if person_can_read(&shown) {
+            return true;
+        }
+    }
+    false
+}
+
+fn mentions_file_name(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains(".md") || lower.contains(".arbos") || text.contains('/')
+}
+
+fn person_can_read(sentence: &str) -> bool {
+    let lower = sentence.to_ascii_lowercase();
+    if lower.contains("on this goal") {
+        return true;
+    }
+    if sentence.chars().count() > 80 {
+        return false;
+    }
+    const HIDDEN: &[&str] = &[
+        "checklist",
+        "tick",
+        "verify",
+        "status",
+        "report",
+        "file",
+        "path",
+        "goal.md",
+    ];
+    !HIDDEN.iter().any(|word| lower.contains(word))
+}
+
 /// A Main turn ended. The step clears. Unread is set only when the turn
-/// showed text.
+/// showed the person a sentence.
 pub fn end_main_turn(project: &Path, showed_text: bool) {
     activities().remove(project);
     let _guard = live_lock();
