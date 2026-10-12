@@ -3660,12 +3660,12 @@ mod tests {
         handle.shutdown().await;
     }
 
+    /// The development profile lives under `orgs/`; a file in its place
+    /// makes assembly fail, and the failure must come back before a handle.
     #[tokio::test]
-    async fn bootstrap_reports_local_assembly_failure_before_returning_a_handle() {
+    async fn bootstrap_reports_assembly_failure_before_returning_a_handle() {
         let dir = tempfile::tempdir().unwrap();
-        zeron_engine::EngineProfile::local(dir.path()).unwrap();
-        std::fs::create_dir(dir.path().join("profiles")).unwrap();
-        std::fs::write(dir.path().join("profiles/local"), b"not a directory").unwrap();
+        std::fs::write(dir.path().join("orgs"), b"not a directory").unwrap();
         let port = free_port().await;
 
         let error = match EngineHandle::bootstrap(EngineBootConfig {
@@ -3681,7 +3681,7 @@ mod tests {
         {
             Ok(handle) => {
                 handle.shutdown().await;
-                panic!("a corrupt local store must fail bootstrap")
+                panic!("a corrupt store must fail bootstrap")
             }
             Err(error) => error,
         };
@@ -3889,8 +3889,11 @@ mod tests {
         drop(squatter);
     }
 
+    /// Hosted sync is compiled out, so a production client id is ignored:
+    /// the boot opens the development profile with no sign-in and no
+    /// network, and local data answers at once.
     #[tokio::test]
-    async fn production_bootstrap_opens_local_data_without_sign_in() {
+    async fn production_bootstrap_opens_the_development_profile_without_sign_in() {
         let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
@@ -3904,7 +3907,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(handle.engine_info().workspace_scope, WorkspaceScope::Local);
+        assert_eq!(
+            handle.engine_info().workspace_scope,
+            WorkspaceScope::Development
+        );
         let info: EngineInfo = handle
             .client()
             .call_as(methods::ENGINE_INFO, serde_json::json!({}))
@@ -3917,9 +3923,13 @@ mod tests {
             .subscribe(methods::AUTH_STATUS, serde_json::json!({}))
             .await
             .unwrap();
-        assert_eq!(
-            parse_auth_state(&auth.recv().await.unwrap()),
-            Some(AuthState::SignedOut)
+        // The development profile presents its own user: no hosted org.
+        assert!(
+            matches!(
+                parse_auth_state(&auth.recv().await.unwrap()),
+                Some(AuthState::SignedIn { user, org_id: None }) if user.id == "dev-user"
+            ),
+            "the development user is signed in without an org"
         );
         let harnesses = handle
             .client()
@@ -3928,15 +3938,21 @@ mod tests {
             .expect("local data RPC is immediately available");
         assert!(harnesses.as_array().is_some_and(|items| !items.is_empty()));
         assert!(
-            !dir.path().join("orgs/dev-org/dev-user").exists(),
-            "production boot must not create dev-user data"
+            dir.path().join("orgs/dev-org/dev-user").is_dir(),
+            "the development profile holds the data"
         );
-        assert!(dir.path().join("profiles/local").is_dir());
+        assert!(
+            !dir.path().join("profiles/local").exists(),
+            "no local profile is made beside it"
+        );
         handle.shutdown().await;
     }
 
+    /// A saved session without an organization used to hold the data
+    /// behind cloud onboarding. Hosted sync is compiled out, so nothing is
+    /// deferred: the development profile opens and answers at once.
     #[tokio::test]
-    async fn engine_info_is_available_while_cloud_onboarding_is_deferred() {
+    async fn a_saved_session_without_an_org_defers_nothing() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("session.json"),
@@ -3955,33 +3971,19 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(matches!(
-            handle
-                .deferred_state()
-                .expect("embedded lifecycle")
-                .borrow()
-                .clone(),
-            DeferredEngineState::Waiting
-        ));
-
         let info: EngineInfo = handle
             .client()
             .call_as(methods::ENGINE_INFO, serde_json::json!({}))
             .await
-            .expect("EngineInfo bypasses deferred cloud stores");
-        assert_eq!(info.workspace_scope, WorkspaceScope::Synced);
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                handle
-                    .client()
-                    .call(methods::LIST_HARNESSES, serde_json::json!({})),
-            )
+            .unwrap();
+        assert_eq!(info.workspace_scope, WorkspaceScope::Development);
+        let harnesses = handle
+            .client()
+            .call(methods::LIST_HARNESSES, serde_json::json!({}))
             .await
-            .is_err(),
-            "cloud data waits for organization onboarding"
-        );
-        assert!(!dir.path().join("orgs").exists());
+            .expect("data answers without onboarding");
+        assert!(harnesses.as_array().is_some_and(|items| !items.is_empty()));
+        assert!(dir.path().join("orgs").is_dir());
         handle.shutdown().await;
     }
 

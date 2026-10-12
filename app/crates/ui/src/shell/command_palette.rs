@@ -2661,11 +2661,28 @@ mod tests {
         assert_eq!(palette_tab(window, cx), Some(Tab::All));
     }
 
+    /// The left bar lists projects, so a digit opens the project in that
+    /// slot and lands on its Main chat.
     #[gpui::test]
-    fn digit_shortcuts_jump_to_sessions_once_the_palette_closes(cx: &mut TestAppContext) {
-        let (window, _dir) = keyed_palette_window(cx);
+    fn digit_shortcuts_jump_to_projects_once_the_palette_closes(cx: &mut TestAppContext) {
+        let (window, dir) = keyed_palette_window(cx);
         window
             .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.spaces = vec![
+                        space("p1", &dir.path().join("p1")),
+                        space("p2", &dir.path().join("p2")),
+                    ];
+                    state.apply_chats(vec![
+                        chat("p1-main", None, false, 0),
+                        chat("p2-main", None, false, 1),
+                    ]);
+                    for chat in &mut state.chats {
+                        chat.space_id = Some(chat.id.trim_end_matches("-main").to_owned());
+                    }
+                    state.selected_space = Some("p1".into());
+                    state.selected_chat = Some("p1-main".into());
+                });
                 shell.toggle_command_palette(window, cx);
                 shell.close_command_palette(window, cx);
             })
@@ -2676,7 +2693,15 @@ mod tests {
 
         cx.simulate_keystrokes(window.into(), &platform_combo("mod-2"));
         assert_eq!(palette_tab(window, cx), None);
-        assert_eq!(selected_chat(window, cx).as_deref(), Some("second"));
+        assert_eq!(selected_chat(window, cx).as_deref(), Some("p2-main"));
+    }
+
+    fn space(id: &str, path: &std::path::Path) -> zeron_proto::Space {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": "local", "path": path.display().to_string(),
+            "createdAt": "2026-09-20T00:00:00Z",
+        }))
+        .unwrap()
     }
 
     #[gpui::test]

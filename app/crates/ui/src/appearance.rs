@@ -388,9 +388,10 @@ mod tests {
         }
     }
 
+    /// The app starts dark; a missing `appearance` key lands there too.
     #[test]
-    fn default_mode_is_system() {
-        assert_eq!(AppearanceMode::default(), AppearanceMode::System);
+    fn default_mode_is_dark() {
+        assert_eq!(AppearanceMode::default(), AppearanceMode::Dark);
     }
 
     /// The setting round-trips through the settings file as a lowercase string.
