@@ -4,6 +4,7 @@
 //! usage meters — and clicking one switches to it, the same `ActivateAgentAccount` Settings →
 //! Accounts runs. Both views share [`AccountsSnapshotCache`], so a switch in
 //! either shows up in the other.
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -26,6 +27,23 @@ use crate::theme::Theme;
 const FORCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
 /// Background re-probe while a composer is alive: usage moves as turns run.
 const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// The bucket view re-reads the agent's log at most this often while it is
+/// on screen; a turn takes longer than this to change it.
+const BREAKDOWN_MIN_INTERVAL: Duration = Duration::from_secs(2);
+/// How long the pointer rests on the context ring before the card opens;
+/// a pass over the ring on the way to the composer opens nothing.
+const HOVER_OPEN_DELAY: Duration = Duration::from_millis(200);
+/// How long the pointer may be between the ring and its hover-opened card
+/// before the card closes.
+const HOVER_CLOSE_GRACE: Duration = Duration::from_millis(250);
+
+/// The Arbos agent chat the footer belongs to: the project folder and the
+/// chat id, both on this device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentChat {
+    pub project: String,
+    pub chat_id: String,
+}
 
 /// The binding limit: the most-used window of the account. Pure.
 pub fn used_fraction(account: &AgentAccount) -> Option<f32> {
@@ -60,6 +78,19 @@ pub struct AccountUsage {
     load_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
     popup: popover::Popup<FooterCard>,
+    /// The chat whose bucket view the context ring shows, when it is an
+    /// agent of a local Arbos project.
+    agent_chat: Option<AgentChat>,
+    breakdown: Option<crate::context_usage::Breakdown>,
+    breakdown_read_at: Option<Instant>,
+    breakdown_task: Option<Task<()>>,
+    /// The context card opened from a hover rather than a click. A click
+    /// pins it; leaving ring and card closes it.
+    hover_opened: bool,
+    ring_hovered: bool,
+    card_hovered: bool,
+    hover_open: Option<Task<()>>,
+    hover_close: Option<Task<()>>,
     _poll: Task<()>,
     _cache: Subscription,
     _state: Subscription,
@@ -93,6 +124,15 @@ impl AccountUsage {
             load_task: None,
             action_task: None,
             popup: popover::Popup::default(),
+            agent_chat: None,
+            breakdown: None,
+            breakdown_read_at: None,
+            breakdown_task: None,
+            hover_opened: false,
+            ring_hovered: false,
+            card_hovered: false,
+            hover_open: None,
+            hover_close: None,
             _poll: poll,
             // Settings → Accounts writes the same cache.
             _cache: cx.observe_global::<AccountsSnapshotCache>(|_, cx| cx.notify()),
@@ -105,6 +145,7 @@ impl AccountUsage {
         &mut self,
         harness: Option<HarnessId>,
         target: Option<String>,
+        agent_chat: Option<AgentChat>,
         cx: &mut Context<Self>,
     ) {
         let harness = harness.filter(|h| signs_in(*h) && reports_usage(*h));
@@ -115,10 +156,114 @@ impl AccountUsage {
             self.last_forced = None;
             self.error = None;
         }
+        if self.agent_chat != agent_chat {
+            self.agent_chat = agent_chat;
+            self.breakdown = None;
+            self.breakdown_read_at = None;
+            self.breakdown_task = None;
+        }
         if harness.is_some() && !self.loaded {
             self.loaded = true;
             self.load(true, cx);
         }
+    }
+
+    /// Read the agent's session log for the bucket view, off the main
+    /// thread, at most once per [`BREAKDOWN_MIN_INTERVAL`].
+    fn read_breakdown(&mut self, cx: &mut Context<Self>) {
+        let Some(agent_chat) = self.agent_chat.clone() else {
+            return;
+        };
+        if self.breakdown_task.is_some()
+            || self
+                .breakdown_read_at
+                .is_some_and(|at| at.elapsed() < BREAKDOWN_MIN_INTERVAL)
+        {
+            return;
+        }
+        let window = self
+            .state
+            .read(cx)
+            .context_usage
+            .and_then(|usage| usage.window);
+        self.breakdown_task = Some(cx.spawn(async move |this, cx| {
+            let breakdown = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::context_usage::measure(
+                        Path::new(&agent_chat.project),
+                        &agent_chat.chat_id,
+                        window,
+                    )
+                })
+                .await;
+            this.update(cx, |usage, cx| {
+                usage.breakdown = breakdown;
+                usage.breakdown_read_at = Some(Instant::now());
+                usage.breakdown_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The pointer entered or left the context ring. A rest on the ring
+    /// opens the card when nothing is up; leaving starts the grace timer.
+    fn ring_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        self.ring_hovered = hovered;
+        if !hovered {
+            self.hover_open = None;
+            self.schedule_hover_close(cx);
+            return;
+        }
+        self.hover_close = None;
+        if self.popup.as_open().is_some() {
+            return;
+        }
+        self.read_breakdown(cx);
+        self.hover_open = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HOVER_OPEN_DELAY).await;
+            this.update(cx, |usage, cx| {
+                if usage.ring_hovered && usage.popup.as_open().is_none() {
+                    usage.hover_opened = true;
+                    usage.popup.open(FooterCard::Context);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// The pointer entered or left the hover-opened context card.
+    fn card_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        self.card_hovered = hovered;
+        if hovered {
+            self.hover_close = None;
+        } else {
+            self.schedule_hover_close(cx);
+        }
+    }
+
+    /// The context card is up and came from a hover, not a click.
+    fn hover_card_up(&self) -> bool {
+        self.hover_opened && self.popup.as_open() == Some(&FooterCard::Context)
+    }
+
+    /// Close a hover-opened card once the pointer has been off both the
+    /// ring and the card for [`HOVER_CLOSE_GRACE`]. A pinned card stays.
+    fn schedule_hover_close(&mut self, cx: &mut Context<Self>) {
+        if !self.hover_card_up() {
+            return;
+        }
+        self.hover_close = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HOVER_CLOSE_GRACE).await;
+            this.update(cx, |usage, cx| {
+                if usage.hover_card_up() && !usage.ring_hovered && !usage.card_hovered {
+                    usage.dismiss(cx);
+                }
+            })
+            .ok();
+        }));
     }
 
     fn snapshot<'a>(&self, cx: &'a gpui::App) -> Option<&'a AgentAccountsSnapshot> {
@@ -244,19 +389,38 @@ impl AccountUsage {
     /// press found it open (the card's mouse-down-out already began that
     /// close — see `Popup::note_trigger_press`).
     fn toggle(&mut self, card: FooterCard, cx: &mut Context<Self>) {
-        if self.popup.take_press_was_open() || self.popup.as_open() == Some(&card) {
+        let press_was_open = self.popup.take_press_was_open();
+        self.hover_open = None;
+        if card == FooterCard::Context && self.hover_opened {
+            // The context card last opened from a hover. A click on the
+            // ring pins it: it stays until a click outside. The card's own
+            // mouse-down-out may have begun closing it on this same press,
+            // so open it again rather than trust its state. `hover_opened`
+            // also survives a hover close, in which case this is a plain
+            // open.
+            self.hover_opened = false;
+            self.hover_close = None;
+            self.popup.open(card);
+            self.read_breakdown(cx);
+            cx.notify();
+            return;
+        }
+        if press_was_open || self.popup.as_open() == Some(&card) {
             self.dismiss(cx);
             return;
         }
-        if card == FooterCard::Accounts {
+        match card {
             // Opening the card is the moment someone cares: re-probe.
-            self.load(true, cx);
+            FooterCard::Accounts => self.load(true, cx),
+            FooterCard::Context => self.read_breakdown(cx),
         }
         self.popup.open(card);
         cx.notify();
     }
 
     fn dismiss(&mut self, cx: &mut Context<Self>) {
+        self.hover_close = None;
+        self.card_hovered = false;
         if self.popup.begin_close() {
             popover::reap_popup(cx, |usage: &mut Self| &mut usage.popup);
         }
@@ -265,11 +429,11 @@ impl AccountUsage {
 
     /// A footer ring that opens `card` above itself, right-aligned like the
     /// model picker.
-    fn trigger(
+    fn trigger<E: gpui::InteractiveElement + IntoElement>(
         &self,
         chip: gpui::Stateful<gpui::Div>,
         card: FooterCard,
-        content: impl FnOnce(&Self, &mut Context<Self>) -> gpui::Div,
+        content: impl FnOnce(&Self, &mut Context<Self>) -> E,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let chip = chip
@@ -409,7 +573,8 @@ impl FooterCard {
 }
 
 /// The footer's ring cluster: account usage (accent arc, so the two read
-/// apart), then context occupancy. Each opens its popover on click.
+/// apart), then context occupancy. Each opens its popover on click; the
+/// context ring also opens its bucket view on a hover, and a click pins it.
 impl Render for AccountUsage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -436,15 +601,28 @@ impl Render for AccountUsage {
             )
         });
         let context = crate::context_usage::has_window(context).then(|| {
-            let chip = crate::context_usage::chip(
-                context,
-                self.popup.get() == Some(&FooterCard::Context),
-                &theme,
+            let open = self.popup.get() == Some(&FooterCard::Context);
+            if open {
+                // The card is on screen: keep its numbers current as turns run.
+                self.read_breakdown(cx);
+            }
+            let chip = crate::context_usage::chip(context, open, &theme).on_hover(
+                cx.listener(|usage, hovered: &bool, _, cx| usage.ring_hover(*hovered, cx)),
             );
             self.trigger(
                 chip,
                 FooterCard::Context,
-                move |_, cx| crate::context_usage::card(context, &Theme::of(cx).for_popup()),
+                move |usage, cx| {
+                    crate::context_usage::card(
+                        context,
+                        usage.breakdown.as_ref(),
+                        &Theme::of(cx).for_popup(),
+                    )
+                    .id("context-usage-card")
+                    .on_hover(
+                        cx.listener(|usage, hovered: &bool, _, cx| usage.card_hover(*hovered, cx)),
+                    )
+                },
                 cx,
             )
         });
