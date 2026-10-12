@@ -1283,11 +1283,15 @@ impl Shell {
                 .background_executor()
                 .spawn(async move { load_media(Path::new(&project), &icon) })
                 .await;
+            // A miss stays in `icon_loading`: the rail renders every frame,
+            // and forgetting the miss would re-probe the disk on each one and
+            // repaint forever. `set_project_icon` clears the set on a change.
+            let Some(media) = media else {
+                return;
+            };
             let _ = this.update(cx, |shell, cx| {
                 shell.project.icon_loading.remove(&key);
-                if let Some(media) = media {
-                    shell.project.icons.insert(key, media);
-                }
+                shell.project.icons.insert(key, media);
                 cx.notify();
             });
         })
