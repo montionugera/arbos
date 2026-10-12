@@ -711,6 +711,129 @@ fn reconcile_done_workers(project: &Path) {
     }
 }
 
+/// Main compacts once its saved session passes this size. The next question
+/// then answers from the files on disk, not from the old thread.
+const MAIN_COMPACT_BYTES: u64 = 64 * 1024;
+
+/// What Main shows, and what the fresh session is told, after compaction.
+#[derive(Debug, Clone)]
+pub struct MainCompact {
+    pub notice: String,
+    pub prompt: String,
+}
+
+/// Compact Main when its session has grown. `None` leaves the thread as it is.
+/// This does not change `GOALS.md` or `status.md`.
+pub fn compact_main(project: &Path, chat_id: &str, shown: &str) -> Option<MainCompact> {
+    let shown = shown.trim();
+    if shown.is_empty() || shown.starts_with("/goal") || shown.starts_with("/skill") {
+        return None;
+    }
+    let _guard = layout_lock();
+    let root = root_of(project);
+    if !root.join("project.toml").is_file() {
+        return None;
+    }
+    if main_chat_id(project) != chat_id {
+        return None;
+    }
+    let sessions = root
+        .join("agents")
+        .join("main")
+        .join("fx")
+        .join(".fx")
+        .join("sessions");
+    if session_log_bytes(&sessions) < MAIN_COMPACT_BYTES {
+        return None;
+    }
+    let packed = disk_readout(project, shown);
+    archive_sessions(&sessions).ok()?;
+    Some(packed)
+}
+
+fn session_log_bytes(sessions: &Path) -> u64 {
+    let mut total = 0u64;
+    let Ok(entries) = fs::read_dir(sessions) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let log = entry.path().join("events.jsonl");
+        if let Ok(meta) = fs::metadata(&log) {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
+fn archive_sessions(sessions: &Path) -> Result<(), String> {
+    if !sessions.is_dir() {
+        return Ok(());
+    }
+    let parent = sessions
+        .parent()
+        .ok_or_else(|| "the session folder has no parent".to_owned())?;
+    for n in 1..100 {
+        let dest = parent.join(format!("sessions-archived-{n}"));
+        if dest.exists() {
+            continue;
+        }
+        fs::rename(sessions, dest).map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    Err("the old session could not be archived".into())
+}
+
+/// The goal and the checklist, read now. The model is told to use only this.
+fn disk_readout(project: &Path, asked: &str) -> MainCompact {
+    let view = goal_view(project);
+    let goal = view
+        .title
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| "none".to_owned());
+    let skill = view
+        .skill
+        .filter(|skill| !skill.trim().is_empty())
+        .unwrap_or_else(|| "none".to_owned());
+    let steps = file_checkboxes(project);
+    let done: Vec<&str> = steps
+        .iter()
+        .filter(|(checked, _)| *checked)
+        .map(|(_, line)| line.as_str())
+        .collect();
+    let left: Vec<&str> = steps
+        .iter()
+        .filter(|(checked, _)| !*checked)
+        .map(|(_, line)| line.as_str())
+        .collect();
+    let done = if done.is_empty() {
+        "nothing".to_owned()
+    } else {
+        done.join(". ")
+    };
+    let left = if left.is_empty() {
+        "nothing".to_owned()
+    } else {
+        left.join(". ")
+    };
+    let prompt = format!(
+        "The earlier thread was compacted. It is gone.\n\
+         Use only these lines. They were read from disk just now.\n\
+         Active goal: {goal}\n\
+         Skill: {skill}\n\
+         Done: {done}\n\
+         Left: {left}\n\
+         The person asks: {asked}\n\
+         Reply with one sentence under 70 characters. Name the goal and what is left.\n\
+         If nothing is left, say nothing is left.\n\
+         Do not call a tool. Do not change anything on disk.\n\
+         Do not use these words: checklist, file, path, status, tick, or report.\n"
+    );
+    MainCompact {
+        notice: "The earlier thread was compacted.".to_owned(),
+        prompt,
+    }
+}
+
 /// Bind this chat to an agent directory and return the fx home plus the
 /// system prompt. Missing `.arbos/project.toml` means this cwd is not a project.
 pub fn prepare_turn(project: &Path, chat_id: &str) -> Option<TurnPrep> {

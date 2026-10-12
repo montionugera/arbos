@@ -607,6 +607,26 @@ impl SessionsEngine {
             }
             crate::arbos_layout::ComposerCommand::Passthrough => {}
         }
+        // A long Main session is replaced by the goal and the checklist on
+        // disk. The old fx thread is not resumed. The files stay as they are.
+        if let Some(packed) = crate::arbos_layout::compact_main(
+            std::path::Path::new(&request.cwd),
+            chat_id,
+            &shown,
+        ) {
+            self.inner.drop_harness_resume(chat_id, &request.cwd);
+            if lock(&self.inner.runs).contains_key(chat_id) {
+                self.terminate(chat_id).await?;
+            }
+            request.prompt = packed.prompt;
+            if let Ok(handle) = self.doc_handle(chat_id) {
+                let _ = handle.write_system_message(
+                    &format!("compact-{}", new_id()),
+                    &packed.notice,
+                    now_ms(),
+                );
+            }
+        }
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -1652,6 +1672,22 @@ impl Inner {
         }
         if let Some(ws) = self.workspace() {
             ws.note_message(chat_id, text);
+        }
+    }
+
+    /// Drop the saved fx session so the next turn starts fresh.
+    /// An empty id is the tombstone: resume stops here and does not
+    /// fall through to an older session.
+    fn drop_harness_resume(&self, chat_id: &str, cwd: &str) {
+        lock(&self.harness_sessions).insert(
+            chat_id.to_string(),
+            HarnessSessionRef {
+                session_id: String::new(),
+                cwd: cwd.to_string(),
+            },
+        );
+        if let Some(ws) = self.workspace() {
+            ws.set_chat_harness_session(chat_id, "", cwd);
         }
     }
 

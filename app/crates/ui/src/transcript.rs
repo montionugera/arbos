@@ -4966,6 +4966,9 @@ impl Transcript {
             };
             let entries = &entries[turn_at..];
             let mut plan_line = false;
+            // A question after the plan still gets one sentence back. The
+            // plan itself stays. Older assistant paragraphs stay hidden.
+            let mut asked_after_plan = false;
             for entry in entries.iter() {
                 let is_plan = main_chat
                     && entry.role == MessageRole::System
@@ -4976,9 +4979,15 @@ impl Transcript {
                     }
                     plan_line = true;
                 }
+                if plan_line
+                    && entry.role == MessageRole::User
+                    && !user_plain_text(entry).trim().starts_with("/goal")
+                {
+                    asked_after_plan = true;
+                }
                 let planned = (main_chat && entry.role == MessageRole::Assistant).then(|| {
                     let mut filtered = plan_entry(entry);
-                    if plan_line {
+                    if plan_line && !asked_after_plan {
                         filtered
                             .parts
                             .retain(|part| !matches!(part, MessagePart::Text { .. }));
