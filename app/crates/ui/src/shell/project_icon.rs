@@ -426,33 +426,33 @@ mod tests {
     #[test]
     fn sidebar_project_icon_priority_and_missing_fallback() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(load_local_icon(temp.path()).is_none());
+        assert!(load_repo_icon(temp.path()).is_none());
         png(&temp.path().join("favicon.png"), 3);
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 3.0);
+        assert_eq!(load_repo_icon(temp.path()).unwrap().width, 3.0);
         std::fs::create_dir(temp.path().join("public")).unwrap();
         png(&temp.path().join("public/apple-touch-icon.png"), 7);
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 7.0);
+        assert_eq!(load_repo_icon(temp.path()).unwrap().width, 7.0);
         std::fs::write(temp.path().join(".git"), "gitdir: /unused-test-checkout").unwrap();
         std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
         assert_eq!(
-            load_local_icon(&temp.path().join("src/nested"))
+            load_repo_icon(&temp.path().join("src/nested"))
                 .unwrap()
                 .width,
             7.0
         );
         // A corrupt first match uses the default rather than showing unrelated lower-priority art.
         std::fs::write(temp.path().join("public/apple-touch-icon.png"), b"invalid").unwrap();
-        assert!(load_local_icon(temp.path()).is_none());
+        assert!(load_repo_icon(temp.path()).is_none());
     }
     #[test]
     fn sidebar_project_icons_support_svg_and_ico() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("favicon.svg"), br##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8" fill="#f00"/></svg>"##).unwrap();
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 12.0);
+        assert_eq!(load_repo_icon(temp.path()).unwrap().width, 12.0);
         std::fs::remove_file(temp.path().join("favicon.svg")).unwrap();
         image::RgbaImage::new(16, 16)
             .save(temp.path().join("favicon.ico"))
             .unwrap();
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 16.0);
+        assert_eq!(load_repo_icon(temp.path()).unwrap().width, 16.0);
     }
 }
