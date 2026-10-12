@@ -95,7 +95,10 @@ jobs:
           NOTARY_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
         run: |
           set -euo pipefail
-          test -n "$CODESIGN_IDENTITY"
+          if [ -z "${CODESIGN_IDENTITY:-}" ]; then
+            echo "no signing identity was imported; refusing to build an unsigned release"
+            exit 1
+          fi
           # The fourth version component is the commit count, the same number
           # the Linux job computes for this commit, so both platform files of
           # one build share one manifest version.

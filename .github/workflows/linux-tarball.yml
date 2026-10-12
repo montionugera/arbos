@@ -41,7 +41,8 @@ jobs:
           set -euo pipefail
           # The fourth version component is the commit count. A new commit on
           # main is a newer build, so the update strip can offer a restart.
-          export ARBOS_BUILD="$(git rev-list --count HEAD)"
+          ARBOS_BUILD="$(git rev-list --count HEAD)"
+          export ARBOS_BUILD
           scripts/package-linux.sh
       - name: Merge the release manifest
         working-directory: app
