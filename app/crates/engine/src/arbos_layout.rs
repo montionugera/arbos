@@ -797,9 +797,10 @@ pub fn prompt_after_summary(project: &Path, chat_id: &str, prompt: &str) -> Opti
     Some(format!(
         "{summary}\n\nThe person says: {prompt}\n\
          Read the Goals path and the Status path before you answer.\n\
+         Do not spawn a worker. Do not write. The goal stays as it is.\n\
          Reply with one sentence under 70 characters. Name the goal and what is left.\n\
          If every step is checked, say nothing is left.\n\
-         Do not write anything. Do not use the words checklist, tick, or report.\n"
+         Do not use the words checklist, tick, or report.\n"
     ))
 }
 
