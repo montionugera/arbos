@@ -311,7 +311,70 @@ pub fn ensure(project: &Path, name: Option<&str>) -> Result<(), String> {
     if let Some(file) = read_project(project) {
         crate::arbos_remote::remember_project(&file.name, project);
     }
+    if let Err(err) = exclude_from_project_git(project) {
+        tracing::warn!(error = %err, "the project's git exclude was not updated");
+    }
     Ok(())
+}
+
+/// The line `.git/info/exclude` gets so the parent repository does not see
+/// the nested `.arbos/` repository as an untracked gitlink.
+const PROJECT_EXCLUDE_LINE: &str = ".arbos/";
+
+/// When the project folder is a git repository, make sure its
+/// `.git/info/exclude` lists `.arbos/`. The project's own `.gitignore` is
+/// never touched. A folder without `.git`, or a worktree whose `gitdir:`
+/// cannot be resolved, is left alone.
+fn exclude_from_project_git(project: &Path) -> Result<(), String> {
+    let Some(git_dir) = project_git_dir(project) else {
+        return Ok(());
+    };
+    let info = git_dir.join("info");
+    let exclude = info.join("exclude");
+    let body = match fs::read_to_string(&exclude) {
+        Ok(body) => body,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.to_string()),
+    };
+    if body.lines().any(|line| line.trim() == PROJECT_EXCLUDE_LINE) {
+        return Ok(());
+    }
+    fs::create_dir_all(&info).map_err(|e| e.to_string())?;
+    let mut body = body;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(PROJECT_EXCLUDE_LINE);
+    body.push('\n');
+    fs::write(&exclude, body).map_err(|e| e.to_string())
+}
+
+/// The real git directory of `project`: `.git` itself when it is a folder,
+/// the `gitdir:` target when `.git` is a worktree file. `None` when the
+/// folder is not a repository or the target cannot be found.
+fn project_git_dir(project: &Path) -> Option<PathBuf> {
+    let dot_git = project.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    if !dot_git.is_file() {
+        return None;
+    }
+    let text = fs::read_to_string(&dot_git).ok()?;
+    let target = text
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))?
+        .trim();
+    if target.is_empty() {
+        return None;
+    }
+    let target = Path::new(target);
+    let dir = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        project.join(target)
+    };
+    dir.is_dir().then_some(dir)
 }
 
 /// Home machine recorded in `project.toml`. Empty and missing both mean `local`.
@@ -2763,6 +2826,24 @@ mod goal_tests {
         assert!(page.contains("- [ ] [Pine](research/pine.md) — Pine is ready."));
         assert!(!page.contains("# Status"));
         assert!(!COORDINATOR_PROMPT.contains("Keep `status.md` current"));
+    }
+
+    #[test]
+    fn a_project_repository_excludes_the_arbos_folder_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        fs::create_dir_all(project.join(".git")).unwrap();
+        ensure(project, Some("Repo")).unwrap();
+        let exclude = project.join(".git").join("info").join("exclude");
+        assert_eq!(fs::read_to_string(&exclude).unwrap(), ".arbos/\n");
+        // A second ensure does not add the line again.
+        ensure(project, Some("Repo")).unwrap();
+        assert_eq!(fs::read_to_string(&exclude).unwrap(), ".arbos/\n");
+        assert!(!project.join(".gitignore").exists());
+        // A folder that is not a repository gets no exclude file.
+        let plain = tempfile::tempdir().unwrap();
+        ensure(plain.path(), Some("Plain")).unwrap();
+        assert!(!plain.path().join(".git").join("info").exists());
     }
 
     #[test]
