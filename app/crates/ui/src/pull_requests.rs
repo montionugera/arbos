@@ -3481,7 +3481,7 @@ fn error_copy(error: &PullRequestsPageError) -> (String, String) {
             "Reconnect the device and try again.".into(),
         ),
         PullRequestsPageError::UpdateRequired(name) => (
-            format!("Update Zeron on {name}"),
+            format!("Update Arbos on {name}"),
             "This device doesn’t support pull requests yet.".into(),
         ),
     }
