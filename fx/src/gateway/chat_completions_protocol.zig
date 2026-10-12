@@ -682,15 +682,15 @@ const Tool = struct {
     }
 };
 
-/// Single-owner, request-local state machine. No I/O, callbacks, tool execution,
-/// or hidden cancellation reads. Owns all retained input (including selected
-/// names) until deinit. Any accept/finish failure poisons the reducer; deinit
-/// remains mandatory. A successful finish transfers independent owned results.
 const SelectedFunction = struct {
     name: []u8,
     accepts_empty_object: bool,
 };
 
+/// Single-owner, request-local state machine. No I/O, callbacks, tool execution,
+/// or hidden cancellation reads. Owns all retained input (including selected
+/// names) until deinit. Any accept/finish failure poisons the reducer; deinit
+/// remains mandatory. A successful finish transfers independent owned results.
 pub const Reducer = struct {
     alloc: Allocator,
     limits: Limits,
