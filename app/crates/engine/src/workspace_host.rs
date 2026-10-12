@@ -290,6 +290,7 @@ impl WorkspaceHost {
         })?;
 
         let state = doc.read_all()?;
+        let own_spaces = state.spaces.clone();
         let (chats_tx, _) = watch::channel(state.chats);
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
@@ -338,6 +339,11 @@ impl WorkspaceHost {
         // the VACUUM on its own thresholds, so ordinary boots only checkpoint.
         let store = host.inner.store.clone();
         tokio::task::spawn_blocking(move || store.reclaim_free_space());
+        // Projects opened before an upgrade only get new layout pieces (the
+        // `.git/info/exclude` entry, new context files) from a boot refresh:
+        // `create_space` runs `ensure` once, when the space is registered.
+        let device_id = host.inner.config.device_id.clone();
+        tokio::task::spawn_blocking(move || refresh_project_layouts(&device_id, &own_spaces));
         host.join_room();
         tokio::spawn(workspace_task(Arc::downgrade(&host.inner), changed_rx));
         if host.inner.config.edge.is_some() {
@@ -1022,7 +1028,8 @@ impl WorkspaceHost {
         }
         if !existed {
             let main_id = format!("{space_id}-main");
-            if let Err(err) = self.create_chat(&main_id, Some(space_id), Some(device_id), None, None)
+            if let Err(err) =
+                self.create_chat(&main_id, Some(space_id), Some(device_id), None, None)
             {
                 tracing::warn!(path, error = %err, "main chat was not created");
             } else if let Err(err) = self.rename_chat(&main_id, "Main") {
@@ -1450,6 +1457,23 @@ pub(crate) fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
         return None;
     }
     Some(dot_git.parent()?.to_string_lossy().into_owned())
+}
+
+/// Boot refresh of every own-device project's `.arbos/` layout. `ensure` is
+/// otherwise only run when a space is registered, so a project opened before
+/// an upgrade never gained the pieces added since. Spaces owned by other
+/// devices, and own spaces whose folder is gone, are left as they are; a
+/// failed refresh is logged and never stops the boot.
+pub(crate) fn refresh_project_layouts(device_id: &str, spaces: &[Space]) {
+    for space in spaces.iter().filter(|s| s.device_id == device_id) {
+        let folder = std::path::Path::new(&space.path);
+        if !folder.is_dir() {
+            continue;
+        }
+        if let Err(err) = crate::arbos_layout::ensure(folder, space.name.as_deref()) {
+            tracing::warn!(path = %space.path, error = %err, "project layout was not refreshed");
+        }
+    }
 }
 
 /// Local live statuses win for this device's chats; every other device's rows come
@@ -2063,6 +2087,76 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    fn space_at(id: &str, device_id: &str, path: &std::path::Path) -> zeron_proto::Space {
+        zeron_proto::Space {
+            id: id.into(),
+            device_id: device_id.into(),
+            path: path.to_string_lossy().into_owned(),
+            name: None,
+            git_detected: true,
+            git_checked_at: None,
+            checkout_id: None,
+            repository_id: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// A project registered before the layout grew its git exclude (no
+    /// `.arbos/` on disk at all, as if `ensure` had never run) gets the
+    /// refresh at boot. Another device's project and a project whose folder
+    /// is gone are left alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn boot_refreshes_the_layout_of_every_own_project() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let own = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(own.path().join(".git")).unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(foreign.path().join(".git")).unwrap();
+        let missing = dir.path().join("gone");
+        let mut doc = RegistryDoc::new("test-device");
+        doc.upsert_space(&space_at("own", "test-device", own.path()))
+            .unwrap();
+        doc.upsert_space(&space_at("foreign", "other-device", foreign.path()))
+            .unwrap();
+        doc.upsert_space(&space_at("missing", "test-device", &missing))
+            .unwrap();
+        store
+            .save_snapshot(REGISTRY_DOC_ID, &doc.to_bytes().unwrap())
+            .unwrap();
+
+        let host = WorkspaceHost::open(
+            store,
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        let exclude = own.path().join(".git").join("info").join("exclude");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !std::fs::read_to_string(&exclude).is_ok_and(|body| body.contains(".arbos/")) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the project's git exclude was not refreshed at boot"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(own.path().join(".arbos").join("project.toml").is_file());
+        assert!(!foreign.path().join(".arbos").exists());
+        assert!(!foreign.path().join(".git").join("info").exists());
+        assert!(!missing.exists());
+        // The space rows themselves are untouched by the refresh.
+        assert_eq!(host.read_spaces().unwrap().len(), 3);
     }
 
     #[test]
