@@ -393,8 +393,16 @@ impl Shell {
         // drag region, and buttons. Where a session runs, and its side-chat
         // and project actions, live in the session card.
         let on_canvas = self.state.read(cx).selected_chat_row().is_none();
-        // The window title is the product name. Chat names live in the tabs.
-        let title = SharedString::from(if on_canvas { "" } else { "Arbos" });
+        // The window title is the product name. While Main is working, the
+        // title is the live step (set by Main, or derived from the turn).
+        let step = self.project.step.clone();
+        let title = if on_canvas {
+            SharedString::from("")
+        } else if step.is_empty() {
+            SharedString::from("Arbos")
+        } else {
+            SharedString::from(step)
+        };
         let harness: Option<zeron_proto::HarnessId> = None;
 
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a

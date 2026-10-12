@@ -43,6 +43,10 @@ pub(super) struct ProjectChrome {
     pub status: Vec<(bool, String)>,
     pub goal: Option<String>,
     pub skill: Option<String>,
+    /// Main finished a turn that showed text, and the person has not looked.
+    pub unread: bool,
+    /// The live step while Main is working. Empty when Main is idle.
+    pub step: String,
     /// The file opened from the list beside Main. This does not leave the chat.
     side_file: Option<String>,
     side_editor: Option<Entity<ComposerInput>>,
@@ -64,6 +68,8 @@ impl Default for ProjectChrome {
             status: Vec::new(),
             goal: None,
             skill: None,
+            unread: false,
+            step: String::new(),
             side_file: None,
             side_editor: None,
             watched: None,
@@ -712,6 +718,15 @@ impl Shell {
     }
 
     pub(super) fn open_project(&mut self, space_id: &str, cx: &mut Context<Self>) {
+        let path = self
+            .project_rows(cx)
+            .into_iter()
+            .find(|row| row.id == space_id)
+            .map(|row| row.path);
+        if let Some(path) = path {
+            let _ = zeron_engine::arbos_live::mark_seen(Path::new(&path));
+        }
+        self.project.unread = false;
         self.project.surface = Surface::Chat;
         self.project.icon_for = None;
         let main = self.main_chat_id(space_id, cx);
@@ -872,10 +887,14 @@ impl Shell {
         let view = zeron_engine::arbos_layout::goal_view(Path::new(&project));
         self.project.goal = view.title;
         self.project.skill = view.skill;
+        let live = zeron_engine::arbos_live::live(Path::new(&project));
+        self.project.unread = live.unread;
+        self.project.step = live.step;
         self.project.watch = Some(cx.spawn(async move |this, cx| {
             let root = PathBuf::from(&project).join(".arbos").join("context");
             let status_file = root.join("status.md");
             let goals_file = root.join("GOALS.md");
+            let project_path = PathBuf::from(&project);
             let mut seen = String::new();
             loop {
                 cx.background_executor()
@@ -883,17 +902,25 @@ impl Shell {
                     .await;
                 let status_text = std::fs::read_to_string(&status_file).unwrap_or_default();
                 let goals_text = std::fs::read_to_string(&goals_file).unwrap_or_default();
-                let snap = format!("{status_text}\n---\n{goals_text}");
+                let live = zeron_engine::arbos_live::live(&project_path);
+                let snap = format!(
+                    "{status_text}\n---\n{goals_text}\n---\n{}\n{}",
+                    live.unread, live.step
+                );
                 if snap == seen {
                     continue;
                 }
                 seen = snap;
-                let items = zeron_engine::arbos_layout::status_items(Path::new(&project));
-                let view = zeron_engine::arbos_layout::goal_view(Path::new(&project));
+                let items = zeron_engine::arbos_layout::status_items(&project_path);
+                let view = zeron_engine::arbos_layout::goal_view(&project_path);
+                let unread = live.unread;
+                let step = live.step;
                 let _ = this.update(cx, |shell, cx| {
                     shell.project.status = items;
                     shell.project.goal = view.title;
                     shell.project.skill = view.skill;
+                    shell.project.unread = unread;
+                    shell.project.step = step;
                     cx.notify();
                 });
             }
@@ -1017,6 +1044,8 @@ impl Shell {
         let space_id = row.id.clone();
         let menu_id = row.id.clone();
         let icon = self.rail_icon(row, cx);
+        let unread =
+            self.project.unread && self.project.watched.as_deref() == Some(row.path.as_str());
         div()
             .id(SharedString::from(format!("project-rail-{}", row.id)))
             .w(px(80.0))
@@ -1036,7 +1065,19 @@ impl Shell {
                 gpui::transparent_black()
             })
             .aria_label(format!("{} {} {}", index + 1, row.name, row.home))
-            .child(icon)
+            .child(
+                div().relative().child(icon).when(unread, |row| {
+                    row.child(
+                        div()
+                            .absolute()
+                            .top(px(-1.0))
+                            .right(px(-6.0))
+                            .size(px(8.0))
+                            .rounded_full()
+                            .bg(theme.accent),
+                    )
+                }),
+            )
             .child(
                 div()
                     .max_w(px(76.0))

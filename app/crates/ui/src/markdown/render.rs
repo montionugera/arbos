@@ -1028,6 +1028,15 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         if run.text.is_empty() {
             continue;
         }
+        // The engine marks a broken local link `arbos-missing:`. Drop it.
+        if run
+            .style
+            .link
+            .as_deref()
+            .is_some_and(|url| url.starts_with(zeron_engine::arbos_live::MISSING_LINK_SCHEME))
+        {
+            continue;
+        }
         let shown = run.style.file_label.as_deref().unwrap_or(&run.text);
         let start = text.len();
         text.push_str(shown);
