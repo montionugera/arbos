@@ -156,8 +156,10 @@ impl Shell {
     /// in it.
     pub(super) fn settled_fit(&self) -> (HorizontalPanelFit, f32) {
         let fit = self.fit(false);
+        // The rail is the column that actually rests there; the fit's limit
+        // still budgets the old resizable sidebar's width.
         let sidebar = if fit.sidebar && !self.settings.sidebar_collapsed {
-            fit.sidebar_limit
+            project_chrome::RAIL_WIDTH.min(fit.sidebar_limit)
         } else {
             0.0
         };
