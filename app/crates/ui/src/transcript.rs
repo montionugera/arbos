@@ -1322,8 +1322,7 @@ fn first_clean_sentence(text: &str) -> Option<String> {
             continue;
         }
         let sentence = line.split(". ").next().unwrap_or(line).trim();
-        if sentence.len() < 12 || mentions_file_name(sentence) || sentence.chars().count() > 160
-        {
+        if sentence.len() < 12 || mentions_file_name(sentence) || sentence_too_long(sentence) {
             continue;
         }
         let mut out = sentence.to_owned();
@@ -1338,12 +1337,31 @@ fn first_clean_sentence(text: &str) -> Option<String> {
     None
 }
 
+/// A refusal that names the models on offer. Main keeps that sentence so the
+/// person can read the list, even though it is longer than a plan line.
+fn names_models_on_offer(sentence: &str) -> bool {
+    let lower = sentence.to_ascii_lowercase();
+    lower.contains("on offer") || lower.contains("available models")
+}
+
+fn sentence_too_long(sentence: &str) -> bool {
+    let cap = if names_models_on_offer(sentence) {
+        400
+    } else {
+        160
+    };
+    sentence.chars().count() > cap
+}
+
 /// A plan sentence a person can read. A wake about files, ticks, or a
 /// checklist is not that sentence.
 fn person_can_read(sentence: &str) -> bool {
     let lower = sentence.to_ascii_lowercase();
     if lower.contains("on this goal") {
         return true;
+    }
+    if names_models_on_offer(sentence) {
+        return sentence.chars().count() <= 400;
     }
     if sentence.chars().count() > 80 {
         return false;
