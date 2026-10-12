@@ -346,8 +346,35 @@ fn reason_is_a_sentence(reason: &str) -> bool {
     reason.split_whitespace().count() >= REASON_WORDS && reason.chars().count() >= REASON_CHARS
 }
 
+/// Checklist lines that are still open. Empty when every step is checked.
+pub fn open_steps(project: &Path) -> Vec<String> {
+    status_items(project)
+        .into_iter()
+        .filter(|(done, _)| !done)
+        .map(|(_, text)| text)
+        .collect()
+}
+
+/// The one line the thread shows when `goal.complete` is refused. One step
+/// is named; further open steps are a count. `None` when nothing is open.
+pub fn still_open_line(open: &[String]) -> Option<String> {
+    let first = open.first()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    if open.len() == 1 {
+        Some(format!("Goal still open · {first}"))
+    } else {
+        Some(format!(
+            "Goal still open · {first} +{} more",
+            open.len() - 1
+        ))
+    }
+}
+
 /// What Main reads when the call is refused: the rule, what is still open,
-/// and the missing reason.
+/// and the missing reason. An open step tells Main to name it, not to
+/// repeat the claim that the goal is done.
 fn refusal(open: &[String], reason_missing: bool) -> String {
     let mut lines = vec!["The goal is not complete yet.".to_owned()];
     if open.is_empty() {
@@ -359,6 +386,7 @@ fn refusal(open: &[String], reason_missing: bool) -> String {
             format!("{} steps are still open:", open.len())
         });
         lines.extend(open.iter().map(|line| format!("- {}", line.trim())));
+        lines.push("Say what is still open. Do not say the goal is complete.".into());
     }
     if reason_missing {
         lines.push("Say why in at least one sentence, in the reason.".into());
@@ -525,7 +553,15 @@ mod tests {
         assert!(err.contains("\n- Oak is ready."), "{err}");
         assert!(err.contains("\n- Pine is ready."), "{err}");
         assert!(!err.contains("Split ran."), "{err}");
-        assert!(err.ends_with(GOAL_COMPLETE_RULE), "{err}");
+        assert!(err.contains(GOAL_COMPLETE_RULE), "{err}");
+        assert!(
+            err.contains("Say what is still open. Do not say the goal is complete."),
+            "{err}"
+        );
+        assert_eq!(
+            still_open_line(&open_steps(project)).as_deref(),
+            Some("Goal still open · Oak is ready. +1 more")
+        );
         assert_eq!(read_goal(project).unwrap().state, GoalState::Active);
     }
 
@@ -541,6 +577,7 @@ mod tests {
                 "{short:?}: {err}"
             );
             assert!(err.contains("Every step is checked."), "{short:?}: {err}");
+            assert!(!err.contains("Say what is still open"), "{short:?}: {err}");
             assert_eq!(read_goal(project).unwrap().state, GoalState::Active);
         }
         // Open steps and a missing reason are both named.
@@ -549,6 +586,14 @@ mod tests {
         assert!(
             err.contains("1 step is still open:\n- Oak is ready."),
             "{err}"
+        );
+        assert!(
+            err.contains("Say what is still open. Do not say the goal is complete."),
+            "{err}"
+        );
+        assert_eq!(
+            still_open_line(&open_steps(dir.path())).as_deref(),
+            Some("Goal still open · Oak is ready.")
         );
         assert!(err.contains("Say why in at least one sentence"), "{err}");
     }

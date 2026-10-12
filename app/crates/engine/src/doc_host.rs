@@ -890,7 +890,9 @@ impl ChatDocHandle {
                 MessageRole::User => SummaryRole::Person,
                 MessageRole::Assistant => SummaryRole::Main,
                 MessageRole::System
-                    if text.starts_with("Worked ·") || text.contains("on this goal") =>
+                    if text.starts_with("Worked ·")
+                        || text.starts_with("Goal still open ·")
+                        || text.contains("on this goal") =>
                 {
                     SummaryRole::Worked
                 }

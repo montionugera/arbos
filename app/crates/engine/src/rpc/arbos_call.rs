@@ -10,7 +10,7 @@ use zeron_proto::{ChatConfig, HarnessId, RunRequest, SandboxLevel};
 use super::EngineRpc;
 use crate::arbos_goal::{self, GoalRecord};
 use crate::arbos_layout::{self, AgentView};
-use crate::new_id;
+use crate::{new_id, now_ms};
 use crate::{arbos_context, arbos_live, arbos_wakes};
 
 impl EngineRpc {
@@ -90,9 +90,14 @@ impl EngineRpc {
                 goal_row_json(project_path)
             }
             "goal_complete" => {
-                complete_goal(project_path, &params, |params| {
+                if let Err(err) = complete_goal(project_path, &params, |params| {
                     self.require_coordinator(project_path, params)
-                })?;
+                }) {
+                    if err.contains("still open") {
+                        self.note_goal_still_open(project_path);
+                    }
+                    return Err(err);
+                }
                 goal_row_json(project_path)
             }
             "goal_clear" => {
@@ -154,6 +159,19 @@ impl EngineRpc {
             return Err("workers cannot spawn or message agents".into());
         }
         Ok(())
+    }
+
+    /// The thread line a person sees when `goal.complete` is refused. Same
+    /// path as a Worked line, so the 80-character plan filter does not hide it.
+    fn note_goal_still_open(&self, project: &Path) {
+        let Some(line) = arbos_goal::still_open_line(&arbos_goal::open_steps(project)) else {
+            return;
+        };
+        let chat = arbos_layout::main_chat_id(project);
+        let Ok(handle) = self.doc_host.open(&chat) else {
+            return;
+        };
+        let _ = handle.write_system_message(&format!("goal-open-{}", new_id()), &line, now_ms());
     }
 
     fn spawn_worker(&self, project: &Path, params: &Value) -> Result<Value, String> {
