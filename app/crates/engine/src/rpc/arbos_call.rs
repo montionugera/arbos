@@ -8,7 +8,7 @@ use zeron_doc::SessionCommandPayload;
 use zeron_proto::{ChatConfig, HarnessId, RunRequest, SandboxLevel};
 
 use super::EngineRpc;
-use crate::arbos_goal;
+use crate::arbos_goal::{self, GoalRecord};
 use crate::arbos_layout::{self, AgentView};
 use crate::new_id;
 use crate::{arbos_context, arbos_live, arbos_wakes};
@@ -90,8 +90,9 @@ impl EngineRpc {
                 goal_row_json(project_path)
             }
             "goal_complete" => {
-                self.require_coordinator(project_path, &params)?;
-                arbos_goal::complete_goal(project_path)?;
+                complete_goal(project_path, &params, |params| {
+                    self.require_coordinator(project_path, params)
+                })?;
                 goal_row_json(project_path)
             }
             "goal_clear" => {
@@ -354,6 +355,26 @@ impl EngineRpc {
     }
 }
 
+/// `goal.complete`. Main sends a `reason` and the checklist is checked. The
+/// person's UI sends `force: true` instead; a call that comes from a chat
+/// cannot set it.
+fn complete_goal(
+    project: &Path,
+    params: &Value,
+    require_coordinator: impl FnOnce(&Value) -> Result<(), String>,
+) -> Result<GoalRecord, String> {
+    let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
+    if force {
+        if text_field(params, "originChatId").is_some() {
+            return Err("only a person can complete a goal without evidence; give a reason instead".into());
+        }
+        return arbos_goal::force_complete_goal(project);
+    }
+    require_coordinator(params)?;
+    let reason = text_field(params, "reason").unwrap_or_default();
+    arbos_goal::complete_goal(project, &reason)
+}
+
 /// Settings → Keys. Writes the fx connection into the main agent's home and
 /// the secret into the keychain or the mode 600 file. The secret is not
 /// copied into the connection file or the reply.
@@ -582,4 +603,56 @@ fn agent_row(agent: &AgentView) -> Value {
         "result": agent.result,
         "resultPointer": format!("agents/{}/agent.toml", agent.id),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arbos_goal::GoalState;
+
+    fn project_with_open_step() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let context = dir.path().join(".arbos").join("context");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::write(
+            context.join("status.md"),
+            "# Status\n\n- [ ] Oak is ready.\n",
+        )
+        .unwrap();
+        arbos_goal::start_goal(dir.path(), "Ship the thing").unwrap();
+        dir
+    }
+
+    fn main_allowed(_: &Value) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[test]
+    fn main_cannot_set_force() {
+        let dir = project_with_open_step();
+        let params = json!({ "force": true, "originChatId": "chat-main" });
+        let err = complete_goal(dir.path(), &params, main_allowed).unwrap_err();
+        assert!(err.contains("only a person"), "{err}");
+        assert_eq!(
+            arbos_goal::read_goal(dir.path()).unwrap().state,
+            GoalState::Active
+        );
+    }
+
+    #[test]
+    fn the_person_forces_and_main_is_checked() {
+        let dir = project_with_open_step();
+        let params =
+            json!({ "originChatId": "chat-main", "reason": "Oak reported and the gate is green." });
+        let err = complete_goal(dir.path(), &params, main_allowed).unwrap_err();
+        assert!(err.contains("- Oak is ready."), "{err}");
+        let refused =
+            complete_goal(dir.path(), &params, |_| Err("workers cannot".into())).unwrap_err();
+        assert_eq!(refused, "workers cannot");
+        let done = complete_goal(dir.path(), &json!({ "force": true }), |_| {
+            panic!("a forced call does not look for Main")
+        })
+        .unwrap();
+        assert_eq!(done.state, GoalState::Complete);
+    }
 }

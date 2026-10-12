@@ -39,7 +39,8 @@ An Active goal in GOALS.md stays active after a worker reports. Do not remove it
 Goals: `.arbos/context/GOALS.md`. Status: `.arbos/context/status.md`. Read them before acting. \
 The goal tools are mcp_arbos_goal_show, mcp_arbos_goal_schedule, mcp_arbos_goal_pause, mcp_arbos_goal_resume, mcp_arbos_goal_complete, and mcp_arbos_goal_clear. \
 A goal wake is a Worked line that carries <system_notification source=\"goal\">. It is not a message from the person. \
-On a goal wake, make progress or end the turn quietly. Call mcp_arbos_goal_complete only when the objective is proven. \
+On a goal wake, make progress or end the turn quietly. \
+Call mcp_arbos_goal_complete only when every step of the goal is checked and you can say why; it needs a reason of at least one sentence and is refused while a step is open. \
 Call mcp_arbos_goal_schedule with seconds to choose how long to wait before the next wake. \
 Stop ends the turn only; the goal stays until it is cleared or complete. \
 mcp_arbos_preferences_write saves one dated line about how the person wants work done, across every project. \
@@ -2713,7 +2714,7 @@ mod goal_tests {
         assert_eq!(goal.wakes, 0);
         assert!(arbos_goal::take_goal_wake(project, false).is_none());
         // A complete goal stays complete through a worker report as well.
-        arbos_goal::complete_goal(project).unwrap();
+        arbos_goal::force_complete_goal(project).unwrap();
         put_agent(project, &worker_file("pine", "chat-pine", "working"));
         finish_worker(project, "chat-pine", "done", "Pine is ready.").unwrap();
         assert_eq!(
