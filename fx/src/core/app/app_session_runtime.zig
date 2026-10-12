@@ -2989,6 +2989,16 @@ pub fn Runtime(comptime App: type) type {
             }
         }
 
+        /// `AgentRuntimeDeps.report_context_sections` on v1: the session keeps
+        /// the latest request's sections and writes them with the turn's commit.
+        pub fn noteContextSections(app: *App, sections: types.ContextSections) void {
+            if (comptime !@hasField(App, "session_persistence")) return;
+            app.session_persistence.write_mutex.lockUncancelable(io_mod.getIo());
+            defer app.session_persistence.write_mutex.unlock(io_mod.getIo());
+            const loaded = if (app.session_persistence.writable) |*value| value else return;
+            loaded.noteContextSections(sections);
+        }
+
         pub fn clearRecoveryCheckpoint(app: *App) !void {
             if (comptime !@hasField(App, "session_persistence")) {
                 return error.SessionPersistenceUnavailable;

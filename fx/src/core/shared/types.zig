@@ -1626,6 +1626,21 @@ pub const ToolUsage = struct {
     web_search_requests: u32 = 0,
 };
 
+/// How one assembled model request divides into sections, in the tokens
+/// fx's own request estimate counts (`token_estimate.textTokens`). The
+/// sections cover the request's text; `request` is fx's estimate of the whole
+/// request, calibrated against the provider's last count when one applies, so
+/// it is the number compaction acts on.
+pub const ContextSections = struct {
+    system_prompt: u64 = 0,
+    tools: u64 = 0,
+    rules: u64 = 0,
+    skills: u64 = 0,
+    summarized_conversation: u64 = 0,
+    conversation: u64 = 0,
+    request: u64 = 0,
+};
+
 pub const TurnSummary = struct {
     started_at_ms: i64 = 0,
     completed_at_ms: i64 = 0,

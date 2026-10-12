@@ -132,6 +132,9 @@ pub const ConversationWriter = struct {
     latest_checkpoint_coverage: u64 = 0,
     turn_open: bool = false,
     pending_tool_calls: std.ArrayList(session_event.PendingToolCall) = .empty,
+    /// The sections of the latest request the runtime reported, written in
+    /// the batch of the next turn committed, just before that turn.
+    pending_context_sections: ?types.ContextSections = null,
     failure: ?error{ SessionWriterChanged, SessionPersistenceUncertain, SessionCommitFailed } = null,
     test_sync_ops: if (builtin.is_test) io_mod.DurableOps else void = if (builtin.is_test) .{} else {},
 
@@ -205,6 +208,7 @@ pub const ConversationWriter = struct {
                 .assistant, .tool_call, .tool_result, .steering => if (open_turn_offset == null) {
                     return error.InvalidConversationFrame;
                 },
+                .context_sections => {},
             }
             try writer.applyReplayedEvent(envelope.seq, envelope.event);
             if (replay_scan) |scan| try scan.observe(frame.log_offset, envelope.seq, envelope.event);
@@ -397,6 +401,10 @@ pub const ConversationWriter = struct {
         defer events.deinit(alloc);
         try session_event.appendHistoryTurnConversationEvents(alloc, &events, unwritten);
         const start: usize = if (self.turn_open) 1 else 0;
+        // The sections frame leads the turn's frames in the same durable write.
+        if (self.pending_context_sections) |sections| {
+            try events.insert(alloc, start, .{ .context_sections = sections });
+        }
         if (checkpoint_summary) |summary| {
             _ = events.pop();
             const covers_through_seq = if (retained_from) |cut|
@@ -427,6 +435,7 @@ pub const ConversationWriter = struct {
             else => {},
         };
         try self.appendBatch(alloc, timestamp_ms, events.items[start..]);
+        self.pending_context_sections = null;
     }
 
     fn scanContext(self: *const ConversationWriter, alloc: Allocator, progress: *ConversationProgress, cut: ?types.ContextHistoryCut) !void {
@@ -610,7 +619,7 @@ pub const ConversationWriter = struct {
                 self.latest_checkpoint_coverage = checkpoint.covers_through_seq;
             },
             .interrupted => self.clearPendingToolCalls(),
-            .user, .assistant, .steering, .turn_completed => {},
+            .user, .assistant, .steering, .turn_completed, .context_sections => {},
         }
         self.last_seq = seq;
         self.turn_open = turn_open;
@@ -622,7 +631,7 @@ fn nextConversationTurnOpen(open: bool, event: session_event.ConversationEvent) 
         .user => if (open) error.InvalidConversationFrame else true,
         .turn_completed, .interrupted => if (open) false else error.InvalidConversationFrame,
         .assistant, .tool_call, .tool_result, .steering => if (open) true else error.InvalidConversationFrame,
-        .context_checkpoint => open,
+        .context_checkpoint, .context_sections => open,
     };
 }
 
@@ -2024,6 +2033,7 @@ fn replayConversationHistory(
                 try turn.finishStandalone();
                 checkpoint_turn_open = turn.user != null;
             },
+            .context_sections => {},
         }
         _ = frame_arena.reset(.retain_capacity);
     }
@@ -2108,6 +2118,7 @@ pub const ConversationHistoryReader = struct {
                     try self.builder.finishStandalone();
                     break :blk null;
                 },
+                .context_sections => null,
             };
             self.offset = line.next_offset;
             if (completed) |turn| return turn;
@@ -2247,6 +2258,7 @@ fn load_conversation_archive_from_source(
                     .permission_feedback_complete = false,
                 } };
             },
+            .context_sections => null,
         };
         if (completed) |turn| {
             errdefer session.freeHistoryTurn(alloc, turn);
@@ -3352,6 +3364,12 @@ pub const LoadedWritableSession = struct {
             try alloc.dupe(u8, title)
         else
             null;
+    }
+
+    /// Keeps the sections of the latest model request for the next turn
+    /// committed, which writes them just before its own frames.
+    pub fn noteContextSections(self: *LoadedWritableSession, sections: types.ContextSections) void {
+        self.conversation_writer.pending_context_sections = sections;
     }
 
     pub fn appendEvent(
@@ -4956,6 +4974,84 @@ test "committed conversation language survives reopening" {
     defer restored.deinit(alloc);
     try std.testing.expectEqualStrings("fr", restored.conversation_language.view());
     try std.testing.expectEqual(@as(usize, 1), restored.history.len);
+}
+
+test "context sections lead the next committed turn once and replay skips them" {
+    const alloc = std.testing.allocator;
+    var temp = try TempRoot.init(alloc);
+    defer temp.deinit(alloc);
+    var initial = try testState(alloc, "context-sections", 10);
+    defer initial.deinit(alloc);
+    {
+        var loaded = try temp.root.startConversationSession(alloc, initial, .{});
+        defer loaded.deinit(alloc);
+        // The second report of a turn replaces the first.
+        loaded.noteContextSections(.{ .system_prompt = 1, .request = 2 });
+        loaded.noteContextSections(.{
+            .system_prompt = 1500,
+            .tools = 4000,
+            .rules = 300,
+            .skills = 120,
+            .summarized_conversation = 800,
+            .conversation = 2600,
+            .request = 9400,
+        });
+        _ = try loaded.appendEvent(alloc, .{ .history_turn_committed = .{
+            .conversation_language = .literal("en"),
+            .total_input_tokens = 0,
+            .total_output_tokens = 0,
+            .turn = .{ .assistant = .{ .user = .{ .text = @constCast("first") }, .assistant = @constCast("one") } },
+        } }, 20);
+        // A turn without a fresh report writes no sections frame.
+        _ = try loaded.appendEvent(alloc, .{ .history_turn_committed = .{
+            .conversation_language = .literal("en"),
+            .total_input_tokens = 0,
+            .total_output_tokens = 0,
+            .turn = .{ .assistant = .{ .user = .{ .text = @constCast("second") }, .assistant = @constCast("two") } },
+        } }, 30);
+
+        const log = try loaded.conversation_writer.readAllForTest(alloc);
+        defer alloc.free(log);
+        var kinds: std.ArrayList([]const u8) = .empty;
+        defer kinds.deinit(alloc);
+        var sections: ?types.ContextSections = null;
+        var lines = std.mem.splitScalar(u8, log, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            const framed = try std.fmt.allocPrint(alloc, "{s}\n", .{line});
+            defer alloc.free(framed);
+            var decoded = try session_event.decodeConversationFrame(alloc, framed);
+            defer decoded.deinit();
+            try kinds.append(alloc, @tagName(decoded.value.event));
+            if (decoded.value.event == .context_sections) sections = decoded.value.event.context_sections;
+        }
+        const expected = [_][]const u8{
+            "context_sections", "user",      "assistant",      "turn_completed",
+            "user",             "assistant", "turn_completed",
+        };
+        try std.testing.expectEqual(expected.len, kinds.items.len);
+        for (expected, kinds.items) |want, got| try std.testing.expectEqualStrings(want, got);
+        try std.testing.expectEqual(@as(u64, 4000), sections.?.tools);
+        try std.testing.expectEqual(@as(u64, 9400), sections.?.request);
+        try std.testing.expect(std.mem.indexOf(u8, log, "\"context_sections\":{\"system_prompt\":1500,\"tools\":4000,\"rules\":300,\"skills\":120,\"summarized_conversation\":800,\"conversation\":2600,\"request\":9400}") != null);
+    }
+    var restored = try temp.root.loadReadOnly(alloc, initial.id, .{});
+    defer restored.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 2), restored.history.len);
+    try std.testing.expectEqualStrings("first", restored.history[0].assistant.user.text);
+    try std.testing.expectEqualStrings("second", restored.history[1].assistant.user.text);
+
+    // A writable reopen replays the frame too and keeps appending after it.
+    var resumed = try temp.root.resumeForWrite(alloc, initial.id, .{});
+    defer resumed.deinit(alloc);
+    try std.testing.expectEqual(@as(u64, 7), resumed.conversation_writer.last_seq);
+    _ = try resumed.appendEvent(alloc, .{ .history_turn_committed = .{
+        .conversation_language = .literal("en"),
+        .total_input_tokens = 0,
+        .total_output_tokens = 0,
+        .turn = .{ .assistant = .{ .user = .{ .text = @constCast("third") }, .assistant = @constCast("three") } },
+    } }, 40);
+    try std.testing.expectEqual(@as(u64, 10), resumed.conversation_writer.last_seq);
 }
 
 test "first commit never persists the fallback placeholder as a title" {
