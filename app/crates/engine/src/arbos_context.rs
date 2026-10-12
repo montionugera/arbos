@@ -32,6 +32,8 @@ const HISTORY_TURNS: usize = 20;
 pub struct Bucket {
     pub name: &'static str,
     pub tokens: u64,
+    /// `tokens / window`, rounded up, when the window is known.
+    pub percent: Option<u64>,
 }
 
 /// What fx counted for one completed turn: the prompt text the user
@@ -99,8 +101,18 @@ fn bucket_list(tokens: [u64; 6]) -> Vec<Bucket> {
     BUCKET_NAMES
         .iter()
         .zip(tokens)
-        .map(|(name, tokens)| Bucket { name, tokens })
+        .map(|(name, tokens)| Bucket {
+            name,
+            tokens,
+            percent: None,
+        })
         .collect()
+}
+
+fn percent_of(tokens: u64, window: Option<u64>) -> Option<u64> {
+    window
+        .filter(|window| *window > 0)
+        .map(|window| (tokens * 100).div_ceil(window).min(100))
 }
 
 /// Inputs that do not come from the log.
@@ -114,20 +126,68 @@ pub struct Fixed {
 /// Main's context usage for one project. `window` is the model's context
 /// size when the engine knows it from fx's live usage update.
 pub fn usage(project: &Path, window: Option<u64>) -> UsageView {
+    usage_for(project, MAIN_AGENT, window)
+}
+
+/// The context usage of one agent in the project: `main` or a worker id.
+/// Each agent has its own fx home and so its own session log.
+pub fn usage_for(project: &Path, agent_id: &str, window: Option<u64>) -> UsageView {
     let fx_home = project
         .join(".arbos")
         .join("agents")
-        .join("main")
+        .join(agent_id)
         .join("fx");
     let log = arbos_layout::latest_events_log(&fx_home)
         .and_then(|path| fs::read_to_string(path).ok())
         .unwrap_or_default();
-    parse_usage(&log, &fixed_inputs(project, &fx_home), window)
+    parse_usage(&log, &fixed_inputs_for(project, &fx_home, agent_id), window)
+}
+
+/// The context usage of the agent whose chat is `chat_id`, or `None` when
+/// the chat is not an agent of this project. The footer ring asks this for
+/// the chat on screen.
+pub fn usage_for_chat(project: &Path, chat_id: &str, window: Option<u64>) -> Option<UsageView> {
+    let agent_id = agent_of_chat(
+        &arbos_layout::agents(project),
+        &arbos_layout::main_chat_id(project),
+        chat_id,
+    )?;
+    Some(usage_for(project, &agent_id, window))
+}
+
+const MAIN_AGENT: &str = "main";
+
+/// Main's chat may still be unclaimed in `agent.toml`; then the derived
+/// main chat id stands in for it.
+fn agent_of_chat(
+    agents: &[arbos_layout::AgentView],
+    main_chat_id: &str,
+    chat_id: &str,
+) -> Option<String> {
+    let chat_id = chat_id.trim();
+    if chat_id.is_empty() {
+        return None;
+    }
+    agents
+        .iter()
+        .find(|agent| agent.chat_id == chat_id)
+        .map(|agent| agent.id.clone())
+        .or_else(|| (main_chat_id == chat_id).then(|| MAIN_AGENT.to_owned()))
 }
 
 /// The Arbos prompt, fx's base prompt, and the rule and skill files fx loads.
 pub fn fixed_inputs(project: &Path, fx_home: &Path) -> Fixed {
-    let prompt = arbos_layout::coordinator_prompt(&arbos_layout::read_user_preferences());
+    fixed_inputs_for(project, fx_home, MAIN_AGENT)
+}
+
+/// [`fixed_inputs`] with the prompt the agent really gets: Main's for
+/// `main`, the worker prompt for anyone else.
+fn fixed_inputs_for(project: &Path, fx_home: &Path, agent_id: &str) -> Fixed {
+    let prompt = if agent_id == MAIN_AGENT {
+        arbos_layout::coordinator_prompt(&arbos_layout::read_user_preferences())
+    } else {
+        arbos_layout::worker_prompt(agent_id)
+    };
     let rules = [
         project.join("AGENTS.md"),
         fx_home.join(".fx").join("AGENTS.md"),
@@ -260,7 +320,7 @@ pub fn parse_usage(log: &str, fixed: &Fixed, window: Option<u64>) -> UsageView {
             _ => {}
         }
     }
-    let (buckets, measured) = match scan.sections {
+    let (mut buckets, measured) = match scan.sections {
         Some(sections) => (sections.buckets(), true),
         None => (
             bucket_list([
@@ -274,14 +334,15 @@ pub fn parse_usage(log: &str, fixed: &Fixed, window: Option<u64>) -> UsageView {
             false,
         ),
     };
+    for bucket in &mut buckets {
+        bucket.percent = percent_of(bucket.tokens, window);
+    }
     let sum: u64 = buckets.iter().map(|bucket| bucket.tokens).sum();
     let used = match scan.sections {
         Some(sections) if sections.request > 0 => sections.request,
         _ => sum,
     };
-    let percent = window
-        .filter(|window| *window > 0)
-        .map(|window| (used * 100).div_ceil(window).min(100));
+    let percent = percent_of(used, window);
     let skip = scan.history.len().saturating_sub(HISTORY_TURNS);
     UsageView {
         used,
@@ -385,6 +446,107 @@ mod tests {
         assert_eq!(view.history[1].input_tokens, 10);
         assert_eq!(view.history[1].output_tokens, 20);
         assert!(view.history[1].exact);
+    }
+
+    #[test]
+    fn each_bucket_carries_its_share_of_the_window() {
+        let log = [
+            frame(1, sections(1_400, 3_900, 2_600, 9_200)),
+            frame(2, serde_json::json!({ "user": { "text": "w" } })),
+            frame(3, turn(1, 1, true)),
+        ]
+        .join("\n");
+        let view = parse_usage(&log, &fixed(), Some(100_000));
+        let percent = |name: &str| {
+            view.buckets
+                .iter()
+                .find(|bucket| bucket.name == name)
+                .and_then(|bucket| bucket.percent)
+        };
+        assert_eq!(percent("system prompt"), Some(2));
+        assert_eq!(percent("tools"), Some(4));
+        assert_eq!(percent("skills"), Some(1));
+        assert_eq!(percent("conversation"), Some(3));
+        let unknown = parse_usage(&log, &fixed(), None);
+        assert!(
+            unknown
+                .buckets
+                .iter()
+                .all(|bucket| bucket.percent.is_none())
+        );
+    }
+
+    fn agent(id: &str, chat_id: &str) -> arbos_layout::AgentView {
+        arbos_layout::AgentView {
+            id: id.into(),
+            name: id.into(),
+            role: if id == "main" {
+                "coordinator"
+            } else {
+                "worker"
+            }
+            .into(),
+            chat_id: chat_id.into(),
+            status: String::new(),
+            brief: String::new(),
+            result: String::new(),
+            machine: String::new(),
+            model: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_chat_maps_to_its_agent_and_an_unclaimed_main_to_main() {
+        let agents = [
+            agent("main", "p1-main"),
+            agent("fix-tests", "p1-w-fix-tests"),
+        ];
+        assert_eq!(
+            agent_of_chat(&agents, "p1-main", "p1-w-fix-tests").as_deref(),
+            Some("fix-tests")
+        );
+        assert_eq!(
+            agent_of_chat(&agents, "p1-main", "p1-main").as_deref(),
+            Some("main")
+        );
+        let unclaimed = [agent("main", ""), agent("fix-tests", "p1-w-fix-tests")];
+        assert_eq!(
+            agent_of_chat(&unclaimed, "p1-main", "p1-main").as_deref(),
+            Some("main")
+        );
+        assert_eq!(agent_of_chat(&unclaimed, "p1-main", "other-chat"), None);
+        assert_eq!(agent_of_chat(&unclaimed, "p1-main", ""), None);
+    }
+
+    #[test]
+    fn a_worker_reads_its_own_log() {
+        let root =
+            std::env::temp_dir().join(format!("arbos-context-worker-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let sessions = root
+            .join(".arbos")
+            .join("agents")
+            .join("fix-tests")
+            .join("fx")
+            .join(".fx")
+            .join("sessions")
+            .join("s1");
+        fs::create_dir_all(&sessions).unwrap();
+        let log = [
+            frame(1, sections(1_400, 3_900, 2_600, 9_200)),
+            frame(2, serde_json::json!({ "user": { "text": "w" } })),
+            frame(3, turn(1, 1, true)),
+        ]
+        .join("\n");
+        fs::write(sessions.join("events.jsonl"), log).unwrap();
+        let worker = usage_for(&root, "fix-tests", Some(100_000));
+        assert!(worker.measured);
+        assert_eq!(worker.used, 9_200);
+        assert_eq!(worker.percent, Some(10));
+        let main = usage_for(&root, "main", Some(100_000));
+        assert!(!main.measured);
+        assert_eq!(main.turns, 0);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
