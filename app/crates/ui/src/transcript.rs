@@ -1323,8 +1323,9 @@ fn link_spans(text: &str) -> Vec<Range<usize>> {
         };
         let body = &rest[scheme.len()..];
         let body_end = body.find(char::is_whitespace).unwrap_or(body.len());
-        let trimmed = body[..body_end]
-            .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | '*' | '_'));
+        let trimmed = body[..body_end].trim_end_matches(|c: char| {
+            matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | '*' | '_')
+        });
         let end = start + scheme.len() + trimmed.len();
         if trimmed.is_empty() {
             from = end;
@@ -1364,8 +1365,14 @@ fn mentions_file_name(text: &str) -> bool {
 /// after the last link that name a branch or a file are dropped; the bold
 /// markers around the link go with them.
 fn link_sentence(line: &str) -> String {
-    let sentence = line.split(". ").find(|s| has_link(s)).unwrap_or(line).trim();
-    let end = link_spans(sentence).last().map_or(sentence.len(), |span| span.end);
+    let sentence = line
+        .split(". ")
+        .find(|s| has_link(s))
+        .unwrap_or(line)
+        .trim();
+    let end = link_spans(sentence)
+        .last()
+        .map_or(sentence.len(), |span| span.end);
     let kept = if mentions_file_name(&sentence[end..]) {
         &sentence[..end]
     } else {
@@ -12063,7 +12070,11 @@ mod tests {
             first_clean_sentence(PR_REPLY).as_deref(),
             Some("The PR is up: https://github.com/unarbos/arbos/pull/839.")
         );
-        let entry = assistant("pr", MessageStatus::Complete, vec![text_part("t", PR_REPLY)]);
+        let entry = assistant(
+            "pr",
+            MessageStatus::Complete,
+            vec![text_part("t", PR_REPLY)],
+        );
         let shown = plan_entry(&entry);
         assert_eq!(
             shown.parts,
@@ -12086,7 +12097,10 @@ mod tests {
         let long = format!("Opened https://example.com/{}.", "a".repeat(200));
         assert!(!sentence_too_long(&long));
         assert_eq!(first_clean_sentence(&long).as_deref(), Some(long.as_str()));
-        assert!(sentence_too_long(&format!("{} https://a.io/b", "w".repeat(161))));
+        assert!(sentence_too_long(&format!(
+            "{} https://a.io/b",
+            "w".repeat(161)
+        )));
     }
 
     /// Every link in the sentence stays whole: the `. ` split and the
@@ -12094,8 +12108,10 @@ mod tests {
     #[test]
     fn main_keeps_every_link_whole() {
         assert_eq!(
-            first_clean_sentence("Both are up: https://a.io/x/1, and http://b.io/y/2, see `src/lib.rs`.")
-                .as_deref(),
+            first_clean_sentence(
+                "Both are up: https://a.io/x/1, and http://b.io/y/2, see `src/lib.rs`."
+            )
+            .as_deref(),
             Some("Both are up: https://a.io/x/1, and http://b.io/y/2.")
         );
         assert_eq!(
@@ -12106,7 +12122,9 @@ mod tests {
             link_spans("at https://a.io/x. Then http://b.io/y!"),
             vec![3..17, 24..37]
         );
-        assert!(person_can_read("The status report is at https://a.io/report."));
+        assert!(person_can_read(
+            "The status report is at https://a.io/report."
+        ));
     }
 
     /// Sentences without a link read as before: paths and status files stay
@@ -12114,7 +12132,10 @@ mod tests {
     #[test]
     fn main_still_hides_paths_in_sentences_without_a_link() {
         assert_eq!(first_clean_sentence("The branch `feat/x` is pushed."), None);
-        assert_eq!(first_clean_sentence("I wrote the plan to goal.md for you."), None);
+        assert_eq!(
+            first_clean_sentence("I wrote the plan to goal.md for you."),
+            None
+        );
         assert_eq!(first_clean_sentence(&format!("{}.", "w".repeat(161))), None);
         assert_eq!(
             first_clean_sentence("I will start with the parser. Then the tests.").as_deref(),
