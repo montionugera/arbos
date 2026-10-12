@@ -448,11 +448,21 @@ fn progress_arc(
 /// the hero ascii) over the app background with a quiet status line. While
 /// `fading` it plays `splash-out` (150ms hold, then 0.5s fade + 6px lift); the
 /// shell removes it once [`SPLASH_OUT`] has run its course.
-/// The boot line a person reads. Kept as its own function so the words stay
-/// in the release binary.
+/// The boot line, plus a tail so the sentence stays one block in the
+/// release binary. A short literal alone can be rebuilt from machine
+/// instructions and then a search of the file finds nothing.
+#[used]
+static BOOT_SPLASH_LABEL: &str =
+    "Setting up Arbos\nThe boot line stays in the release binary.";
+
+/// The boot line a person reads.
 #[inline(never)]
 pub fn boot_splash_label() -> &'static str {
-    "Setting up Arbos"
+    let label = BOOT_SPLASH_LABEL;
+    match label.split_once('\n') {
+        Some((line, _)) => line,
+        None => label,
+    }
 }
 
 pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App) -> AnyElement {

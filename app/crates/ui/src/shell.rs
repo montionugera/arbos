@@ -1468,6 +1468,11 @@ enum SplashPhase {
     Gone,
 }
 
+/// How long the boot line stays fully visible after the window first paints
+/// it. The engine is often ready before that first paint, and the old path
+/// finished the fade before the window was on screen.
+const SPLASH_HOLD: Duration = Duration::from_millis(800);
+
 /// How long past a revealing disclosure's motion the sidebar keeps scrolling
 /// a renamed row into view.
 const CHAT_RENAME_REVEAL_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
@@ -2323,6 +2328,9 @@ pub struct Shell {
     test_time: Option<std::time::Instant>,
     splash: SplashPhase,
     splash_task: Option<Task<()>>,
+    /// First paint of a visible boot splash. The fade waits until this plus
+    /// [`SPLASH_HOLD`], and until the engine is ready.
+    splash_painted_at: Option<std::time::Instant>,
     /// Focus fallback (registered on first paint — [`Shell::new`] has no
     /// window): keyboard shortcuts dispatch through the window focus chain, so
     /// with missing or unmounted focus they go dead. Recover after handoffs
@@ -2715,6 +2723,7 @@ impl Shell {
             test_time: None,
             splash,
             splash_task: None,
+            splash_painted_at: None,
             focus_sub: None,
             shortcut_focus: cx.focus_handle(),
             navigation_focus: navigation_focus::NavigationFocus::new(cx),
@@ -3182,25 +3191,57 @@ impl Shell {
             }
         }
         match state.read(cx).connection {
-            ConnectionStatus::Ready => {
-                if self.splash == SplashPhase::Visible {
-                    self.splash = SplashPhase::FadingOut;
-                    self.splash_task = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(SPLASH_OUT.total() + Duration::from_millis(30))
-                            .await;
-                        this.update(cx, |shell, cx| {
-                            shell.splash = SplashPhase::Gone;
-                            cx.notify();
-                        })
-                        .ok();
-                    }));
-                }
-            }
+            ConnectionStatus::Ready => self.maybe_retire_splash(cx),
             // Reveal the gate card immediately; the splash never returns mid-session.
             ConnectionStatus::Failed(_) => self.splash = SplashPhase::Gone,
             ConnectionStatus::Connecting => {}
         }
+    }
+
+    /// Fade the boot splash only after it has been on screen long enough to
+    /// read, and only once the engine is ready.
+    fn maybe_retire_splash(&mut self, cx: &mut Context<Self>) {
+        if self.splash != SplashPhase::Visible {
+            return;
+        }
+        if !matches!(
+            self.state.read(cx).connection,
+            ConnectionStatus::Ready
+        ) {
+            return;
+        }
+        let Some(painted) = self.splash_painted_at else {
+            return;
+        };
+        let elapsed = painted.elapsed();
+        if elapsed < SPLASH_HOLD {
+            if self.splash_task.is_none() {
+                let wait = SPLASH_HOLD - elapsed;
+                self.splash_task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    this.update(cx, |shell, cx| {
+                        shell.splash_task = None;
+                        shell.maybe_retire_splash(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+            }
+            return;
+        }
+        self.splash = SplashPhase::FadingOut;
+        self.splash_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(SPLASH_OUT.total() + Duration::from_millis(30))
+                .await;
+            this.update(cx, |shell, cx| {
+                if shell.splash == SplashPhase::FadingOut {
+                    shell.splash = SplashPhase::Gone;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
     }
 
     // ---- layout state ----
@@ -14256,6 +14297,10 @@ impl Render for Shell {
         // Boot splash overlay: visible → crossfades out on Ready → removed.
         let root = match self.splash {
             SplashPhase::Visible => {
+                if self.splash_painted_at.is_none() {
+                    self.splash_painted_at = Some(std::time::Instant::now());
+                    self.maybe_retire_splash(cx);
+                }
                 let theme = Theme::of(cx).clone();
                 root.child(loaders::splash_overlay(&theme, false, cx.entity_id(), cx))
             }

@@ -25,6 +25,7 @@ Do not tick a line before that worker reports. \
 Read `.arbos/context/GOALS.md` first. \
 Write what you learn to `.arbos/context/`. \
 Keep `status.md` current. \
+When you rewrite context/status.md, keep every checkbox line that is already there. \
 An Active goal in GOALS.md stays active after a worker reports. Do not remove it.";
 
 pub const WORKER_PROMPT: &str = "\
