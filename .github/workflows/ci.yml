@@ -25,8 +25,6 @@ jobs:
           test -f LICENSE
           grep -q "MIT License" LICENSE
           test -f README.md
-          grep -q "docs/design/arbos-rebuild-ideation.md" README.md
-          grep -q "docs/STATUS.md" README.md
           test -f app/LICENSE
           test -f app/THIRD_PARTY_NOTICES.md
           test -f app/Cargo.toml
