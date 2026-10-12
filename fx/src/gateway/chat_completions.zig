@@ -224,6 +224,106 @@ fn streamIdleTimeoutMs() ?i64 {
 
 var test_stream_idle_timeout_ms: ??i64 = null;
 
+const IdleStallObserver = struct {
+    alloc: Allocator,
+    content: std.ArrayList(u8) = .empty,
+
+    fn emit(raw: *anyopaque, event: streams.Event) void {
+        const self: *IdleStallObserver = @ptrCast(@alignCast(raw));
+        switch (event) {
+            .content_delta => |text| self.content.appendSlice(self.alloc, text) catch {},
+            .reasoning_delta, .tool_started, .tool_input_delta => {},
+        }
+    }
+
+    fn admit(_: *anyopaque) anyerror!void {}
+};
+
+test "chat completions idle stall surfaces error.Timeout and keeps partial output" {
+    const alloc = std.testing.allocator;
+    var fixture = try client_mod.TestStreamIdleFixture.initStall(10_000);
+    defer fixture.deinit();
+    try fixture.start();
+    const config = try std.fmt.allocPrint(alloc, "{{\"local\":{{\"protocol\":\"openai-chat-completions\",\"base_url\":\"http://127.0.0.1:{d}/v1\",\"auth\":{{\"type\":\"none\"}}}}}}", .{fixture.port()});
+    defer alloc.free(config);
+    var registry = try definitions.Registry.parse_json(alloc, config);
+    defer registry.deinit(alloc);
+    const adapter = bundle(registry.get("local").?).agent_stream.?;
+    test_stream_idle_timeout_ms = 100;
+    defer test_stream_idle_timeout_ms = null;
+
+    var observer = IdleStallObserver{ .alloc = alloc };
+    defer observer.content.deinit(alloc);
+    var cancel = std.atomic.Value(bool).init(false);
+    var delivery: streams.DeliveryCertainty = .init();
+    var evidence: streams.AttemptEvidence = .{};
+    const started = std.Io.Clock.Timestamp.now(io.getIo(), .awake);
+    const result = adapter.stream_fn(adapter.context, alloc, .{
+        .credential = .{ .direct = .{ .secret_bytes = "", .source = .configured } },
+        .model = "model",
+        .retry_count = 1,
+        .messages = &.{.{ .role = .user, .content = "hi" }},
+        .tool_choice = .auto,
+        .provider_options = .{},
+        .trace_ctx = .{},
+        .content_capture_limit = null,
+        .delivery = &delivery,
+        .attempt_evidence = &evidence,
+        .events = .{ .context = &observer, .emit_fn = IdleStallObserver.emit },
+        .admission = .{ .context = &observer, .admit_fn = IdleStallObserver.admit },
+        .cancel_flag = &cancel,
+    });
+    const elapsed_ms = started.durationTo(std.Io.Clock.Timestamp.now(io.getIo(), .awake)).raw.toMilliseconds();
+
+    try std.testing.expectError(error.Timeout, result);
+    try std.testing.expect(elapsed_ms < 2_000);
+    try std.testing.expectEqualStrings("partial", observer.content.items);
+    const failure = evidence.network_failure orelse return error.TestExpectedNetworkFailureEvidence;
+    try std.testing.expectEqual(streams.NetworkFailureCause.transport_interrupted, failure.cause);
+    try std.testing.expectEqual(streams.DeliveryCertainty.State.possibly_sent, failure.delivery);
+}
+
+test "chat completions idle budget leaves a heartbeating stream alone" {
+    const alloc = std.testing.allocator;
+    var fixture = try client_mod.TestStreamIdleFixture.initSteadyProgress();
+    defer fixture.deinit();
+    try fixture.start();
+    const config = try std.fmt.allocPrint(alloc, "{{\"local\":{{\"protocol\":\"openai-chat-completions\",\"base_url\":\"http://127.0.0.1:{d}/v1\",\"auth\":{{\"type\":\"none\"}}}}}}", .{fixture.port()});
+    defer alloc.free(config);
+    var registry = try definitions.Registry.parse_json(alloc, config);
+    defer registry.deinit(alloc);
+    const adapter = bundle(registry.get("local").?).agent_stream.?;
+    test_stream_idle_timeout_ms = 100;
+    defer test_stream_idle_timeout_ms = null;
+
+    var observer = IdleStallObserver{ .alloc = alloc };
+    defer observer.content.deinit(alloc);
+    var cancel = std.atomic.Value(bool).init(false);
+    var delivery: streams.DeliveryCertainty = .init();
+    var evidence: streams.AttemptEvidence = .{};
+    var result = try adapter.stream_fn(adapter.context, alloc, .{
+        .credential = .{ .direct = .{ .secret_bytes = "", .source = .configured } },
+        .model = "model",
+        .retry_count = 1,
+        .messages = &.{.{ .role = .user, .content = "hi" }},
+        .tool_choice = .auto,
+        .provider_options = .{},
+        .trace_ctx = .{},
+        .content_capture_limit = null,
+        .delivery = &delivery,
+        .attempt_evidence = &evidence,
+        .events = .{ .context = &observer, .emit_fn = IdleStallObserver.emit },
+        .admission = .{ .context = &observer, .admit_fn = IdleStallObserver.admit },
+        .cancel_flag = &cancel,
+    });
+    defer result.deinit(alloc);
+
+    fixture.deinit();
+    if (fixture.failure()) |err| return err;
+    try std.testing.expectEqualStrings("done", result.completed.completion.content.?);
+    try std.testing.expect(evidence.network_failure == null);
+}
+
 /// The returned entry borrows its strings; fetch_catalog replaces them with owned copies.
 fn metadata_entry(metadata: definitions.ModelMetadata) catalog.ModelCatalogEntry {
     const vision = metadata.supports_vision orelse false;
