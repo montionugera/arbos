@@ -118,6 +118,7 @@ pub struct Pending {
 
 /// One row for the Listening pill.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubscriptionView {
     pub id: String,
     pub kind: String,
