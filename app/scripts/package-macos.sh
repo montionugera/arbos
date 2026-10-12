@@ -5,7 +5,9 @@
 # containing Zeron.app (unsigned unless CODESIGN_IDENTITY is set).
 #
 # Usage: scripts/package-macos.sh
-# Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
+# Env:   ARBOS_BUILD=<n> appends a fourth version component (CI uses the commit
+#        count) so the artifact name matches what the updater asks for.
+#        CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
 #        NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID — App Store Connect
 #        API key (.p8) for notarization; all three set → notarize + staple the
 #        app and the dmg, which removes the Gatekeeper warning entirely.
@@ -14,7 +16,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
-VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+BASE="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+if [[ -n "${ARBOS_BUILD:-}" ]]; then
+  if [[ ! "$ARBOS_BUILD" =~ ^[0-9]+$ ]]; then
+    echo "ARBOS_BUILD must be a decimal build number" >&2
+    exit 1
+  fi
+  VERSION="${BASE}.${ARBOS_BUILD}"
+  export ARBOS_BUILD
+else
+  VERSION="$BASE"
+fi
 ARCH="$(uname -m)" # arm64 on Apple silicon runners
 OUT_DIR="$ROOT/target/package"
 APP="$OUT_DIR/Zeron.app"
@@ -82,6 +94,7 @@ fi
 
 # The auto-updater artifact.
 tar -czf "$APP_TARBALL" -C "$OUT_DIR" Zeron.app
+printf '%s\n' "$VERSION" > "$OUT_DIR/version.txt"
 echo "packaged: $APP_TARBALL"
 
 # The dmg presents the classic drag-into-Applications layout over the
