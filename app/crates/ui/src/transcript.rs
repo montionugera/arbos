@@ -1306,10 +1306,79 @@ thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { s
 /// into ONE collapsed [`RowKind::ToolGroup`], so only the reply text (the
 /// trailing run of text parts) stays a visible row.
 
+/// The person's links in `text`: byte ranges of every `https://` or `http://`
+/// link, without the punctuation or bold markers that close it.
+fn link_spans(text: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(found) = text[from..].find("http") {
+        let start = from + found;
+        let rest = &text[start..];
+        let Some(scheme) = ["https://", "http://"]
+            .into_iter()
+            .find(|scheme| rest.starts_with(scheme))
+        else {
+            from = start + "http".len();
+            continue;
+        };
+        let body = &rest[scheme.len()..];
+        let body_end = body.find(char::is_whitespace).unwrap_or(body.len());
+        let trimmed = body[..body_end].trim_end_matches(|c: char| {
+            matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | '*' | '_')
+        });
+        let end = start + scheme.len() + trimmed.len();
+        if trimmed.is_empty() {
+            from = end;
+            continue;
+        }
+        spans.push(start..end);
+        from = end;
+    }
+    spans
+}
+
+fn has_link(text: &str) -> bool {
+    !link_spans(text).is_empty()
+}
+
+/// `text` with the person's links taken out. The slashes inside a link are
+/// not a file path, and a link's length does not count against the cap.
+fn without_links(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    for span in link_spans(text) {
+        out.push_str(&text[from..span.start]);
+        from = span.end;
+    }
+    out.push_str(&text[from..]);
+    out
+}
+
 /// A sentence the person can read. File paths and status-file names stay off Main.
 fn mentions_file_name(text: &str) -> bool {
+    let text = without_links(text);
     let lower = text.to_ascii_lowercase();
     lower.contains(".md") || lower.contains(".arbos") || text.contains('/')
+}
+
+/// The sentence of `line` that carries the person's link, whole. The words
+/// after the last link that name a branch or a file are dropped; the bold
+/// markers around the link go with them.
+fn link_sentence(line: &str) -> String {
+    let sentence = line
+        .split(". ")
+        .find(|s| has_link(s))
+        .unwrap_or(line)
+        .trim();
+    let end = link_spans(sentence)
+        .last()
+        .map_or(sentence.len(), |span| span.end);
+    let kept = if mentions_file_name(&sentence[end..]) {
+        &sentence[..end]
+    } else {
+        sentence
+    };
+    kept.replace("**", "").trim().to_owned()
 }
 
 fn first_clean_sentence(text: &str) -> Option<String> {
@@ -1318,15 +1387,23 @@ fn first_clean_sentence(text: &str) -> Option<String> {
             .trim()
             .trim_start_matches(|c: char| matches!(c, '-' | '*' | '>' | '#'))
             .trim();
-        if line.len() < 12 || mentions_file_name(line) {
+        if line.len() < 12 {
             continue;
         }
-        let sentence = line.split(". ").next().unwrap_or(line).trim();
-        if sentence.len() < 12 || mentions_file_name(sentence) || sentence_too_long(sentence) {
+        let sentence = if has_link(line) {
+            link_sentence(line)
+        } else {
+            if mentions_file_name(line) {
+                continue;
+            }
+            line.split(". ").next().unwrap_or(line).trim().to_owned()
+        };
+        if sentence.len() < 12 || mentions_file_name(&sentence) || sentence_too_long(&sentence) {
             continue;
         }
-        let mut out = sentence.to_owned();
-        if !out.ends_with('.') && !out.ends_with('!') && !out.ends_with('?') {
+        let mut out = sentence;
+        let only_a_link = without_links(&out).trim().is_empty();
+        if !only_a_link && !out.ends_with('.') && !out.ends_with('!') && !out.ends_with('?') {
             out.push('.');
         }
         if !person_can_read(&out) {
@@ -1344,20 +1421,21 @@ fn names_models_on_offer(sentence: &str) -> bool {
     lower.contains("on offer") || lower.contains("available models")
 }
 
+/// The cap is on the words; a link the person asked for is not counted.
 fn sentence_too_long(sentence: &str) -> bool {
     let cap = if names_models_on_offer(sentence) {
         400
     } else {
         160
     };
-    sentence.chars().count() > cap
+    without_links(sentence).chars().count() > cap
 }
 
 /// A plan sentence a person can read. A wake about files, ticks, or a
-/// checklist is not that sentence.
+/// checklist is not that sentence. A sentence carrying the person's link is.
 fn person_can_read(sentence: &str) -> bool {
     let lower = sentence.to_ascii_lowercase();
-    if lower.contains("on this goal") {
+    if lower.contains("on this goal") || has_link(sentence) {
         return true;
     }
     if names_models_on_offer(sentence) {
@@ -11976,6 +12054,93 @@ mod tests {
             id: id.into(),
             text: text.into(),
         }
+    }
+
+    const PR_REPLY: &str = "The PR is up: **https://github.com/unarbos/arbos/pull/839** — branch \
+        `feat/subscriptions-add-tool` fully pushed (engine op, MCP exposure, Listening pill rows \
+        for all three kinds, and `app/crates/engine/tests/subscriptions_add.rs`), and I just ran \
+        that suite locally: 4 passed, 0 failed.";
+
+    /// The person asked for a pull request; the link in the reply is theirs
+    /// to read, not a file path. Main shows it whole and drops the branch
+    /// name and the test file that follow it.
+    #[test]
+    fn main_keeps_the_persons_link_and_drops_the_paths_after_it() {
+        assert_eq!(
+            first_clean_sentence(PR_REPLY).as_deref(),
+            Some("The PR is up: https://github.com/unarbos/arbos/pull/839.")
+        );
+        let entry = assistant(
+            "pr",
+            MessageStatus::Complete,
+            vec![text_part("t", PR_REPLY)],
+        );
+        let shown = plan_entry(&entry);
+        assert_eq!(
+            shown.parts,
+            vec![text_part(
+                "t",
+                "The PR is up: https://github.com/unarbos/arbos/pull/839."
+            )]
+        );
+    }
+
+    /// A reply that is nothing but the link is shown as is; the slashes in a
+    /// link are not a path and its length does not count against the cap.
+    #[test]
+    fn main_shows_a_reply_that_is_only_a_link_as_is() {
+        let link = "https://github.com/unarbos/arbos/pull/839";
+        assert_eq!(first_clean_sentence(link).as_deref(), Some(link));
+        assert!(!mentions_file_name(link));
+        assert!(mentions_file_name("see `feat/x` at https://a.io/b"));
+        assert!(mentions_file_name("notes in goal.md: https://a.io/b"));
+        let long = format!("Opened https://example.com/{}.", "a".repeat(200));
+        assert!(!sentence_too_long(&long));
+        assert_eq!(first_clean_sentence(&long).as_deref(), Some(long.as_str()));
+        assert!(sentence_too_long(&format!(
+            "{} https://a.io/b",
+            "w".repeat(161)
+        )));
+    }
+
+    /// Every link in the sentence stays whole: the `. ` split and the
+    /// punctuation after a link do not cut into it, and plain `http://` counts.
+    #[test]
+    fn main_keeps_every_link_whole() {
+        assert_eq!(
+            first_clean_sentence(
+                "Both are up: https://a.io/x/1, and http://b.io/y/2, see `src/lib.rs`."
+            )
+            .as_deref(),
+            Some("Both are up: https://a.io/x/1, and http://b.io/y/2.")
+        );
+        assert_eq!(
+            first_clean_sentence("Done. The PR is up (https://a.io/pull/9), 4 passed.").as_deref(),
+            Some("The PR is up (https://a.io/pull/9), 4 passed.")
+        );
+        assert_eq!(
+            link_spans("at https://a.io/x. Then http://b.io/y!"),
+            vec![3..17, 24..37]
+        );
+        assert!(person_can_read(
+            "The status report is at https://a.io/report."
+        ));
+    }
+
+    /// Sentences without a link read as before: paths and status files stay
+    /// off Main, and the cap still holds.
+    #[test]
+    fn main_still_hides_paths_in_sentences_without_a_link() {
+        assert_eq!(first_clean_sentence("The branch `feat/x` is pushed."), None);
+        assert_eq!(
+            first_clean_sentence("I wrote the plan to goal.md for you."),
+            None
+        );
+        assert_eq!(first_clean_sentence(&format!("{}.", "w".repeat(161))), None);
+        assert_eq!(
+            first_clean_sentence("I will start with the parser. Then the tests.").as_deref(),
+            Some("I will start with the parser.")
+        );
     }
 
     #[test]
