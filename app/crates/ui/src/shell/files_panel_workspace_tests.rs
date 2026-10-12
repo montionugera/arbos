@@ -1,9 +1,18 @@
 //! Exercise the explorer and editors against an isolated real workspace/RPC.
 //! Set ZERON_FILES_CAPTURES to a directory to run on X11 and capture the fixture.
 use super::*;
-use crate::settings::{FILES_PANEL_DEFAULT, RIGHT_PANE_DEFAULT};
+use crate::settings::{CHAT_PANEL_MIN, FILES_PANEL_DEFAULT, RIGHT_PANE_DEFAULT};
 use gpui::{AppContext, AsyncApp, WindowHandle};
 use std::{path::Path, sync::Arc};
+
+/// Wide enough for every column to fit, too narrow for Files at its maximum.
+const SQUEEZED_WINDOW: f32 = 1160.0;
+/// What the rail, the conversation and the surface host leave Files there.
+const SQUEEZED_FILES: f32 =
+    SQUEEZED_WINDOW - project_chrome::RAIL_WIDTH - CHAT_PANEL_MIN - RIGHT_PANE_MIN;
+/// Too narrow for the rail beside the other three columns (968px), so the
+/// fit hides the rail, the oldest of them; Files still has its own width.
+const NARROW_WINDOW: f32 = 960.0;
 
 struct ClosedFixture;
 impl Render for ClosedFixture {
@@ -219,8 +228,14 @@ fn files_panel_workspace_navigation_and_external_updates() {
             cx.spawn(async move |cx| {
                 // Keep the temporary store, workspace and daemon alive throughout the UI run.
                 let _directory = directory;
+                // The engine also seeds the project's Main chat, so look for
+                // the two fixture chats rather than counting rows.
                 wait_for(window, cx, "engine and chats", |shell, cx| {
-                    shell.state.read(cx).engine().is_some() && shell.state.read(cx).chats.len() == 2
+                    let state = shell.state.read(cx);
+                    state.engine().is_some()
+                        && ["first", "second"]
+                            .iter()
+                            .all(|id| state.chats.iter().any(|chat| chat.id == *id))
                 })
                 .await;
                 state.update(cx, |state, cx| state.select_chat(Some("first".into()), cx));
@@ -278,15 +293,18 @@ fn files_panel_workspace_navigation_and_external_updates() {
                         shell.settings.files_panel_width = FILES_PANEL_MAX;
                         shell.settings.right_pane_width = 760.0;
                         shell.set_surfaces_open(true, cx);
-                        window.resize(gpui::size(px(1200.0), px(800.0)));
+                        // Narrow enough that Files cannot have its full
+                        // width once the rail, the conversation and the
+                        // surface host have taken their minimums.
+                        window.resize(gpui::size(px(SQUEEZED_WINDOW), px(800.0)));
                         window.bounds_changed(cx);
                     })
                     .unwrap();
                 frame(window, cx, output.as_deref(), "01b-picker-files-compact").await;
                 window
                     .update(cx, |shell, window, cx| {
-                        assert_eq!(shell.files_visible_width(cx), 284.0);
-                        assert_eq!(shell.files_reserved_width(cx), 284.0);
+                        assert_eq!(shell.files_visible_width(cx), SQUEEZED_FILES);
+                        assert_eq!(shell.files_reserved_width(cx), SQUEEZED_FILES);
                         assert_eq!(shell.right_visible_width(cx), RIGHT_PANE_MIN);
                         // Squeezed by the narrow window, Files keeps its own
                         // width for when there is room again.
@@ -365,7 +383,7 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 window
                     .update(cx, |shell, window, cx| {
                         shell.toggle_right_pane_expand(cx);
-                        window.resize(gpui::size(px(1000.0), px(720.0)));
+                        window.resize(gpui::size(px(NARROW_WINDOW), px(720.0)));
                         window.bounds_changed(cx);
                     })
                     .unwrap();
@@ -392,7 +410,10 @@ fn files_panel_workspace_navigation_and_external_updates() {
                         // The narrow fit already hid the sidebar. Takeover must
                         // keep it hidden and give only the chat's space to the editor.
                         assert_eq!(shell.sidebar_now(), 0.0);
-                        assert_eq!(shell.right_visible_width(cx), 1000.0 - FILES_PANEL_DEFAULT);
+                        assert_eq!(
+                            shell.right_visible_width(cx),
+                            NARROW_WINDOW - FILES_PANEL_DEFAULT
+                        );
                         shell.toggle_right_pane_expand(cx);
                     })
                     .unwrap();

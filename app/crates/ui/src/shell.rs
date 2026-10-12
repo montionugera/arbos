@@ -15017,8 +15017,11 @@ mod tests {
         release.await.unwrap();
     }
 
+    /// Hosted sync is compiled out: a saved WorkOS session and a client id
+    /// no longer open a synced profile. The runtime boots the development
+    /// profile, and stopping it releases the port for the next boot.
     #[tokio::test]
-    async fn signed_out_synced_runtime_stops_and_reboots_local() {
+    async fn a_saved_session_boots_the_development_profile() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("session.json"),
@@ -15037,26 +15040,25 @@ mod tests {
             workos_client_id: Some("client_test".into()),
             default_harness: zeron_proto::HarnessId::Mock,
         };
-        let synced = crate::state::EngineHandle::bootstrap(boot.clone())
+        let first = crate::state::EngineHandle::bootstrap(boot.clone())
             .await
-            .expect("saved session opens its synced profile");
-        assert_eq!(synced.engine_info().workspace_scope, WorkspaceScope::Synced);
+            .expect("a saved session still boots");
+        assert_eq!(
+            first.engine_info().workspace_scope,
+            WorkspaceScope::Development
+        );
+        stop_synced_runtime(first, port, dir.path())
+            .await
+            .expect("the runtime drains and releases ownership");
 
-        synced
-            .client()
-            .call(methods::SIGN_OUT, serde_json::json!({}))
+        let second = crate::state::EngineHandle::bootstrap(boot)
             .await
-            .expect("sign out clears credentials");
-        stop_synced_runtime(synced, port, dir.path())
-            .await
-            .expect("synced runtime drains and releases ownership");
-
-        assert!(!dir.path().join("session.json").exists());
-        let local = crate::state::EngineHandle::bootstrap(boot)
-            .await
-            .expect("same process can continue locally");
-        assert_eq!(local.engine_info().workspace_scope, WorkspaceScope::Local);
-        local.shutdown().await;
+            .expect("same process can boot again");
+        assert_eq!(
+            second.engine_info().workspace_scope,
+            WorkspaceScope::Development
+        );
+        second.shutdown().await;
     }
 
     #[cfg(unix)]
@@ -15096,20 +15098,27 @@ mod tests {
         drop(listener);
     }
 
+    /// Hosted account sync is not part of this build, so no scope and no
+    /// flow puts a sync row in the account menu.
     #[test]
-    fn account_actions_follow_the_attached_workspace_scope() {
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Local), SyncFlow::Idle),
-            Some(AccountMenuAction::EnableSync)
-        );
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Synced), SyncFlow::Idle),
-            Some(AccountMenuAction::SignOut)
-        );
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Development), SyncFlow::Idle),
-            None
-        );
+    fn the_account_menu_offers_no_hosted_sync_action() {
+        for scope in [
+            None,
+            Some(WorkspaceScope::Local),
+            Some(WorkspaceScope::Synced),
+            Some(WorkspaceScope::Development),
+        ] {
+            for flow in [
+                SyncFlow::Idle,
+                SyncFlow::Enabling,
+                SyncFlow::SwitchOffer { notice_open: false },
+                SyncFlow::RestartPending { notice_open: true },
+                SyncFlow::ImportFailed { notice_open: false },
+                SyncFlow::SignOutConfirm,
+            ] {
+                assert_eq!(account_menu_action(scope, flow), None, "{scope:?} {flow:?}");
+            }
+        }
     }
 
     #[test]
@@ -15181,13 +15190,6 @@ mod tests {
             SyncFlow::RestartPending { notice_open: false },
             "the quit fallback survives shared auth updates too"
         );
-        assert_eq!(
-            account_menu_action(
-                Some(WorkspaceScope::Local),
-                SyncFlow::SwitchOffer { notice_open: false },
-            ),
-            Some(AccountMenuAction::RestartPending)
-        );
         for notice_open in [true, false] {
             assert_eq!(
                 sync_flow_after_auth(
@@ -15248,7 +15250,7 @@ mod tests {
     }
 
     #[test]
-    fn dismissed_import_failure_stays_reachable_on_a_synced_runtime() {
+    fn dismissed_import_failure_survives_auth_updates() {
         let signed_in = AuthState::SignedIn {
             user: zeron_proto::UserProfile {
                 id: "user-1".into(),
@@ -15264,29 +15266,6 @@ mod tests {
             sync_flow_after_auth(dismissed, Some(WorkspaceScope::Synced), Some(&signed_in)),
             dismissed,
             "a postponed import failure survives auth/scope updates"
-        );
-
-        // …and the account menu on the SYNCED runtime still exposes the
-        // re-entry point. This is the whole point: after the switch there is
-        // no local runtime left to re-derive an offer from, so this menu row
-        // is the only path back to the retry dialog.
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Synced), dismissed),
-            Some(AccountMenuAction::RestartPending),
-            "retry must remain reachable after dismissal"
-        );
-        assert_eq!(
-            account_menu_action(
-                Some(WorkspaceScope::Synced),
-                SyncFlow::ImportFailed { notice_open: true },
-            ),
-            Some(AccountMenuAction::RestartPending)
-        );
-
-        // Resolving the failure restores the normal synced menu.
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Synced), SyncFlow::Idle),
-            Some(AccountMenuAction::SignOut)
         );
     }
 
@@ -18640,18 +18619,27 @@ mod settings_modal_regressions {
         init_settings_test(settings::UiSettings::default(), dir.path(), cx);
         let keymap = KeymapConfig::default();
         cx.update(|cx| apply_keymap(cx, &keymap, ComposerSendBehavior::default()));
+        // The jump digit opens a project and lands on its Main chat; the
+        // newer chat is that Main.
+        let project_path = dir.path().join("p1").display().to_string();
         let window = cx.add_window(|_, cx| {
             let mut shell = test_shell(dir.path(), cx);
             shell.settings.sidebar_organization = SidebarOrganization::InOneList;
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
-                state.chats = ["older", "newer"]
+                state.spaces = vec![serde_json::from_value(serde_json::json!({
+                    "id": "p1", "deviceId": "local", "path": project_path,
+                    "createdAt": Utc::now(),
+                }))
+                .unwrap()];
+                state.chats = ["older", "p1-main"]
                     .into_iter()
                     .enumerate()
                     .map(|(ix, id)| {
                         serde_json::from_value(serde_json::json!({
                             "id": id, "title": id, "deviceId": "local", "archived": false,
+                            "spaceId": (id == "p1-main").then_some("p1"),
                             "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
                         }))
                         .unwrap()
@@ -18677,7 +18665,7 @@ mod settings_modal_regressions {
         };
         assert_eq!(
             press(keymap.get(ShortcutId::JumpSession(0))),
-            (Route::Chat, Some("newer".into()))
+            (Route::Chat, Some("p1-main".into()))
         );
         assert_eq!(
             press(&keymap.next_session),
@@ -18685,9 +18673,15 @@ mod settings_modal_regressions {
         );
         assert_eq!(
             press(&keymap.prev_session),
-            (Route::Chat, Some("newer".into()))
+            (Route::Chat, Some("p1-main".into()))
         );
-        assert_eq!(press(&keymap.new_session), (Route::Chat, None));
+        // New session opens a fresh chat in the selected project and lands on it.
+        let (route, selected) = press(&keymap.new_session);
+        assert_eq!(route, Route::Chat);
+        assert!(
+            selected.is_some_and(|id| id != "older" && id != "p1-main"),
+            "a new project chat should be selected"
+        );
     }
 
     #[gpui::test]
@@ -18775,6 +18769,7 @@ mod settings_modal_regressions {
     /// Carried out of the sidebar it follows the pointer, and dropped on a
     /// conversation it becomes a chat chip in that composer.
     #[gpui::test]
+    #[ignore = "the sidebar session list is not painted: the left bar is the project rail"]
     fn a_dragged_session_leaves_the_sidebar_and_drops_as_a_chat_mention(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         init_settings_test(settings::UiSettings::default(), dir.path(), cx);
