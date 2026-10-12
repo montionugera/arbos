@@ -9,6 +9,7 @@ const sse = @import("sse.zig");
 const configured_provider = @import("../core/config/configured_provider.zig");
 const model_provider = @import("../core/config/model_provider.zig");
 const io_mod = @import("../core/shared/io.zig");
+const debug_trace = @import("../core/shared/debug_trace.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -283,9 +284,43 @@ test "chat completions error masking releases partial allocations" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
-fn validate_arguments(alloc: Allocator, text: []const u8) Error!void {
-    try check_json_depth(text);
-    if (try types.ToolArgumentIntegrity.classifyFunctionInput(alloc, text) != .valid) return error.InvalidToolArguments;
+/// Whether the advertised input schema admits `{}`. A provider that streams no
+/// argument bytes for such a tool meant the empty object; a tool that needs a
+/// property cannot be guessed at.
+fn accepts_empty_object(schema: @FieldType(Function, "schema")) bool {
+    switch (schema) {
+        .builtin => |builtin| return builtin.required.len == 0 and builtin.one_of.len == 0,
+        .dynamic => |value| {
+            if (value != .object) return false;
+            for ([_][]const u8{ "oneOf", "anyOf", "allOf" }) |key| if (value.object.get(key) != null) return false;
+            const required = value.object.get("required") orelse return true;
+            return required == .array and required.array.items.len == 0;
+        },
+    }
+}
+
+/// Owned arguments for one finished call. Rejected bytes never leave the
+/// reducer: the runtime replays a rejected call as "{}" with its integrity flag.
+const FinishedArguments = struct {
+    json: []u8,
+    integrity: types.ToolArgumentIntegrity = .valid,
+    diagnostic: ?types.ToolArgumentDiagnostic = null,
+};
+
+fn finish_arguments(alloc: Allocator, tool: *Tool, accepts_empty: bool) Error!FinishedArguments {
+    const raw = tool.arguments.items;
+    if (std.mem.trim(u8, raw, " \t\r\n").len == 0 and accepts_empty) {
+        return .{ .json = try alloc.dupe(u8, "{}") };
+    }
+    const integrity = try types.ToolArgumentIntegrity.classifyFunctionInput(alloc, raw);
+    if (integrity == .valid) return .{ .json = try tool.arguments.toOwnedSlice(alloc) };
+    const diagnostic = if (integrity == .malformed_json) try types.ToolArgumentDiagnostic.diagnose(alloc, raw) else null;
+    debug_trace.logf(
+        "sse",
+        "event=tool_argument_integrity call_id={s} tool_name={s} source=chat_completions_finish bytes={d} failure={s} diagnosis={?s}",
+        .{ tool.id.?, tool.name.items, raw.len, @tagName(integrity), if (diagnostic) |found| @tagName(found.failure) else null },
+    );
+    return .{ .json = try alloc.dupe(u8, "{}"), .integrity = integrity, .diagnostic = diagnostic };
 }
 
 fn validate_history(alloc: Allocator, messages: []const types.ChatMessage) Error!void {
@@ -651,11 +686,16 @@ const Tool = struct {
 /// or hidden cancellation reads. Owns all retained input (including selected
 /// names) until deinit. Any accept/finish failure poisons the reducer; deinit
 /// remains mandatory. A successful finish transfers independent owned results.
+const SelectedFunction = struct {
+    name: []u8,
+    accepts_empty_object: bool,
+};
+
 pub const Reducer = struct {
     alloc: Allocator,
     limits: Limits,
     choice: types.ToolChoice,
-    names: std.ArrayList([]u8) = .empty,
+    functions: std.ArrayList(SelectedFunction) = .empty,
     tools: std.ArrayList(Tool) = .empty,
     content: std.ArrayList(u8) = .empty,
     generation_id: ?[]u8 = null,
@@ -685,14 +725,14 @@ pub const Reducer = struct {
         for (functions.items) |function| {
             const name = try alloc.dupe(u8, function.name);
             errdefer alloc.free(name);
-            try self.names.append(alloc, name);
+            try self.functions.append(alloc, .{ .name = name, .accepts_empty_object = accepts_empty_object(function.schema) });
         }
         return self;
     }
 
     pub fn deinit(self: *Reducer) void {
-        for (self.names.items) |name| self.alloc.free(name);
-        self.names.deinit(self.alloc);
+        for (self.functions.items) |function| self.alloc.free(function.name);
+        self.functions.deinit(self.alloc);
         for (self.tools.items) |*tool| tool.deinit(self.alloc);
         self.tools.deinit(self.alloc);
         self.content.deinit(self.alloc);
@@ -890,7 +930,7 @@ pub const Reducer = struct {
                     const fragment = try string(name_value);
                     try append_bounded(self.alloc, &tool.name, fragment, @min(max_name_bytes, self.limits.identity_bytes), error.IdentityTooLarge);
                     var prefix = false;
-                    for (self.names.items) |name| prefix = prefix or std.mem.startsWith(u8, name, tool.name.items);
+                    for (self.functions.items) |selected| prefix = prefix or std.mem.startsWith(u8, selected.name, tool.name.items);
                     if (!prefix) return error.InvalidToolName;
                 }
                 if (non_null(function, "arguments")) |arguments| try append_bounded(self.alloc, &tool.arguments, try string(arguments), self.limits.arguments_bytes, error.ArgumentsTooLarge);
@@ -898,9 +938,9 @@ pub const Reducer = struct {
         }
     }
 
-    fn known_name(self: *const Reducer, name: []const u8) bool {
-        for (self.names.items) |candidate| if (std.mem.eql(u8, candidate, name)) return true;
-        return false;
+    fn selected_function(self: *const Reducer, name: []const u8) ?SelectedFunction {
+        for (self.functions.items) |candidate| if (std.mem.eql(u8, candidate.name, name)) return candidate;
+        return null;
     }
 
     fn accept_usage(self: *Reducer, value: std.json.Value, final: bool) Error!void {
@@ -945,6 +985,8 @@ pub const Reducer = struct {
 
     /// Requires finish_reason followed by [DONE]. Length/filter/refusal are
     /// explicit errors, never executable partial calls or successful tool turns.
+    /// A completed call whose arguments are not a JSON object is returned as a
+    /// rejected call ("{}" plus its integrity flag) rather than a stream error.
     /// Results use stream_provider.Result.deinit with this reducer's allocator.
     /// Observed tokens are not exact billing; no deferred lookup is invented.
     pub fn finish(self: *Reducer, cancelled: bool) Error!stream_provider.Result {
@@ -964,8 +1006,8 @@ pub const Reducer = struct {
         if (self.choice == .required and self.tools.items.len == 0) return error.RequiredToolMissing;
         for (self.tools.items) |tool| {
             if (tool.id == null) return error.InvalidToolCallId;
-            if (!self.known_name(tool.name.items)) return error.InvalidToolName;
-            try validate_arguments(self.alloc, tool.arguments.items);
+            if (self.selected_function(tool.name.items) == null) return error.InvalidToolName;
+            try check_json_depth(tool.arguments.items);
         }
         const provider_state = self.reasoning_state() catch |err| switch (err) {
             error.WriteFailed => return error.OutOfMemory,
@@ -982,6 +1024,11 @@ pub const Reducer = struct {
             calls.deinit(self.alloc);
         }
         for (self.tools.items) |*tool| {
+            // A malformed or non-object call is still a call: the runtime
+            // answers it with a tool error and the model gets another step,
+            // instead of the whole turn failing on one bad argument string.
+            const arguments = try finish_arguments(self.alloc, tool, self.selected_function(tool.name.items).?.accepts_empty_object);
+            errdefer self.alloc.free(arguments.json);
             // finish() is terminal: ownership moves to the result and the
             // emptied accumulators cost nothing at reducer deinit.
             const id = tool.id.?;
@@ -989,9 +1036,13 @@ pub const Reducer = struct {
             errdefer self.alloc.free(id);
             const name = try tool.name.toOwnedSlice(self.alloc);
             errdefer self.alloc.free(name);
-            const arguments = try tool.arguments.toOwnedSlice(self.alloc);
-            errdefer self.alloc.free(arguments);
-            try calls.append(self.alloc, .{ .id = id, .name = name, .arguments_json = arguments });
+            try calls.append(self.alloc, .{
+                .id = id,
+                .name = name,
+                .arguments_json = arguments.json,
+                .argument_integrity = arguments.integrity,
+                .argument_diagnostic = arguments.diagnostic,
+            });
         }
         const content = if (self.content.items.len != 0) try self.content.toOwnedSlice(self.alloc) else null;
         errdefer if (content) |text| self.alloc.free(text);
@@ -2237,19 +2288,119 @@ test "chat completions owns fragmented interleaved tools and results independent
     try std.testing.expectEqual(stream_provider.UsageUnavailable.possibly_billed, result.completed.usage.unavailable);
 }
 
-test "chat completions malformed and nonobject final arguments never become tools" {
+test "chat completions malformed and nonobject final arguments become rejected calls not failures" {
     const alloc = std.testing.allocator;
-    for ([_][]const u8{ "", "{", "[]", "null", "3", "{}junk", "{\"x\":1,\"x\":2}" }) |arguments| {
+    const cases = [_]struct { arguments: []const u8, integrity: types.ToolArgumentIntegrity, failure: ?types.ToolArgumentDiagnostic.Failure = null }{
+        .{ .arguments = "", .integrity = .malformed_json, .failure = .truncated },
+        .{ .arguments = "  ", .integrity = .malformed_json, .failure = .truncated },
+        .{ .arguments = "{", .integrity = .malformed_json, .failure = .truncated },
+        .{ .arguments = "{\"path\": ", .integrity = .malformed_json, .failure = .truncated },
+        .{ .arguments = "{}junk", .integrity = .malformed_json, .failure = .syntax_error },
+        .{ .arguments = "{\"x\":1,\"x\":2}", .integrity = .malformed_json, .failure = .rejected_value },
+        .{ .arguments = "[]", .integrity = .non_object_json },
+        .{ .arguments = "null", .integrity = .non_object_json },
+        .{ .arguments = "3", .integrity = .non_object_json },
+    };
+    for (cases) |case| {
         var reducer = try Reducer.init(alloc, test_tool_request(), .{});
         defer reducer.deinit();
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
         try out.writer.writeAll("{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read_file\",\"arguments\":");
-        try std.json.Stringify.value(arguments, .{}, &out.writer);
+        try std.json.Stringify.value(case.arguments, .{}, &out.writer);
         try out.writer.writeAll("}}]}}]}");
         try test_accept(&reducer, out.written());
-        try std.testing.expectError(error.InvalidToolArguments, test_finish(&reducer, test_tools_finish));
-        try std.testing.expectError(error.StreamClosed, reducer.finish(false));
+        var result = try test_finish(&reducer, test_tools_finish);
+        defer result.deinit(alloc);
+        const completion = result.completed.completion;
+        try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, completion.finish_reason);
+        try std.testing.expectEqual(@as(usize, 1), completion.tool_calls.len);
+        const call = completion.tool_calls[0];
+        try std.testing.expectEqualStrings("call-1", call.id);
+        try std.testing.expectEqualStrings("read_file", call.name);
+        try std.testing.expectEqualStrings("{}", call.arguments_json);
+        try std.testing.expectEqual(case.integrity, call.argument_integrity);
+        if (case.failure) |failure| {
+            const diagnostic = call.argument_diagnostic.?;
+            try std.testing.expectEqual(failure, diagnostic.failure);
+            try std.testing.expectEqual(case.arguments.len, diagnostic.input_bytes);
+        } else try std.testing.expect(call.argument_diagnostic == null);
+    }
+}
+
+test "chat completions empty arguments run as an empty object only when the schema allows it" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { delta: []const u8, integrity: types.ToolArgumentIntegrity }{
+        // `shell` requires nothing at the top level, so no bytes means `{}`.
+        .{ .delta = "{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"shell\",\"arguments\":\"\"}}", .integrity = .valid },
+        .{ .delta = "{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"shell\"}}", .integrity = .valid },
+        .{ .delta = "{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"shell\",\"arguments\":\" \\n\"}}", .integrity = .valid },
+        // `read_file` requires `path`; fx cannot invent it, so the call is rejected.
+        .{ .delta = "{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"\"}}", .integrity = .malformed_json },
+        .{ .delta = "{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read_file\"}}", .integrity = .malformed_json },
+    };
+    for (cases) |case| {
+        var reducer = try Reducer.init(alloc, test_tool_request(), .{});
+        defer reducer.deinit();
+        const chunk = try std.mem.concat(alloc, u8, &.{ "{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[", case.delta, "]}}]}" });
+        defer alloc.free(chunk);
+        try test_accept(&reducer, chunk);
+        var result = try test_finish(&reducer, test_tools_finish);
+        defer result.deinit(alloc);
+        const call = result.completed.completion.tool_calls[0];
+        try std.testing.expectEqualStrings("{}", call.arguments_json);
+        try std.testing.expectEqual(case.integrity, call.argument_integrity);
+        try std.testing.expectEqual(case.integrity != .valid, call.argument_diagnostic != null);
+    }
+}
+
+test "chat completions dynamic schemas decide whether missing arguments mean an empty object" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { schema: []const u8, integrity: types.ToolArgumentIntegrity }{
+        .{ .schema = "{\"type\":\"object\",\"properties\":{}}", .integrity = .valid },
+        .{ .schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[]}", .integrity = .valid },
+        .{ .schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}", .integrity = .malformed_json },
+        .{ .schema = "{\"oneOf\":[{\"type\":\"object\",\"required\":[\"a\"]},{\"type\":\"object\",\"required\":[\"b\"]}]}", .integrity = .malformed_json },
+    };
+    for (cases) |case| {
+        var schema = try std.json.parseFromSlice(std.json.Value, alloc, case.schema, .{});
+        defer schema.deinit();
+        var request = test_request();
+        request.tools = .{ .selected_dynamic = &.{.{ .name = "mcp_search", .description = "Search.", .input_schema = schema.value }} };
+        var reducer = try Reducer.init(alloc, request, .{});
+        defer reducer.deinit();
+        try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"mcp_search\",\"arguments\":\"\"}}]}}]}");
+        var result = try test_finish(&reducer, test_tools_finish);
+        defer result.deinit(alloc);
+        const call = result.completed.completion.tool_calls[0];
+        try std.testing.expectEqualStrings("{}", call.arguments_json);
+        try std.testing.expectEqual(case.integrity, call.argument_integrity);
+    }
+}
+
+test "chat completions stream with empty and truncated arguments completes with rejected calls" {
+    const alloc = std.testing.allocator;
+    const wire =
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"I'll start by reading the project goals file.\"}}]}\n\n" ++
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"\"}}]}}]}\n\n" ++
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-2\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\": \"}}]}}]}\n\n" ++
+        "data: " ++ test_tools_finish ++ "\n\n" ++
+        "data: [DONE]\n\n";
+    const cancelled = std.atomic.Value(bool).init(false);
+    var source = std.Io.Reader.fixed(wire);
+    var result = try consume_stream(alloc, &source, test_tool_request(), .{}, null, &cancelled);
+    defer result.deinit(alloc);
+    const completion = result.completed.completion;
+    try std.testing.expectEqualStrings("I'll start by reading the project goals file.", completion.content.?);
+    try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, completion.finish_reason);
+    try std.testing.expectEqual(@as(usize, 2), completion.tool_calls.len);
+    for (completion.tool_calls, [_][]const u8{ "call-1", "call-2" }, [_]usize{ 0, "{\"path\": ".len }) |call, id, bytes| {
+        try std.testing.expectEqualStrings(id, call.id);
+        try std.testing.expectEqualStrings("read_file", call.name);
+        try std.testing.expectEqualStrings("{}", call.arguments_json);
+        try std.testing.expectEqual(types.ToolArgumentIntegrity.malformed_json, call.argument_integrity);
+        try std.testing.expectEqual(types.ToolArgumentDiagnostic.Failure.truncated, call.argument_diagnostic.?.failure);
+        try std.testing.expectEqual(bytes, call.argument_diagnostic.?.input_bytes);
     }
 }
 
@@ -2530,7 +2681,6 @@ test "chat completions missing tool fields sparse indexes and invalid identities
     const cases = [_]struct { delta: []const u8, failure: Error, at_finish: bool = false }{
         .{ .delta = "{\"index\":0,\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}", .failure = error.InvalidToolCallId, .at_finish = true },
         .{ .delta = "{\"index\":0,\"id\":\"x\",\"function\":{\"arguments\":\"{}\"}}", .failure = error.InvalidToolName, .at_finish = true },
-        .{ .delta = "{\"index\":0,\"id\":\"x\",\"function\":{\"name\":\"read_file\"}}", .failure = error.InvalidToolArguments, .at_finish = true },
         .{ .delta = "{\"index\":1,\"id\":\"x\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}", .failure = error.InvalidToolCallId, .at_finish = true },
         .{ .delta = "{\"index\":0,\"id\":\"\"}", .failure = error.InvalidChunk },
         .{ .delta = "{\"index\":0,\"id\":7}", .failure = error.InvalidChunk },
