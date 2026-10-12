@@ -11388,6 +11388,7 @@ impl Shell {
                     .children(self.render_voice_composer_orb(composer_width, cx))
                     .child(status)
                     .child(self.render_project_checklist(cx))
+                    .child(self.render_worker_file(cx))
                     .when((has_spaces || no_project || has_appshots) && !show_context, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
                         el.child(
@@ -13987,8 +13988,12 @@ impl Render for Shell {
                     self.bottom_stack_has_composer.get(),
                     expected_has_composer,
                 );
+                // The prompt outline is a stack of short dashes. A project
+                // window does not use it. The Worked line and the file do.
+                let outline = self.state.read(cx).selected_space.is_none()
+                    && rail::rail_visible(main_width);
                 self.transcript.update(cx, |t, cx| {
-                    t.set_rail_enabled(rail::rail_visible(main_width), cx);
+                    t.set_rail_enabled(outline, cx);
                     if bottom_stack_ready && expected_has_composer {
                         t.set_bottom_clearance(stack_h, cx);
                     }

@@ -320,6 +320,55 @@ impl Shell {
         list.into_any_element()
     }
 
+    /// The file this worker wrote, read from the project. Main keeps the
+    /// checklist. The worker tab shows the file.
+    pub(super) fn render_worker_file(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.project.surface != Surface::Chat || self.selected_is_main(cx) {
+            return div().into_any_element();
+        }
+        let Some(project) = self.selected_project(cx) else {
+            return div().into_any_element();
+        };
+        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+            return div().into_any_element();
+        };
+        let Some((path, body)) = worker_context_file(Path::new(&project.path), &chat_id) else {
+            return div().into_any_element();
+        };
+        let theme = Theme::of(cx).clone();
+        let mut lines = div().flex().flex_col().gap(px(2.0));
+        for line in body.lines().take(12) {
+            lines = lines.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(theme.text)
+                    .child(line.to_owned()),
+            );
+        }
+        div()
+            .w_full()
+            .max_w(px(720.0))
+            .mx_auto()
+            .mb(px(8.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface)
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(path),
+            )
+            .child(lines)
+            .into_any_element()
+    }
+
     pub(super) fn render_context_browser(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(project) = self.selected_project(cx) else {
@@ -986,6 +1035,48 @@ fn visible_extra_indexes(extras: &[ChatTab], selected: Option<&str>) -> Vec<usiz
         shown.push(pos);
     }
     shown
+}
+
+fn worker_context_file(project: &Path, chat_id: &str) -> Option<(String, String)> {
+    let agent = zeron_engine::arbos_layout::agents(project)
+        .into_iter()
+        .find(|agent| agent.chat_id == chat_id && agent.role == "worker")?;
+    let haystack = format!("{}\n{}", agent.brief, agent.result);
+    let path = context_files(project).into_iter().find(|file| {
+        file.starts_with("research/") && !file.ends_with('/') && haystack.contains(file)
+    })?;
+    let root = project.join(".arbos").join("context");
+    let full = context_child(&root, &path)?;
+    let text = std::fs::read_to_string(&full).ok()?;
+    let body = text.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let body = if body.chars().count() > 1200 {
+        let end = body
+            .char_indices()
+            .nth(1200)
+            .map(|(index, _)| index)
+            .unwrap_or(body.len());
+        format!("{}…", body[..end].trim_end())
+    } else {
+        body.to_owned()
+    };
+    Some((path, body))
+}
+
+fn context_child(root: &Path, relative: &str) -> Option<PathBuf> {
+    if relative.is_empty() || relative.contains('\0') {
+        return None;
+    }
+    let mut full = root.to_path_buf();
+    for part in relative.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return None;
+        }
+        full.push(part);
+    }
+    full.is_file().then_some(full)
 }
 
 fn context_files(project: &Path) -> Vec<String> {
