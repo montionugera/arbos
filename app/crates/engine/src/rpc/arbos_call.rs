@@ -844,4 +844,85 @@ mod tests {
         let empty = send_fields(&json!({ "name": "oak", "text": "  " })).unwrap_err();
         assert_eq!(empty, "agents.send needs text: the message for the worker");
     }
+
+    /// Every regular file under `root`, recursively, whose bytes contain `needle`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn files_containing(root: &Path, needle: &[u8]) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if std::fs::read(&path)
+                    .is_ok_and(|bytes| bytes.windows(needle.len()).any(|w| w == needle))
+                {
+                    found.push(path);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// The keychain is not hermetic on macOS; the Linux file store is.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_saved_tool_token_is_not_in_the_reply_or_under_the_project() {
+        let store = tempfile::tempdir().unwrap();
+        let project = project_with_open_step();
+        std::fs::create_dir_all(project.path().join(".arbos").join("agents").join("oak")).unwrap();
+        // The lib tests share one process; the store directory is read only here.
+        unsafe { std::env::set_var("ARBOS_SECRETS_DIR", store.path()) };
+        for (provider, var_name, token) in [
+            ("github", "GH_TOKEN", "test-token-github-0123456789abcdef"),
+            (
+                "onepassword",
+                "OP_SERVICE_ACCOUNT_TOKEN",
+                "test-token-onepassword-0123456789abcdef",
+            ),
+        ] {
+            let before = std::env::var_os(var_name);
+            let reply = save_byok(
+                project.path(),
+                &json!({ "provider": provider, "secret": token }),
+            )
+            .unwrap();
+            // save_tool_key exports the token for the next fx child; another
+            // test in this process may read that variable, so put it back now.
+            unsafe {
+                match &before {
+                    Some(value) => std::env::set_var(var_name, value),
+                    None => std::env::remove_var(var_name),
+                }
+            }
+            let text = serde_json::to_string(&reply).unwrap();
+            assert!(!text.contains(token), "{text}");
+            assert_eq!(reply["ok"], true);
+            assert_eq!(reply["provider"], provider);
+            assert_eq!(reply["stored"], true);
+            assert_eq!(reply["place"], "file");
+            assert!(files_containing(project.path(), token.as_bytes()).is_empty());
+            assert_eq!(
+                files_containing(store.path(), token.as_bytes()),
+                vec![store.path().join(provider)]
+            );
+            assert!(!store.path().starts_with(project.path()));
+        }
+        // A tool key has no fx connection, so Main's settings file stays absent.
+        assert!(
+            !project
+                .path()
+                .join(".arbos")
+                .join("agents")
+                .join("main")
+                .join("fx")
+                .join("settings.json")
+                .exists()
+        );
+    }
 }
