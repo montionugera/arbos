@@ -14072,8 +14072,16 @@ impl Render for Shell {
                 }
                 let main_takeover = self.main_takeover_active();
                 let main_content_width = self.main_content_width(main_target_width, cx);
+                // The file list sits beside Main. The composer stays in the
+                // chat column, so a new chat (no list) stays centered.
+                let beside = if on_chat {
+                    self.project_files_width(cx)
+                } else {
+                    0.0
+                };
+                let chat_content_width = (main_content_width - beside).max(0.0);
                 let transcript_width = self.composer_dock.borrow_mut().transcript_width(
-                    main_content_width,
+                    chat_content_width,
                     self.state.read(cx).selected_chat.is_some(),
                     panel_handoff,
                 );
@@ -14115,7 +14123,7 @@ impl Render for Shell {
                         cx,
                     )
                 });
-                let main = self.render_main(window, main_content_width, transcript_width, cx);
+                let main = self.render_main(window, chat_content_width, transcript_width, cx);
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
@@ -14158,13 +14166,18 @@ impl Render for Shell {
                 let main = if main_takeover {
                     div()
                         .h_full()
-                        .w(px(main_content_width))
+                        .w(px(chat_content_width))
                         .flex_none()
                         .flex()
                         .child(main)
                         .into_any_element()
                 } else {
                     main
+                };
+                let project_files = if beside > 0.0 {
+                    Some(self.render_project_files(cx))
+                } else {
+                    None
                 };
                 let card: AnyElement = div()
                     .id("conversation-column")
@@ -14176,6 +14189,7 @@ impl Render for Shell {
                     .overflow_hidden()
                     .opacity(under_stage)
                     .child(main)
+                    .children(project_files)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
                 // App.tsx `<div key={phase} className="animate-in h-full">`):

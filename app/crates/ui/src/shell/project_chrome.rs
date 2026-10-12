@@ -18,6 +18,9 @@ use crate::theme::Theme;
 use super::Shell;
 
 pub(super) const RAIL_WIDTH: f32 = 88.0;
+/// The project file list beside Main. A new chat hides it, so that chat
+/// stays centered.
+pub(super) const PROJECT_FILES_WIDTH: f32 = 252.0;
 #[allow(dead_code)]
 pub(super) const TAB_HEIGHT: f32 = 36.0;
 const EXTRA_VISIBLE: usize = 2;
@@ -38,6 +41,9 @@ pub(super) struct ProjectChrome {
     pub status: Vec<(bool, String)>,
     pub goal: Option<String>,
     pub skill: Option<String>,
+    /// The file opened from the list beside Main. This does not leave the chat.
+    side_file: Option<String>,
+    side_body: String,
     watched: Option<String>,
     watch: Option<Task<()>>,
     icons: HashMap<String, MediaImage>,
@@ -56,6 +62,8 @@ impl Default for ProjectChrome {
             status: Vec::new(),
             goal: None,
             skill: None,
+            side_file: None,
+            side_body: String::new(),
             watched: None,
             watch: None,
             icons: HashMap::new(),
@@ -410,6 +418,137 @@ impl Shell {
             )
             .child(lines)
             .into_any_element()
+    }
+
+    /// Width of the file list beside Main. Zero on any other chat, so a new
+    /// chat keeps its centered composer.
+    pub(super) fn project_files_width(&self, cx: &gpui::App) -> f32 {
+        if self.project.surface != Surface::Chat || !self.selected_is_main(cx) {
+            return 0.0;
+        }
+        let Some(project) = self.selected_project(cx) else {
+            return 0.0;
+        };
+        if context_files(Path::new(&project.path)).is_empty() {
+            return 0.0;
+        }
+        PROJECT_FILES_WIDTH
+    }
+
+    /// The project's files, beside the chat. Opening one shows that file and
+    /// leaves Main on the goal.
+    pub(super) fn render_project_files(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.project_files_width(cx) <= 0.0 {
+            return div().into_any_element();
+        }
+        let Some(project) = self.selected_project(cx) else {
+            return div().into_any_element();
+        };
+        let theme = Theme::of(cx).clone();
+        let files = context_files(Path::new(&project.path));
+        let current = self.project.side_file.clone();
+        let body = self.project.side_body.clone();
+        let mut list = div()
+            .id("project-file-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(2.0));
+        for file in files {
+            let selected = current.as_deref() == Some(file.as_str());
+            let open = file.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("side-file-{file}")))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.0))
+                    .cursor_pointer()
+                    .text_color(if selected {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
+                    .bg(if selected {
+                        theme.element_hover
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .child(file)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_side_file(open.clone(), cx);
+                    })),
+            );
+        }
+        let mut column = div()
+            .id("project-files")
+            .w(px(PROJECT_FILES_WIDTH))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .pt(px(Theme::TITLEBAR_HEIGHT + 8.0))
+            .px(px(8.0))
+            .pb(px(12.0))
+            .border_l_1()
+            .border_color(theme.border)
+            .bg(theme.panel_bg())
+            .child(
+                div()
+                    .flex_none()
+                    .pb(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child("Files"),
+            )
+            .child(list);
+        if let Some(name) = current {
+            let shown: String = body.lines().take(8).collect::<Vec<_>>().join("\n");
+            column = column.child(
+                div()
+                    .id("side-file-body")
+                    .flex_none()
+                    .mt(px(8.0))
+                    .px(px(8.0))
+                    .py(px(8.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.surface)
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme.text)
+                            .child(shown),
+                    ),
+            );
+        }
+        column.into_any_element()
+    }
+
+    fn open_side_file(&mut self, relative: String, cx: &mut Context<Self>) {
+        let text = self
+            .selected_project(cx)
+            .and_then(|project| {
+                zeron_engine::arbos_layout::read_context(Path::new(&project.path), &relative).ok()
+            })
+            .unwrap_or_default();
+        self.project.side_body = text.trim().to_owned();
+        self.project.side_file = Some(relative);
+        self.project.surface = Surface::Chat;
+        cx.notify();
     }
 
     pub(super) fn render_context_browser(&mut self, cx: &mut Context<Self>) -> AnyElement {
