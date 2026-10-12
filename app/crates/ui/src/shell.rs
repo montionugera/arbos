@@ -1944,8 +1944,9 @@ impl Render for SidebarPane {
 enum UpdatePromptButton {
     Close(&'static str),
     CheckAgain,
-    Download,
-    Restart,
+    /// The single action: bring me current — start the download and relaunch
+    /// when it lands, or install now if it already has.
+    Update,
     OpenDownloads,
 }
 
@@ -9564,26 +9565,31 @@ impl Shell {
         Some(strip.into_any_element())
     }
 
-    /// Download → the background stage; Restart → swap + relaunch; Explain →
-    /// the update dialog; advisory installs open their destination (if any),
-    /// then dismiss for this version.
+    /// One button, Update, whose meaning per state is
+    /// [`crate::app_update::update_click`]: a staged release installs and
+    /// relaunches through the shell's exit path (unsaved-changes dialog and
+    /// all); anything else starts, retries, or promises the restart when a
+    /// running download lands. Explain opens the update dialog; advisory
+    /// installs open their destination (if any), then dismiss per version.
     fn on_update_strip_click(
         &mut self,
         action: crate::app_update::StripAction,
         cx: &mut Context<Self>,
     ) {
-        use crate::app_update::{AppUpdate, StripAction};
+        use crate::app_update::{AppUpdate, Flow, StripAction};
         let Some(update) = AppUpdate::global(cx) else {
             return;
         };
         match action {
             StripAction::None => {}
-            StripAction::Download => update.update(cx, |update, cx| update.start_download(cx)),
-            StripAction::Restart => {
-                if let Some(staged) = update.read(cx).staged() {
-                    self.apply_staged_update(staged, cx);
+            StripAction::Update => match update.read(cx).flow() {
+                Flow::Ready { .. } => {
+                    if let Some(staged) = update.read(cx).staged() {
+                        self.apply_staged_update(staged, cx);
+                    }
                 }
-            }
+                _ => update.update(cx, |update, cx| update.update_now(cx)),
+            },
             StripAction::Explain => update.update(cx, |update, cx| update.show_result(cx)),
             StripAction::Advise { open_releases } => {
                 if open_releases {
@@ -9666,22 +9672,30 @@ impl Shell {
                                     format!("You're on {current}.").into(),
                                     vec![
                                         UpdatePromptButton::Close("Later"),
-                                        UpdatePromptButton::Download,
+                                        UpdatePromptButton::Update,
                                     ],
                                 ),
-                                Flow::Downloading { .. } | Flow::Installed => (
+                                Flow::Downloading { relaunch, .. } => (
                                     title,
-                                    "Downloading the update in the background — you can keep working."
-                                        .into(),
-                                    vec![UpdatePromptButton::Close("Hide")],
+                                    if *relaunch {
+                                        "Downloading — Arbos restarts itself when it's done. You can keep working."
+                                            .into()
+                                    } else {
+                                        "Downloading the update in the background — you can keep working."
+                                            .into()
+                                    },
+                                    vec![
+                                        UpdatePromptButton::Close("Hide"),
+                                        UpdatePromptButton::Update,
+                                    ],
                                 ),
                                 Flow::Ready { version, .. } => (
                                     format!("Arbos {version} is ready").into(),
-                                    "Restart to finish updating. If you don't, it installs the next time you quit Arbos."
+                                    "It installs and restarts Arbos as soon as you press Update. If you don't, it installs the next time you quit Arbos."
                                         .into(),
                                     vec![
                                         UpdatePromptButton::Close("Later"),
-                                        UpdatePromptButton::Restart,
+                                        UpdatePromptButton::Update,
                                     ],
                                 ),
                                 Flow::Failed { message, .. } => (
@@ -9689,8 +9703,15 @@ impl Shell {
                                     format!("The download failed: {message}").into(),
                                     vec![
                                         UpdatePromptButton::Close("Later"),
-                                        UpdatePromptButton::Download,
+                                        UpdatePromptButton::Update,
                                     ],
+                                ),
+                                // The dialog stays live while the app is on
+                                // its way out; there is nothing left to press.
+                                Flow::Installed => (
+                                    title,
+                                    "Restarting…".into(),
+                                    vec![UpdatePromptButton::Close("Hide")],
                                 ),
                             }
                         } else if matches!(
@@ -9741,23 +9762,27 @@ impl Shell {
                             update.update(cx, |update, cx| update.check_for_updates(cx));
                         }
                     })),
-                UpdatePromptButton::Download => popover::btn_primary(&theme, "Download")
-                    .id("update-prompt-download")
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
-                            update.update(cx, |update, cx| update.start_download(cx));
-                        }
-                    })),
-                UpdatePromptButton::Restart => popover::btn_primary(&theme, "Restart to update")
-                    .id("update-prompt-restart")
+                UpdatePromptButton::Update => popover::btn_primary(&theme, "Update")
+                    .id("update-prompt-update")
                     .on_click(cx.listener(|this, _, _, cx| {
                         let Some(update) = crate::app_update::AppUpdate::global(cx) else {
                             return;
                         };
-                        let staged = update.read(cx).staged();
-                        update.update(cx, |update, cx| update.dismiss_prompt(cx));
-                        if let Some(staged) = staged {
-                            this.apply_staged_update(staged, cx);
+                        // Staged: the shell owns the exit (unsaved-changes
+                        // dialog and all). Anything else is one press on the
+                        // same lifecycle the strip drives.
+                        match update.read(cx).flow() {
+                            Flow::Ready { .. } => {
+                                let staged = update.read(cx).staged();
+                                update.update(cx, |update, cx| update.dismiss_prompt(cx));
+                                if let Some(staged) = staged {
+                                    this.apply_staged_update(staged, cx);
+                                }
+                            }
+                            _ => update.update(cx, |update, cx| {
+                                update.dismiss_prompt(cx);
+                                update.update_now(cx);
+                            }),
                         }
                     })),
                 UpdatePromptButton::OpenDownloads => {

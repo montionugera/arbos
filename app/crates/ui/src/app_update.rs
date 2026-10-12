@@ -7,10 +7,14 @@
 //! may be attached to a daemon of another version, whose status describes
 //! that binary rather than the app the user is looking at.
 //!
-//! Lifecycle, idiomatic to desktop updaters (Sparkle, VS Code, Zed): a found
-//! release downloads in the background and is verified, the strip offers
-//! "Restart to update", and a staged update the user never restarts for is
-//! installed when the app quits — so nobody stays on a stale version just
+//! Lifecycle, idiomatic to desktop updaters (Sparkle, VS Code, Zed): the
+//! strip has one button, Update, that means "bring me current" — a press
+//! starts the download if none is running, makes an already-running
+//! background download install and relaunch the moment it is ready, and
+//! installs and relaunches at once when the release is already staged.
+//! The strip itself carries the download progress, so there is no second
+//! press to remember. A staged update the user never pressed for still
+//! installs when the app quits — nobody stays on a stale version just
 //! because they never clicked. `ZERON_AUTO_UPDATE=0` keeps it report-only.
 
 use std::path::{Path, PathBuf};
@@ -25,8 +29,16 @@ pub enum Flow {
     Idle,
     Downloading {
         version: String,
+        /// Bytes moved so far, once the body started streaming.
+        moved: Option<u64>,
+        /// Total bytes, when the server announced them.
+        total: Option<u64>,
+        /// The download finishes into an install + relaunch instead of
+        /// waiting for a quit (the user pressed Update while it ran).
+        relaunch: bool,
     },
-    /// Staged and verified: "restart to apply", or installed on quit.
+    /// Staged and verified: pressing Update installs it and relaunches now,
+    /// or it is installed on quit.
     Ready {
         version: String,
         staged: PathBuf,
@@ -51,16 +63,45 @@ pub enum Prompt {
 /// What clicking the sidebar strip does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StripAction {
-    /// Nothing — progress only.
+    /// Nothing — the flow is finishing on its own.
     None,
-    Download,
-    Restart,
+    /// The single button: start, then take it all the way to a relaunch.
+    /// What exactly a press does in this state is [`update_click`].
+    Update,
     /// Explain why this install can't update itself (dialog).
     Explain,
     /// Advisory installs: open the releases page (unmanaged) and dismiss.
     Advise {
         open_releases: bool,
     },
+}
+
+/// What one press of the strip's Update button does, state by state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateClick {
+    /// Nothing in flight: fetch, verify, and stage the release, then install
+    /// it and relaunch.
+    Start,
+    /// A background download is already running: finish it, then install and
+    /// relaunch at once (no second press needed).
+    RelaunchWhenReady,
+    /// The release is staged: install it and relaunch now.
+    InstallNow,
+    /// The last attempt failed: start over.
+    Retry,
+}
+
+pub fn update_click(flow: &Flow) -> UpdateClick {
+    match flow {
+        Flow::Idle => UpdateClick::Start,
+        // Pressing again while it already restarts-when-done is idempotent:
+        // the promise is already made, the press just re-makes it.
+        Flow::Downloading { .. } => UpdateClick::RelaunchWhenReady,
+        Flow::Ready { .. } => UpdateClick::InstallNow,
+        Flow::Failed { .. } => UpdateClick::Retry,
+        // Nothing to update into; the process is exiting.
+        Flow::Installed => UpdateClick::Retry,
+    }
 }
 
 pub struct AppUpdate {
@@ -77,8 +118,13 @@ pub struct AppUpdate {
     /// Version whose advisory strip the user dismissed (a newer release shows
     /// it again).
     dismissed: Option<String>,
+    /// The running download finishes into an install + relaunch instead of
+    /// waiting for a quit. Set by a press of Update ([`AppUpdate::update_now`]);
+    /// read when the download lands.
+    relaunch_when_ready: bool,
     _status_watch: Task<()>,
     download: Option<Task<()>>,
+    _progress_watch: Option<Task<()>>,
     user_check: Option<Task<()>>,
 }
 
@@ -133,8 +179,10 @@ impl AppUpdate {
             flow: Flow::Idle,
             prompt: None,
             dismissed: None,
+            relaunch_when_ready: false,
             _status_watch: status_watch,
             download: None,
+            _progress_watch: None,
             user_check: None,
         }
     }
@@ -204,6 +252,14 @@ impl AppUpdate {
     }
 
     pub fn start_download(&mut self, cx: &mut Context<Self>) {
+        self.start_download_with(false, cx);
+    }
+
+    /// Start (or restart) the download of the newest release. `relaunch` is
+    /// the single button's promise: when the download lands, it installs and
+    /// relaunches at once instead of waiting for a quit. The strip's live
+    /// progress comes from a watch channel the staging path reports into.
+    fn start_download_with(&mut self, relaunch: bool, cx: &mut Context<Self>) {
         if !self.self_updating() || matches!(self.flow, Flow::Downloading { .. }) {
             return;
         }
@@ -213,19 +269,52 @@ impl AppUpdate {
         let edge_url = self.edge_url.clone();
         let data_dir = self.data_dir.clone();
         let install = self.install.clone();
+        self.relaunch_when_ready = relaunch;
         self.flow = Flow::Downloading {
             version: version.clone(),
+            moved: None,
+            total: None,
+            relaunch,
         };
+        // (bytes moved, total when known) as the staging path reports it. A
+        // watch rather than a queue: only the newest report renders.
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::watch::channel((0u64, None::<u64>));
+        let sink: zeron_update::ProgressFn = {
+            let progress_tx = progress_tx.clone();
+            std::sync::Arc::new(move |moved: u64, total: Option<u64>| {
+                let _ = progress_tx.send((moved, total));
+            })
+        };
+        let progress_watch = cx.spawn(async move |this, cx| {
+            // Each report lands in the flow so the strip renders it live.
+            while progress_rx.changed().await.is_ok() {
+                let (moved, total) = *progress_rx.borrow_and_update();
+                this.update(cx, |this, cx| {
+                    if let Flow::Downloading {
+                        moved: reported,
+                        total: announced,
+                        ..
+                    } = &mut this.flow
+                    {
+                        *reported = Some(moved);
+                        *announced = total;
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        });
         let stage = Tokio::spawn(cx, async move {
             // Re-read the manifest so a long-lived status still downloads the
-            // newest release, with that release's checksums.
+            // newest release, with that release's checksums and signature.
             let manifest = zeron_update::fetch_latest(&edge_url).await?;
             anyhow::ensure!(
                 zeron_update::version_newer(&manifest.version, zeron_update::current_version()),
                 "the release feed no longer offers a newer version"
             );
             let staged = install
-                .stage_desktop(&edge_url, &manifest, &data_dir, None)
+                .stage_desktop(&edge_url, &manifest, &data_dir, Some(sink))
                 .await?;
             anyhow::Ok((manifest.version, staged))
         });
@@ -236,24 +325,61 @@ impl AppUpdate {
                 Err(join) => Err(join.to_string()),
             };
             this.update(cx, |this, cx| {
-                this.flow = match outcome {
+                match outcome {
                     Ok((version, staged)) => {
                         tracing::info!(%version, staged = %staged.display(), "update staged");
-                        Flow::Ready { version, staged }
+                        this.flow = Flow::Ready { version, staged };
+                        // The single button's promise: finish the job now.
+                        // The quit goes through the app's own protocol so
+                        // file buffers flush before the process goes away.
+                        if this.relaunch_when_ready
+                            && let Some(staged) = this.staged()
+                            && this.install_for_restart(&staged, cx).is_ok()
+                        {
+                            crate::app_menus::request_quit(&mut *cx);
+                        }
                     }
                     Err(message) => {
                         tracing::warn!(%message, "update download failed");
-                        Flow::Failed {
+                        this.flow = Flow::Failed {
                             version,
                             message: message.into(),
-                        }
+                        };
                     }
-                };
+                }
                 cx.notify();
             })
             .ok();
         }));
+        self._progress_watch = Some(progress_watch);
         cx.notify();
+    }
+
+    /// The strip's single Update button: one press carries the whole
+    /// lifecycle. See [`update_click`] for what a press does in each state.
+    pub fn update_now(&mut self, cx: &mut Context<Self>) {
+        match update_click(&self.flow) {
+            UpdateClick::Start | UpdateClick::Retry => {
+                self.start_download_with(true, cx);
+            }
+            UpdateClick::RelaunchWhenReady => {
+                self.relaunch_when_ready = true;
+                if let Flow::Downloading { relaunch, .. } = &mut self.flow {
+                    *relaunch = true;
+                }
+                cx.notify();
+            }
+            UpdateClick::InstallNow => {
+                let Some(staged) = self.staged() else {
+                    return;
+                };
+                if self.install_for_restart(&staged, cx).is_ok() {
+                    // Buffer-flushing quit protocol; the relauncher arranged
+                    // by the apply starts the new version once we exit.
+                    crate::app_menus::request_quit(&mut *cx);
+                }
+            }
+        }
     }
 
     /// "Check for Updates…": check now and report the outcome in a dialog. A
@@ -307,7 +433,7 @@ impl AppUpdate {
         cx.notify();
     }
 
-    /// The staged update "Restart to update" would install.
+    /// The staged update the Update button installs.
     pub fn staged(&self) -> Option<PathBuf> {
         match &self.flow {
             Flow::Ready { staged, .. } => Some(staged.clone()),
@@ -375,10 +501,12 @@ impl AppUpdate {
     }
 }
 
-/// Label + click action of the strip. Self-updating installs drive their flow
-/// from it; blocked installs explain themselves; managed installs without a
-/// desktop path get the `arbos update` hint; unmanaged installs (source builds,
-/// hand-copied binaries) are pointed at the GitHub releases page.
+/// Label + click action of the strip. Self-updating installs have one
+/// button, Update, whose meaning per state is [`update_click`] — the strip
+/// itself carries the download progress; blocked installs explain
+/// themselves; managed installs without a desktop path get the
+/// `arbos update` hint; unmanaged installs (source builds, hand-copied
+/// binaries) are pointed at the GitHub releases page.
 pub fn strip_for(
     install: &InstallKind,
     blocked: bool,
@@ -395,15 +523,34 @@ pub fn strip_for(
         return match flow {
             Flow::Idle => (
                 format!("Update available — v{latest}").into(),
-                StripAction::Download,
+                StripAction::Update,
             ),
-            Flow::Downloading { version } => {
-                (format!("Downloading v{version}…").into(), StripAction::None)
+            Flow::Downloading {
+                version,
+                moved,
+                total,
+                relaunch,
+            } => {
+                // The progress a person reads is in the strip itself; the
+                // button stays live so one more press makes the finished
+                // download restart the app.
+                let mut label = format!("Downloading v{version}…");
+                if let Some(moved) = moved {
+                    label.push(' ');
+                    label.push_str(&progress_text(*moved, *total));
+                }
+                if *relaunch {
+                    label.push_str(" — restarts when done");
+                }
+                (label.into(), StripAction::Update)
             }
-            Flow::Ready { .. } => ("Restart to update".into(), StripAction::Restart),
+            Flow::Ready { version, .. } => (
+                format!("Update to v{version} — restarts Arbos").into(),
+                StripAction::Update,
+            ),
             Flow::Failed { message, .. } => (
                 format!("Update failed: {message}").into(),
-                StripAction::Download,
+                StripAction::Update,
             ),
             Flow::Installed => ("Restarting…".into(), StripAction::None),
         };
@@ -422,6 +569,38 @@ pub fn strip_for(
                 open_releases: true,
             },
         )
+    }
+}
+
+/// `12.3 MB of 91 MB` / `12.3 MB` — the download's live progress, one line.
+fn progress_text(moved: u64, total: Option<u64>) -> String {
+    match total {
+        Some(total) => format!("{} of {}", human_bytes(moved), human_bytes(total)),
+        None => human_bytes(moved),
+    }
+}
+
+/// Bytes as a person reads them: `812 B`, `4 KB`, `34.2 MB`, `91 MB`, `1.4 GB`.
+fn human_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    // A whole number of megabytes reads best without the empty decimal.
+    fn with_unit(value: f64, unit: &str) -> String {
+        if value.fract() == 0.0 {
+            format!("{} {unit}", value as u64)
+        } else {
+            format!("{value:.1} {unit}")
+        }
+    }
+    if bytes >= GB {
+        with_unit(bytes as f64 / GB as f64, "GB")
+    } else if bytes >= MB {
+        with_unit(bytes as f64 / MB as f64, "MB")
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -447,36 +626,70 @@ mod tests {
     #[test]
     fn strip_follows_the_flow_on_self_updating_installs() {
         let mac_app = InstallKind::MacApp {
-            bundle: PathBuf::from("/Applications/Zeron.app"),
+            bundle: PathBuf::from("/Applications/Arbos.app"),
         };
+        // One button throughout: Update starts the download…
         assert_eq!(
             strip_for(&mac_app, false, &Flow::Idle, "0.2.86"),
             (
                 SharedString::from("Update available — v0.2.86"),
-                StripAction::Download
+                StripAction::Update
             )
         );
+        // …carries its progress in the strip itself…
         let downloading = Flow::Downloading {
             version: "0.2.86".into(),
+            moved: None,
+            total: None,
+            relaunch: false,
         };
         assert_eq!(
             strip_for(&mac_app, false, &downloading, "0.2.86"),
             (
                 SharedString::from("Downloading v0.2.86…"),
-                StripAction::None
+                StripAction::Update
             )
         );
+        let mid_download = Flow::Downloading {
+            version: "0.2.86".into(),
+            moved: Some(34 * 1024 * 1024),
+            total: Some(91 * 1024 * 1024),
+            relaunch: false,
+        };
+        assert_eq!(
+            strip_for(&mac_app, false, &mid_download, "0.2.86"),
+            (
+                SharedString::from("Downloading v0.2.86… 34 MB of 91 MB"),
+                StripAction::Update
+            )
+        );
+        // …and a press during it promises the restart, in the label.
+        let relaunching = Flow::Downloading {
+            version: "0.2.86".into(),
+            moved: Some(34 * 1024 * 1024),
+            total: Some(91 * 1024 * 1024),
+            relaunch: true,
+        };
+        assert_eq!(
+            strip_for(&mac_app, false, &relaunching, "0.2.86"),
+            (
+                SharedString::from("Downloading v0.2.86… 34 MB of 91 MB — restarts when done"),
+                StripAction::Update
+            )
+        );
+        // Staged: the same press installs and relaunches now.
         let ready = Flow::Ready {
             version: "0.2.86".into(),
-            staged: PathBuf::from("/tmp/Zeron.app"),
+            staged: PathBuf::from("/tmp/Arbos.app"),
         };
         assert_eq!(
             strip_for(&mac_app, false, &ready, "0.2.86"),
             (
-                SharedString::from("Restart to update"),
-                StripAction::Restart
+                SharedString::from("Update to v0.2.86 — restarts Arbos"),
+                StripAction::Update
             )
         );
+        // A failure keeps the button: the press retries.
         let failed = Flow::Failed {
             version: "0.2.86".into(),
             message: "offline".into(),
@@ -485,7 +698,7 @@ mod tests {
             strip_for(&mac_app, false, &failed, "0.2.86"),
             (
                 SharedString::from("Update failed: offline"),
-                StripAction::Download
+                StripAction::Update
             )
         );
         // A translocated or read-only bundle explains instead of failing.
@@ -493,6 +706,62 @@ mod tests {
             strip_for(&mac_app, true, &Flow::Idle, "0.2.86").1,
             StripAction::Explain
         );
+    }
+
+    #[test]
+    fn one_press_means_the_whole_lifecycle_in_every_state() {
+        assert_eq!(update_click(&Flow::Idle), UpdateClick::Start);
+        assert_eq!(
+            update_click(&Flow::Downloading {
+                version: "0.2.86".into(),
+                moved: None,
+                total: None,
+                relaunch: false,
+            }),
+            UpdateClick::RelaunchWhenReady
+        );
+        // Pressing again while it already restarts-when-done is idempotent.
+        assert_eq!(
+            update_click(&Flow::Downloading {
+                version: "0.2.86".into(),
+                moved: Some(1),
+                total: Some(2),
+                relaunch: true,
+            }),
+            UpdateClick::RelaunchWhenReady
+        );
+        assert_eq!(
+            update_click(&Flow::Ready {
+                version: "0.2.86".into(),
+                staged: PathBuf::from("/tmp/Arbos.app"),
+            }),
+            UpdateClick::InstallNow
+        );
+        assert_eq!(
+            update_click(&Flow::Failed {
+                version: "0.2.86".into(),
+                message: "offline".into(),
+            }),
+            UpdateClick::Retry
+        );
+    }
+
+    #[test]
+    fn progress_reads_as_a_person_expects() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(812), "812 B");
+        assert_eq!(human_bytes(4 * 1024), "4 KB");
+        // A whole megabyte drops the empty decimal; a real fraction keeps one.
+        assert_eq!(human_bytes(34 * 1024 * 1024), "34 MB");
+        assert_eq!(human_bytes(91 * 1024 * 1024), "91 MB");
+        assert_eq!(human_bytes(36071014), "34.4 MB");
+        assert_eq!(human_bytes((1.4 * 1024.0 * 1024.0 * 1024.0) as u64), "1.4 GB");
+        assert_eq!(
+            progress_text(34 * 1024 * 1024, Some(91 * 1024 * 1024)),
+            "34 MB of 91 MB"
+        );
+        // A stream nobody sized still shows how much has arrived.
+        assert_eq!(progress_text(34 * 1024 * 1024, None), "34 MB");
     }
 
     #[test]
@@ -514,7 +783,7 @@ mod tests {
         if cfg!(target_os = "linux") {
             // Linux desktop installs share the managed layout and update
             // themselves like the other desktop platforms.
-            assert_eq!(strip.1, StripAction::Download);
+            assert_eq!(strip.1, StripAction::Update);
             let ready = Flow::Ready {
                 version: "0.2.86".into(),
                 staged: PathBuf::from("/tmp/staged"),
@@ -522,8 +791,8 @@ mod tests {
             assert_eq!(
                 strip_for(&managed, false, &ready, "0.2.86"),
                 (
-                    SharedString::from("Restart to update"),
-                    StripAction::Restart
+                    SharedString::from("Update to v0.2.86 — restarts Arbos"),
+                    StripAction::Update
                 )
             );
         } else {
@@ -544,7 +813,7 @@ mod tests {
             strip_for(&installed, false, &Flow::Idle, "0.2.86"),
             (
                 SharedString::from("Update available — v0.2.86"),
-                StripAction::Download
+                StripAction::Update
             )
         );
     }
