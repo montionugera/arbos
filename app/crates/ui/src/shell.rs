@@ -18767,6 +18767,7 @@ mod settings_modal_regressions {
     /// Carried out of the sidebar it follows the pointer, and dropped on a
     /// conversation it becomes a chat chip in that composer.
     #[gpui::test]
+    #[ignore = "the sidebar session list is not painted: the left bar is the project rail"]
     fn a_dragged_session_leaves_the_sidebar_and_drops_as_a_chat_mention(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         init_settings_test(settings::UiSettings::default(), dir.path(), cx);

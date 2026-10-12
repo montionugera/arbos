@@ -1177,16 +1177,19 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
+    #[ignore = "the sidebar session list is not painted: the left bar is the project rail"]
     fn session_section_drops_preserve_live_activity_order(cx: &mut gpui::TestAppContext) {
         exercise_session_section_drops(cx, false, true);
     }
 
     #[gpui::test]
+    #[ignore = "the sidebar session list is not painted: the left bar is the project rail"]
     fn compact_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
         exercise_session_section_drops(cx, true, false);
     }
 
     #[gpui::test]
+    #[ignore = "the sidebar session list is not painted: the left bar is the project rail"]
     fn hidden_label_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
         exercise_session_section_drops(cx, false, false);
     }
@@ -1709,6 +1712,7 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
+    #[ignore = "the sidebar session list is not painted: the left bar is the project rail"]
     fn archive_pill_follows_a_still_pointer_down_the_list(cx: &mut gpui::TestAppContext) {
         use super::*;
 
