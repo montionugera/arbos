@@ -10,8 +10,10 @@ const ARBOS_INSTRUCTIONS: &str = "\
 This server is the Arbos project. \
 agents.spawn starts a worker and returns at once. \
 machine is local or the name of a registered install. \
+agents.transcript returns a worker's last few turns, never the whole log. \
 context.read and context.write use paths under the project context directory, \
-such as research/note.md or status.md. \
+such as internal/note.md or status.md. \
+A worker's file under docs/ or internal/ must start with its own arbos agentId frontmatter. \
 Workers do not have the agents tools.";
 
 pub fn instructions() -> &'static str {
@@ -61,6 +63,18 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
                 json!({
                     "type": "object",
                     "properties": { "name": { "type": "string" } },
+                    "required": ["name"]
+                }),
+            ),
+            tool(
+                "agents.transcript",
+                "Return the last few turns of a worker's conversation: what it was asked, what it replied, which tools it called, and whether the turn ended. Bounded to tail turns, at most 50.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "tail": { "type": "integer", "description": "How many of the last turns to return. Defaults to 10. Clamped to 1 through 50." }
+                    },
                     "required": ["name"]
                 }),
             ),
@@ -125,6 +139,7 @@ fn op_for(name: &str) -> &'static str {
         "agents.send" => "send",
         "agents.list" => "list",
         "agents.result" => "result",
+        "agents.transcript" => "transcript",
         "context.read" => "read",
         "context.write" => "write",
         _ => "",
