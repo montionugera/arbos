@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Entity, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Task,
+    div, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Entity, Focusable,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Task, Window,
 };
 
 use crate::composer::ComposerInput;
@@ -43,7 +43,7 @@ pub(super) struct ProjectChrome {
     pub skill: Option<String>,
     /// The file opened from the list beside Main. This does not leave the chat.
     side_file: Option<String>,
-    side_body: String,
+    side_editor: Option<Entity<ComposerInput>>,
     watched: Option<String>,
     watch: Option<Task<()>>,
     icons: HashMap<String, MediaImage>,
@@ -63,7 +63,7 @@ impl Default for ProjectChrome {
             goal: None,
             skill: None,
             side_file: None,
-            side_body: String::new(),
+            side_editor: None,
             watched: None,
             watch: None,
             icons: HashMap::new(),
@@ -447,7 +447,7 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let files = context_files(Path::new(&project.path));
         let current = self.project.side_file.clone();
-        let body = self.project.side_body.clone();
+        let editor = self.project.side_editor.clone();
         let mut list = div()
             .id("project-file-list")
             .flex_1()
@@ -478,8 +478,8 @@ impl Shell {
                         gpui::transparent_black()
                     })
                     .child(file)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_side_file(open.clone(), cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_side_file(open.clone(), window, cx);
                     })),
             );
         }
@@ -506,48 +506,87 @@ impl Shell {
             )
             .child(list);
         if let Some(name) = current {
-            let shown: String = body.lines().take(8).collect::<Vec<_>>().join("\n");
             column = column.child(
                 div()
-                    .id("side-file-body")
                     .flex_none()
                     .mt(px(8.0))
-                    .px(px(8.0))
-                    .py(px(8.0))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.surface)
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(theme.text)
-                            .child(shown),
-                    ),
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(name),
             );
+        }
+        if let Some(editor) = editor {
+            column = column
+                .child(
+                    div()
+                        .id("side-file-editor")
+                        .flex_none()
+                        .h(px(88.0))
+                        .mt(px(4.0))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.surface)
+                        .overflow_hidden()
+                        .child(editor),
+                )
+                .child(
+                    div()
+                        .id("side-file-save")
+                        .flex_none()
+                        .mt(px(6.0))
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .bg(theme.element_hover)
+                        .text_size(px(12.0))
+                        .child("Save")
+                        .on_click(cx.listener(|this, _, _, cx| this.save_side_file(cx))),
+                );
         }
         column.into_any_element()
     }
 
-    fn open_side_file(&mut self, relative: String, cx: &mut Context<Self>) {
+    fn open_side_file(&mut self, relative: String, window: &mut Window, cx: &mut Context<Self>) {
         let text = self
             .selected_project(cx)
             .and_then(|project| {
                 zeron_engine::arbos_layout::read_context(Path::new(&project.path), &relative).ok()
             })
             .unwrap_or_default();
-        self.project.side_body = text.trim().to_owned();
+        let editor = cx.new(|cx| {
+            let mut input = ComposerInput::with_context("", "ProjectContext", cx)
+                .with_viewport_height(72.0);
+            input.set_text(text, cx);
+            input.select_all_text(cx);
+            input
+        });
+        window.focus(&editor.focus_handle(cx), cx);
+        self.project.side_editor = Some(editor);
         self.project.side_file = Some(relative);
         self.project.surface = Surface::Chat;
+        cx.notify();
+    }
+
+    fn save_side_file(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project(cx) else {
+            return;
+        };
+        let Some(relative) = self.project.side_file.clone() else {
+            return;
+        };
+        let Some(editor) = self.project.side_editor.clone() else {
+            return;
+        };
+        let text = editor.read(cx).text().to_owned();
+        if zeron_engine::arbos_layout::write_context(Path::new(&project.path), &relative, &text)
+            .is_err()
+        {
+            return;
+        }
         cx.notify();
     }
 
