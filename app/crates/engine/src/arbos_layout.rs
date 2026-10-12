@@ -2188,9 +2188,15 @@ mod summary_failure_tests {
                 SummaryRole::Main,
                 "- Oak and pine are on this goal. They will report back.",
             ),
-            line(SummaryRole::Worked, "Worked · Worker oak done.\nOak wrote research/oak.md"),
+            line(
+                SummaryRole::Worked,
+                "Worked · Worker oak done.\nOak wrote research/oak.md",
+            ),
             person("What did oak find?"),
-            line(SummaryRole::Main, "Oak found the gate is green! Nothing else."),
+            line(
+                SummaryRole::Main,
+                "Oak found the gate is green! Nothing else.",
+            ),
             person("/summarize"),
             line(SummaryRole::Worked, "Summarized conversation."),
             person(last),
@@ -2203,7 +2209,9 @@ mod summary_failure_tests {
         assert!(body.contains("Summary, 2026-10-12: Main replied 2 times. In order: "));
         assert!(body.contains("Oak and pine are on this goal."));
         assert!(body.contains("Oak found the gate is green!"));
-        assert!(body.contains("2 reports came back: Oak and pine are on this goal; Worker oak done."));
+        assert!(
+            body.contains("2 reports came back: Oak and pine are on this goal; Worker oak done.")
+        );
         assert!(body.contains(&format!("Last message, word for word:\n{last}\n\n")));
         assert!(body.ends_with(&format!("{SUMMARY_PATHS}\n")));
         assert!(!body.contains("/summarize"));
@@ -2237,7 +2245,9 @@ mod summary_failure_tests {
         assert!(prompt.starts_with(zeron_proto::ARBOS_WAKE_MARK));
         assert!(prompt.contains("Summarized conversation."));
         assert!(prompt.contains(SUMMARY_PATHS));
-        assert!(prompt.contains("Goal check · Clear the gate\n<system_notification source=\"goal\">"));
+        assert!(
+            prompt.contains("Goal check · Clear the gate\n<system_notification source=\"goal\">")
+        );
         assert!(prompt.contains("Make progress or end the turn quietly."));
         for forbidden in [
             "Do not spawn",
@@ -2245,7 +2255,10 @@ mod summary_failure_tests {
             "Reply with this sentence",
             "The person says:",
         ] {
-            assert!(!prompt.contains(forbidden), "{forbidden} is still in the prompt");
+            assert!(
+                !prompt.contains(forbidden),
+                "{forbidden} is still in the prompt"
+            );
         }
         let path = root.join(".arbos").join("runtime").join("main-summary.md");
         assert!(!path.exists(), "the summary file is read once");
@@ -2260,10 +2273,22 @@ mod summary_failure_tests {
 
     #[test]
     fn auto_compact_percent_reads_the_settings_file() {
-        assert_eq!(parse_auto_compact_percent(r#"{"auto_compact_percent":10}"#), Some(10));
-        assert_eq!(parse_auto_compact_percent(r#"{"auto_compact_percent":80}"#), Some(80));
-        assert_eq!(parse_auto_compact_percent(r#"{"auto_compact_percent":4}"#), None);
-        assert_eq!(parse_auto_compact_percent(r#"{"auto_compact_percent":90}"#), None);
+        assert_eq!(
+            parse_auto_compact_percent(r#"{"auto_compact_percent":10}"#),
+            Some(10)
+        );
+        assert_eq!(
+            parse_auto_compact_percent(r#"{"auto_compact_percent":80}"#),
+            Some(80)
+        );
+        assert_eq!(
+            parse_auto_compact_percent(r#"{"auto_compact_percent":4}"#),
+            None
+        );
+        assert_eq!(
+            parse_auto_compact_percent(r#"{"auto_compact_percent":90}"#),
+            None
+        );
         assert_eq!(parse_auto_compact_percent("{}"), None);
 
         let root = std::env::temp_dir().join(format!("arbos-compact-{}", std::process::id()));
@@ -2721,10 +2746,17 @@ mod goal_tests {
         else {
             panic!("/goal hands Main a prompt");
         };
-        assert!(fs::read_to_string(&status).unwrap().contains("- [ ] Oak is ready."));
+        assert!(
+            fs::read_to_string(&status)
+                .unwrap()
+                .contains("- [ ] Oak is ready.")
+        );
         commit_after_turn(project);
         let page = fs::read_to_string(&status).unwrap();
-        assert!(page.starts_with("[Goals](GOALS.md)\n\n## Clear the gate\n"), "{page}");
+        assert!(
+            page.starts_with("[Goals](GOALS.md)\n\n## Clear the gate\n"),
+            "{page}"
+        );
         assert!(page.contains("- [x] [Split](research/skill-split.md) — Skill split ran."));
         assert!(page.contains("- [ ] [Oak](research/oak.md) — Oak is ready."));
         assert!(page.contains("- [ ] [Pine](research/pine.md) — Pine is ready."));
