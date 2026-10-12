@@ -111,13 +111,30 @@ pub fn goal_wake_due(record: &GoalRecord, now: DateTime<Utc>, main_working: bool
     elapsed >= goal_interval(record) as i64
 }
 
-/// The prompt a goal wake carries. The caller adds the wake mark.
+/// Longest objective the wake headline shows.
+const HEADLINE_CHARS: usize = 72;
+
+/// The first line of a goal wake. The transcript shows it as the Worked line,
+/// so it is plain words, never a tag.
+pub fn goal_wake_headline(objective: &str) -> String {
+    let objective = objective.split_whitespace().collect::<Vec<_>>().join(" ");
+    let short: String = objective.chars().take(HEADLINE_CHARS).collect();
+    if short.chars().count() < objective.chars().count() {
+        format!("Goal check · {}…", short.trim_end())
+    } else {
+        format!("Goal check · {short}")
+    }
+}
+
+/// The prompt a goal wake carries. The caller adds the wake mark. The first
+/// line is the headline; the notification block follows it.
 pub fn goal_wake_prompt(record: &GoalRecord, now: DateTime<Utc>) -> String {
     let elapsed = parse_time(&record.started)
         .map(|started| now.signed_duration_since(started).num_seconds().max(0) as u64)
         .unwrap_or(0);
     format!(
-        "<system_notification source=\"goal\">\n\
+        "{}\n\
+         <system_notification source=\"goal\">\n\
          Goal: {}\n\
          Started {}. Elapsed {}. Wake {}.\n\
          This is a goal wake, not a message from the person. \
@@ -125,6 +142,7 @@ pub fn goal_wake_prompt(record: &GoalRecord, now: DateTime<Utc>) -> String {
          Call goal.complete only when the objective is proven. \
          Call goal.schedule to pick how long to wait before the next wake.\n\
          </system_notification>",
+        goal_wake_headline(&record.objective),
         record.objective.trim(),
         record.started.trim(),
         elapsed_text(elapsed),
@@ -378,7 +396,9 @@ mod tests {
         let mut goal = record(GoalState::Active);
         goal.wakes = 2;
         let prompt = goal_wake_prompt(&goal, at(9, 30));
-        assert!(prompt.starts_with("<system_notification source=\"goal\">"));
+        let mut lines = prompt.lines();
+        assert_eq!(lines.next(), Some("Goal check · Ship the thing"));
+        assert_eq!(lines.next(), Some("<system_notification source=\"goal\">"));
         assert!(prompt.ends_with("</system_notification>"));
         assert!(prompt.contains("Goal: Ship the thing"));
         assert!(prompt.contains("Elapsed 1h 30m. Wake 3."));
@@ -386,6 +406,23 @@ mod tests {
         assert!(prompt.contains("Call goal.complete only when the objective is proven."));
         assert_eq!(elapsed_text(45), "45s");
         assert_eq!(elapsed_text(600), "10m");
+    }
+
+    #[test]
+    fn wake_headline_is_plain_words_and_clipped() {
+        assert_eq!(
+            goal_wake_headline("  Ship   the\nthing  "),
+            "Goal check · Ship the thing"
+        );
+        let long = "a".repeat(100);
+        let headline = goal_wake_headline(&long);
+        assert_eq!(headline, format!("Goal check · {}…", "a".repeat(72)));
+        let mut goal = record(GoalState::Active);
+        goal.objective = long;
+        let first = goal_wake_prompt(&goal, at(9, 30));
+        let first = first.lines().next().unwrap();
+        assert!(!first.contains('<'), "the headline is not a tag: {first}");
+        assert!(first.starts_with("Goal check · "));
     }
 
     #[test]

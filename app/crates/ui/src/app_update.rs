@@ -377,7 +377,7 @@ impl AppUpdate {
 
 /// Label + click action of the strip. Self-updating installs drive their flow
 /// from it; blocked installs explain themselves; managed installs without a
-/// desktop path get the `zeron update` hint; unmanaged installs (source builds,
+/// desktop path get the `arbos update` hint; unmanaged installs (source builds,
 /// hand-copied binaries) are pointed at the GitHub releases page.
 pub fn strip_for(
     install: &InstallKind,
@@ -410,7 +410,7 @@ pub fn strip_for(
     }
     if matches!(install, InstallKind::Managed { .. }) {
         (
-            format!("Update available — v{latest} · run `zeron update`").into(),
+            format!("Update available — v{latest} · run `arbos update`").into(),
             StripAction::Advise {
                 open_releases: false,
             },
@@ -529,7 +529,7 @@ mod tests {
         } else {
             assert_eq!(
                 strip.0,
-                SharedString::from("Update available — v0.2.86 · run `zeron update`")
+                SharedString::from("Update available — v0.2.86 · run `arbos update`")
             );
         }
     }
