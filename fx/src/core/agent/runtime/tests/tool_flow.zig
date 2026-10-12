@@ -33,6 +33,7 @@ const runtime_telemetry = @import("../telemetry.zig");
 const command_admission = @import("../../../permissions/command_admission.zig");
 const permission_auto_classifier = @import("../../../permissions/auto_classifier.zig");
 const auto_classifier_context = @import("../../../permissions/auto_classifier_context.zig");
+const chat_completions_protocol = @import("../../../../gateway/chat_completions_protocol.zig");
 
 const test_support = @import("support.zig");
 
@@ -1065,6 +1066,67 @@ test "processQueuedPrompt settles rejected shell arguments without streamed acti
             },
             else => {},
         };
+    }
+}
+
+test "processQueuedPrompt continues after a chat completions stream with empty and truncated arguments" {
+    const alloc = std.testing.allocator;
+    const read_file_schema = [_]model_tool_schema.FunctionSchema{.{ .name = "read_file", .description = "Read a file.", .input_schema = .{
+        .properties = &.{.{ .name = "path", .json_type = .string }},
+        .required = &.{"path"},
+    } }};
+    const wire =
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"I'll start by reading the project goals file.\"}}]}\n\n" ++
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_empty\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"\"}}]}}]}\n\n" ++
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_truncated\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\": \"}}]}}]}\n\n" ++
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" ++
+        "data: [DONE]\n\n";
+    const stream_cancel = std.atomic.Value(bool).init(false);
+    var source = std.Io.Reader.fixed(wire);
+    var streamed = try chat_completions_protocol.consume_stream(alloc, &source, .{
+        .model = "glm-5.3",
+        .messages = &.{.{ .role = .user, .content = "hi" }},
+        .tools = .{ .advertised_names = &.{"read_file"}, .advertised_functions = &read_file_schema },
+        .tool_choice = .auto,
+        .provider_options = .{},
+    }, .{}, null, &stream_cancel);
+    defer streamed.deinit(alloc);
+    const streamed_completion = streamed.completed.completion;
+    try std.testing.expectEqual(@as(usize, 2), streamed_completion.tool_calls.len);
+
+    const completions = [_]FakeCompletion{
+        .{ .content = streamed_completion.content, .tool_calls = streamed_completion.tool_calls },
+        .{ .content = "Recovered." },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), fixture.job());
+
+    // The turn did not fail: the model received both tool errors and answered.
+    try std.testing.expectEqual(@as(usize, 2), gateway.request_bodies.items.len);
+    try std.testing.expectEqualStrings("Recovered.", hooks.history_assistant_text.?);
+    try expectBodyContains(&gateway, 1, "\"toolCallId\":\"call_empty\",\"toolName\":\"read_file\",\"input\":{}");
+    try expectBodyContains(&gateway, 1, "\"toolCallId\":\"call_truncated\",\"toolName\":\"read_file\",\"input\":{}");
+    try expectBodyContains(&gateway, 1, "Tool arguments ended before the JSON was complete");
+    try expectBodyContains(&gateway, 1, "\\\"received_bytes\\\":0");
+    try expectBodyContains(&gateway, 1, "\\\"received_bytes\\\":9");
+    try std.testing.expectEqual(@as(usize, 0), hooks.validated_names.items.len);
+    try std.testing.expectEqual(@as(usize, 0), hooks.executed_names.items.len);
+    try std.testing.expectEqual(@as(usize, 2), hooks.rejected_names.items.len);
+
+    const execution = hooks.history_turns.items[0].assistant.execution;
+    try std.testing.expectEqual(@as(usize, 1), execution.tool_steps.len);
+    try std.testing.expectEqual(@as(usize, 2), execution.tool_steps[0].tool_calls.len);
+    try std.testing.expectEqual(@as(usize, 2), execution.tool_steps[0].tool_results.len);
+    for (execution.tool_steps[0].tool_calls, execution.tool_steps[0].tool_results) |call, tool_result| {
+        try std.testing.expectEqualStrings("{}", call.arguments_json);
+        try std.testing.expectEqual(types.PersistedToolStatus.failure, tool_result.status);
+        try std.testing.expect(tool_result_errors.isToolExecutionFailedOutput(tool_result.output));
+        try std.testing.expect(std.mem.find(u8, tool_result.output, "ended before the JSON was complete") != null);
     }
 }
 

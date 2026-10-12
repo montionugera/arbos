@@ -304,12 +304,11 @@ impl EngineRpc {
     fn send_worker(&self, project: &Path, params: &Value) -> Result<Value, String> {
         self.require_coordinator(project, params)?;
         let name = text_field(params, "name").ok_or_else(|| "name the worker".to_string())?;
-        let text = text_field(params, "text");
-        let rename = text_field(params, "rename");
-        let model = text_field(params, "model");
-        if text.is_none() && rename.is_none() && model.is_none() {
-            return Err("the message is empty".into());
-        }
+        let SendFields {
+            text,
+            rename,
+            model,
+        } = send_fields(params)?;
         let mut worker = arbos_layout::worker_result(project, &name)?;
         if let Some(rename) = rename.as_deref() {
             worker = arbos_layout::rename_worker(project, &worker.id, rename)?;
@@ -433,15 +432,22 @@ fn complete_goal(
 
 /// Settings → Keys. Writes the fx connection into the main agent's home and
 /// the secret into the keychain or the mode 600 file. The secret is not
-/// copied into the connection file or the reply.
+/// copied into the connection file or the reply. A tool key (GitHub,
+/// 1Password) goes to the store only; it has no fx connection.
 fn save_byok(project: &Path, params: &Value) -> Result<Value, String> {
     let provider = text_field(params, "provider").ok_or_else(|| "name the provider".to_string())?;
-    let spec = byok_spec(&provider).ok_or_else(|| "unknown provider".to_string())?;
     let secret = params
         .get("secret")
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or("");
+    if let Some((name, var_name)) = zeron_harness::secrets::TOOLS
+        .iter()
+        .find(|(name, _)| *name == provider)
+    {
+        return save_tool_key(name, var_name, secret);
+    }
+    let spec = byok_spec(&provider).ok_or_else(|| "unknown provider".to_string())?;
     let base_url = text_field(params, "baseUrl").unwrap_or_else(|| spec.base_url.to_owned());
     if spec.needs_key && secret.is_empty() {
         return Err("that provider needs a key".into());
@@ -462,6 +468,27 @@ fn save_byok(project: &Path, params: &Value) -> Result<Value, String> {
         "ok": true,
         "provider": spec.id,
         "stored": !secret.is_empty(),
+        "place": zeron_harness::secrets::place(),
+    }))
+}
+
+/// A worker tool token. The fx child reads it from its environment; `gh` and
+/// `op` read the variable themselves. The value is not logged.
+fn save_tool_key(
+    name: &'static str,
+    var_name: &'static str,
+    secret: &str,
+) -> Result<Value, String> {
+    if secret.is_empty() {
+        return Err("that tool needs a token".into());
+    }
+    zeron_harness::secrets::write(name, secret)?;
+    // The next fx child inherits this. The value is not logged.
+    unsafe { std::env::set_var(var_name, secret) };
+    Ok(json!({
+        "ok": true,
+        "provider": name,
+        "stored": true,
         "place": zeron_harness::secrets::place(),
     }))
 }
@@ -620,6 +647,33 @@ fn check_worker_model(requested: &str, offered: &[String]) -> Result<(), String>
     ))
 }
 
+/// The optional fields of `agents.send`. At least one is present.
+#[derive(Debug)]
+struct SendFields {
+    text: Option<String>,
+    rename: Option<String>,
+    model: Option<String>,
+}
+
+/// Reads `text`, `rename`, and `model` from an `agents.send` call. A model
+/// tends to write the message under `message` or `prompt`; both are read
+/// as `text`, and `text` wins when more than one is present.
+fn send_fields(params: &Value) -> Result<SendFields, String> {
+    let text = text_field(params, "text")
+        .or_else(|| text_field(params, "message"))
+        .or_else(|| text_field(params, "prompt"));
+    let rename = text_field(params, "rename");
+    let model = text_field(params, "model");
+    if text.is_none() && rename.is_none() && model.is_none() {
+        return Err("agents.send needs text: the message for the worker".into());
+    }
+    Ok(SendFields {
+        text,
+        rename,
+        model,
+    })
+}
+
 fn worker_model(model: &str) -> String {
     let model = model.trim();
     if model.is_empty() {
@@ -774,5 +828,29 @@ mod tests {
         assert_eq!(check_params_model(&default, &offered()), Ok(()));
         let blank = json!({ "op": "spawn", "brief": "Write the note", "model": "  " });
         assert_eq!(check_params_model(&blank, &offered()), Ok(()));
+    }
+
+    #[test]
+    fn a_send_reads_message_as_text_and_the_empty_error_names_the_field() {
+        let sent = json!({ "name": "oak", "message": " Restart on the new brief. " });
+        let fields = send_fields(&sent).unwrap();
+        assert_eq!(fields.text.as_deref(), Some("Restart on the new brief."));
+        assert!(fields.rename.is_none() && fields.model.is_none());
+        let prompted = json!({ "name": "oak", "prompt": "Try again." });
+        assert_eq!(
+            send_fields(&prompted).unwrap().text.as_deref(),
+            Some("Try again.")
+        );
+        // text wins over its aliases.
+        let both = json!({ "name": "oak", "text": "From text.", "message": "From message." });
+        assert_eq!(
+            send_fields(&both).unwrap().text.as_deref(),
+            Some("From text.")
+        );
+        // A rename or a model alone is still a send.
+        let renamed = json!({ "name": "oak", "rename": "Oak the tester" });
+        assert!(send_fields(&renamed).unwrap().text.is_none());
+        let empty = send_fields(&json!({ "name": "oak", "text": "  " })).unwrap_err();
+        assert_eq!(empty, "agents.send needs text: the message for the worker");
     }
 }
