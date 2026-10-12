@@ -598,7 +598,7 @@ fn deliver_appshot(
             }
             tracing::warn!(
                 count,
-                "Appshot captured with no Zeron window; preserving it for the next delivery"
+                "Appshot captured with no Arbos window; preserving it for the next delivery"
             );
         }
         return;

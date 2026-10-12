@@ -6,6 +6,8 @@
 
 mod auth_cli;
 mod daemon;
+#[cfg(test)]
+mod naming;
 mod paths;
 mod update_cli;
 

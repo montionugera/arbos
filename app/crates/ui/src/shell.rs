@@ -5187,7 +5187,7 @@ impl Shell {
                 ))
             })
             .child(
-                item("chat-copy-zeron", "Zeron conversation link".into()).on_click(cx.listener(
+                item("chat-copy-zeron", "Arbos conversation link".into()).on_click(cx.listener(
                     move |this, _, _, cx| this.copy_zeron_conversation_link(&zeron_id, cx),
                 )),
             )
@@ -5232,7 +5232,7 @@ impl Shell {
             cx.write_to_clipboard(ClipboardItem::new_string(link));
             self.show_notice(
                 crate::toast::ToastKind::Success,
-                "Zeron conversation link copied",
+                "Arbos conversation link copied",
                 cx,
             );
         } else {

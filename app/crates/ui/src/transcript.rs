@@ -2399,7 +2399,7 @@ fn format_kb(bytes: u64) -> String {
 
 /// Rotating flavour vocabulary (21 words / 7s, seeded per chat).
 pub const FLAVOUR_WORDS: [&str; 21] = [
-    "Zeroning",
+    "Composing",
     "Thinking",
     "Pondering",
     "Scheming",

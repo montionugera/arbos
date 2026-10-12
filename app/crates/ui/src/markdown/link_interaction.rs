@@ -424,7 +424,7 @@ impl Element for LinkRanges {
                 };
                 card = card.child(action_row(
                     LinkAction::Internal,
-                    "Open in Zeron",
+                    "Open in Arbos",
                     if file_resolved {
                         icons::DOCUMENT
                     } else {
@@ -495,7 +495,7 @@ impl Element for LinkRanges {
                             false,
                             format!("{}-link-{index}-default-destination", self.id),
                         )
-                        .id("Open links in Zeron")
+                        .id("Open links in Arbos")
                         .debug_selector(|| "link-menu-default-destination".into())
                         .child(div().w(px(16.)).flex_none().when(open_in_zeron, |el| {
                             el.child(
@@ -504,13 +504,13 @@ impl Element for LinkRanges {
                                     .text_color(theme.text_muted),
                             )
                         }))
-                        .child("Open links in Zeron")
+                        .child("Open links in Arbos")
                         .track_focus(&state.menu_focus[6])
                         .role(Role::Button)
                         .aria_label(if open_in_zeron {
-                            "Open links in Zeron, checked"
+                            "Open links in Arbos, checked"
                         } else {
-                            "Open links in Zeron, unchecked"
+                            "Open links in Arbos, unchecked"
                         })
                         .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
                         .on_click(move |_, window, cx| {
