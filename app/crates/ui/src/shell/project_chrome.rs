@@ -41,7 +41,12 @@ pub(super) struct ProjectChrome {
     emoji_input: Option<Entity<ComposerInput>>,
     image_input: Option<Entity<ComposerInput>>,
     pub status: Vec<(bool, String)>,
-    pub goal: Option<String>,
+    /// Objective from `.arbos/context/goal.toml`. Empty when the project has no record.
+    pub goal_objective: Option<String>,
+    /// `active`, `paused`, or `complete`.
+    pub goal_state: Option<String>,
+    /// Seconds since the goal started. A complete goal stops this clock.
+    pub goal_elapsed: u64,
     pub skill: Option<String>,
     /// Main finished a turn that showed text, and the person has not looked.
     pub unread: bool,
@@ -66,7 +71,9 @@ impl Default for ProjectChrome {
             emoji_input: None,
             image_input: None,
             status: Vec::new(),
-            goal: None,
+            goal_objective: None,
+            goal_state: None,
+            goal_elapsed: 0,
             skill: None,
             unread: false,
             step: String::new(),
@@ -337,16 +344,22 @@ impl Shell {
         list.into_any_element()
     }
 
-    /// The goal started with `/goal`, and the skill that has run for it.
-    /// A finished step does not remove this.
+    /// The durable goal from `goal.toml`: objective, a running clock, state,
+    /// Pause, and Clear. Stop on the composer ends the turn and leaves this
+    /// record in place. A finished checklist step does not remove the row.
     pub(super) fn render_active_goal(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let show = self.project.surface == Surface::Chat && self.selected_is_main(cx);
-        let Some(title) = self.project.goal.clone() else {
+        let Some(objective) = self.project.goal_objective.clone() else {
             return div().into_any_element();
         };
         if !show {
             return div().into_any_element();
         }
+        let state = self
+            .project
+            .goal_state
+            .clone()
+            .unwrap_or_else(|| "active".to_owned());
         let theme = Theme::of(cx).clone();
         let mut card = div()
             .w_full()
@@ -361,13 +374,66 @@ impl Shell {
             .bg(theme.surface)
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(6.0))
             .child(
                 div()
-                    .text_size(px(13.0))
-                    .text_color(theme.text)
-                    .child(format!("Goal · {title}")),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .text_size(px(13.0))
+                            .text_color(theme.text)
+                            .child(objective),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(state.clone())
+                            .child(format_goal_clock(self.project.goal_elapsed)),
+                    ),
             );
+        let mut actions = div().flex().flex_row().items_center().gap(px(6.0));
+        if let Some(label) = goal_pause_label(&state) {
+            actions = actions.child(
+                div()
+                    .id("goal-pause")
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .bg(theme.element_hover)
+                    .text_size(px(12.0))
+                    .text_color(theme.text)
+                    .child(label)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_goal_pause(cx))),
+            );
+        }
+        actions = actions.child(
+            div()
+                .id("goal-clear")
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .bg(theme.element_hover)
+                .text_size(px(12.0))
+                .text_color(theme.text)
+                .child("Clear")
+                .on_click(cx.listener(|this, _, _, cx| this.clear_shown_goal(cx))),
+        );
+        card = card.child(actions);
         if let Some(skill) = self.project.skill.clone() {
             card = card.child(
                 div()
@@ -377,6 +443,56 @@ impl Shell {
             );
         }
         card.into_any_element()
+    }
+
+    /// Pause an active goal, or resume a paused one. A complete goal stays complete.
+    fn toggle_goal_pause(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project(cx) else {
+            return;
+        };
+        let path = Path::new(&project.path);
+        let Some(state) = self.project.goal_state.clone() else {
+            return;
+        };
+        let result = match state.as_str() {
+            "active" => zeron_engine::arbos_goal::pause_goal(path).map(|_| ()),
+            "paused" => zeron_engine::arbos_goal::resume_goal(path).map(|_| ()),
+            "complete" => Ok(()),
+            _ => Ok(()),
+        };
+        if let Err(err) = result {
+            tracing::warn!(error = %err, "goal pause was not changed");
+        }
+        self.apply_goal_row(path);
+        cx.notify();
+    }
+
+    /// Remove the goal record. The checklist and `GOALS.md` stay.
+    fn clear_shown_goal(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project(cx) else {
+            return;
+        };
+        let path = Path::new(&project.path);
+        if let Err(err) = zeron_engine::arbos_goal::clear_goal(path) {
+            tracing::warn!(error = %err, "goal was not cleared");
+        }
+        self.apply_goal_row(path);
+        cx.notify();
+    }
+
+    fn apply_goal_row(&mut self, project: &Path) {
+        match zeron_engine::arbos_goal::goal_row(project) {
+            Some(row) => {
+                self.project.goal_objective = Some(row.objective);
+                self.project.goal_state = Some(row.state);
+                self.project.goal_elapsed = row.elapsed_seconds;
+            }
+            None => {
+                self.project.goal_objective = None;
+                self.project.goal_state = None;
+                self.project.goal_elapsed = 0;
+            }
+        }
     }
 
     /// The file this worker wrote, read from the project. Main keeps the
@@ -885,7 +1001,7 @@ impl Shell {
         self.project.watched = Some(project.clone());
         self.project.status = zeron_engine::arbos_layout::status_items(Path::new(&project));
         let view = zeron_engine::arbos_layout::goal_view(Path::new(&project));
-        self.project.goal = view.title;
+        self.apply_goal_row(Path::new(&project));
         self.project.skill = view.skill;
         let live = zeron_engine::arbos_live::live(Path::new(&project));
         self.project.unread = live.unread;
@@ -894,6 +1010,7 @@ impl Shell {
             let root = PathBuf::from(&project).join(".arbos").join("context");
             let status_file = root.join("status.md");
             let goals_file = root.join("GOALS.md");
+            let goal_file = root.join("goal.toml");
             let project_path = PathBuf::from(&project);
             let mut seen = String::new();
             loop {
@@ -902,9 +1019,12 @@ impl Shell {
                     .await;
                 let status_text = std::fs::read_to_string(&status_file).unwrap_or_default();
                 let goals_text = std::fs::read_to_string(&goals_file).unwrap_or_default();
+                let goal_text = std::fs::read_to_string(&goal_file).unwrap_or_default();
                 let live = zeron_engine::arbos_live::live(&project_path);
+                let row = zeron_engine::arbos_goal::goal_row(&project_path);
+                let elapsed = row.as_ref().map(|row| row.elapsed_seconds).unwrap_or(0);
                 let snap = format!(
-                    "{status_text}\n---\n{goals_text}\n---\n{}\n{}",
+                    "{status_text}\n---\n{goals_text}\n---\n{goal_text}\n---\n{}\n{}\n---\n{elapsed}",
                     live.unread, live.step
                 );
                 if snap == seen {
@@ -913,11 +1033,15 @@ impl Shell {
                 seen = snap;
                 let items = zeron_engine::arbos_layout::status_items(&project_path);
                 let view = zeron_engine::arbos_layout::goal_view(&project_path);
+                let objective = row.as_ref().map(|row| row.objective.clone());
+                let state = row.as_ref().map(|row| row.state.clone());
                 let unread = live.unread;
                 let step = live.step;
                 let _ = this.update(cx, |shell, cx| {
                     shell.project.status = items;
-                    shell.project.goal = view.title;
+                    shell.project.goal_objective = objective;
+                    shell.project.goal_state = state;
+                    shell.project.goal_elapsed = elapsed;
                     shell.project.skill = view.skill;
                     shell.project.unread = unread;
                     shell.project.step = step;
@@ -1448,6 +1572,26 @@ impl SplitMain for (Vec<ChatTab>, Vec<ChatTab>) {
     fn let_one(self) -> (Option<ChatTab>, Vec<ChatTab>) {
         let (mut main, extras) = self;
         (main.pop(), extras)
+    }
+}
+
+fn format_goal_clock(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes}:{secs:02}")
+    }
+}
+
+fn goal_pause_label(state: &str) -> Option<&'static str> {
+    match state {
+        "active" => Some("Pause"),
+        "paused" => Some("Resume"),
+        "complete" => None,
+        _ => None,
     }
 }
 
