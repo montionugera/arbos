@@ -206,6 +206,10 @@ struct AgentFile {
     /// Display name set by `agents.send { rename }`. Empty means the id.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     name: String,
+    /// The harness's own live line while the model is being retried or has
+    /// paused. Empty when the model answers normally.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    step: String,
 }
 
 /// One row of `agents/*/agent.toml` for the tab strip and the list tool.
@@ -216,11 +220,20 @@ pub struct AgentView {
     pub name: String,
     pub role: String,
     pub chat_id: String,
+    /// `working`, `waiting` (the model is being retried or has paused),
+    /// `done`, `error`, `stopped`, or empty.
     pub status: String,
     pub brief: String,
     pub result: String,
     pub machine: String,
     pub model: String,
+    /// The harness's live line while `status` is `waiting`; else empty.
+    pub step: String,
+}
+
+/// True for a status word that means the worker's turn has not ended.
+pub fn status_is_live(status: &str) -> bool {
+    matches!(status, "working" | "waiting")
 }
 
 /// A worker turn just ended. `main_chat_id` is the coordinator to wake.
@@ -1516,7 +1529,9 @@ fn clip_chars(text: &str, max: usize) -> String {
 /// been summarized. The summary file is read once and removed, so the turn
 /// after it is an ordinary turn again. A wake keeps its mark in front.
 pub fn prompt_after_summary(project: &Path, chat_id: &str, prompt: &str) -> Option<String> {
-    if main_chat_id(project) != chat_id {
+    // A resume carries no text for the model; the summary waits for a turn
+    // that does.
+    if main_chat_id(project) != chat_id || prompt.starts_with(zeron_proto::ARBOS_CONTINUE_MARK) {
         return None;
     }
     let path = root_of(project).join("runtime").join("main-summary.md");
@@ -1606,6 +1621,7 @@ fn coordinator_agent() -> AgentFile {
         result: String::new(),
         machine: String::new(),
         name: String::new(),
+        step: String::new(),
     }
 }
 
@@ -1662,6 +1678,7 @@ pub fn reserve_worker(
         result: String::new(),
         machine: String::new(),
         name: String::new(),
+        step: String::new(),
     });
     if agent.role == "coordinator" {
         return Err("main is the coordinator".into());
@@ -1676,6 +1693,7 @@ pub fn reserve_worker(
     };
     agent.status = "working".into();
     agent.result.clear();
+    agent.step.clear();
     agent.machine = machine.to_owned();
     write_toml(&path, &agent)?;
     Ok(agent_view(agent))
@@ -1705,7 +1723,7 @@ pub fn finish_worker(
     let root = root_of(project);
     let agents = list_agents(&root);
     let current = agents.iter().find(|agent| agent.chat_id == chat_id)?;
-    if current.role != "worker" || current.status != "working" {
+    if current.role != "worker" || !status_is_live(&current.status) {
         return None;
     }
     let main_chat_id = agents
@@ -1717,6 +1735,7 @@ pub fn finish_worker(
     let mut agent = read_agent(&path)?;
     agent.status = status.to_owned();
     agent.result = clip_result(result);
+    agent.step.clear();
     write_toml(&path, &agent).ok()?;
     if status == "done" {
         tick_worker_ready(project, &agent.id);
@@ -1727,6 +1746,36 @@ pub fn finish_worker(
         main_chat_id,
         result: agent.result,
     })
+}
+
+/// The model behind a worker's turn is being retried (`waiting`, with the
+/// harness's line as the step) or answers again (`working`, step cleared).
+/// Only a worker whose turn is still going changes; a finished worker, or a
+/// chat that is not a worker, is left alone and `None` comes back.
+pub fn note_worker_recovery(
+    project: &Path,
+    chat_id: &str,
+    status: &str,
+    step: &str,
+) -> Option<AgentView> {
+    let _guard = layout_lock();
+    let root = root_of(project);
+    let current = list_agents(&root)
+        .into_iter()
+        .find(|agent| agent.chat_id == chat_id)?;
+    if current.role != "worker" || !status_is_live(&current.status) {
+        return None;
+    }
+    let path = root.join("agents").join(&current.id).join("agent.toml");
+    let mut agent = read_agent(&path)?;
+    agent.status = status.to_owned();
+    agent.step = if status == "waiting" {
+        step.trim().to_owned()
+    } else {
+        String::new()
+    };
+    write_toml(&path, &agent).ok()?;
+    Some(agent_view(agent))
 }
 
 /// Last stored reply for `agents.result`.
@@ -1922,6 +1971,7 @@ fn agent_view(agent: AgentFile) -> AgentView {
         result: agent.result,
         machine: agent.machine,
         model: agent.model,
+        step: agent.step,
     }
 }
 
@@ -1964,6 +2014,7 @@ pub fn restart_worker(project: &Path, worker_id: &str) -> Result<AgentView, Stri
     update_worker(project, worker_id, |agent| {
         agent.status = "working".into();
         agent.result.clear();
+        agent.step.clear();
         Ok(())
     })
 }
@@ -2076,6 +2127,7 @@ fn bind_agent(root: &Path, chat_id: &str) -> Result<AgentFile, String> {
                 result: String::new(),
                 machine: String::new(),
                 name: String::new(),
+                step: String::new(),
             };
             let dir = root.join("agents").join(&id);
             fs::create_dir_all(dir.join("fx")).map_err(|e| e.to_string())?;
@@ -2578,6 +2630,7 @@ mod tests {
                 result: String::new(),
                 machine: "local".into(),
                 name: String::new(),
+                step: String::new(),
             },
         )
         .unwrap();
@@ -2687,6 +2740,7 @@ mod goal_tests {
             result: String::new(),
             machine: "local".into(),
             name: String::new(),
+            step: String::new(),
         }
     }
 

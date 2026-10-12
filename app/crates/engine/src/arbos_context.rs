@@ -492,6 +492,7 @@ mod tests {
             result: String::new(),
             machine: String::new(),
             model: String::new(),
+            step: String::new(),
         }
     }
 
