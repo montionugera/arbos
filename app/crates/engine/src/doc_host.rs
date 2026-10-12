@@ -847,7 +847,9 @@ impl ChatDocHandle {
         created_at: i64,
     ) -> Result<(), DocError> {
         if let Some(body) = text.strip_prefix(zeron_proto::ARBOS_WAKE_MARK) {
-            let line = format!("Worked · {}", body.trim());
+            // The fx prompt still carries the worker reply. Main draws one line.
+            let headline = body.trim().lines().next().unwrap_or("").trim();
+            let line = format!("Worked · {headline}");
             return self.write_system_message(message_id, &line, created_at);
         }
         self.write_role_message(message_id, MessageRole::User, text, created_at)

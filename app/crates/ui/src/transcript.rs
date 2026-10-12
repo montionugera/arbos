@@ -1314,6 +1314,33 @@ fn worker_report_line(entry: &SessionMessageEntry) -> bool {
         })
 }
 
+/// The headline only. A wake stores the worker's reply after the first line
+/// so the coordinator can tick the checklist. Main does not draw that reply.
+fn short_worked_text(text: &str) -> String {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("Worked ·") else {
+        return trimmed.to_owned();
+    };
+    let first = rest.trim().lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        "Worked ·".to_owned()
+    } else {
+        format!("Worked · {first}")
+    }
+}
+
+fn shorten_worker_report(entry: &SessionMessageEntry) -> SessionMessageEntry {
+    let mut copy = entry.clone();
+    for part in &mut copy.parts {
+        if let MessagePart::Text { text, .. } = part
+            && text.trim_start().starts_with("Worked ·")
+        {
+            *text = short_worked_text(text);
+        }
+    }
+    copy
+}
+
 pub fn rows_for_entry(
     entry: &SessionMessageEntry,
     pending: bool,
@@ -4803,20 +4830,45 @@ impl Transcript {
                 .chat_id
                 .as_deref()
                 .is_some_and(|id| id.ends_with("-main"));
-            let mut after_worker_report = false;
-            for entry in entries {
-                if main_chat {
-                    if worker_report_line(entry) {
-                        after_worker_report = true;
-                    } else if entry.role == MessageRole::User {
-                        after_worker_report = false;
-                    } else if after_worker_report && entry.role == MessageRole::Assistant {
-                        // The worker tab holds the detail. Main keeps the
-                        // Worked line and the checklist.
+            // A worker report replaces the coordinator's prose around it.
+            // Main keeps the person's prompt, one Worked line, and the checklist.
+            let mut hide_assistant = vec![false; entries.len()];
+            if main_chat {
+                for (index, entry) in entries.iter().enumerate() {
+                    if !worker_report_line(entry) {
                         continue;
                     }
+                    let mut earlier = index;
+                    while earlier > 0 {
+                        earlier -= 1;
+                        if entries[earlier].role == MessageRole::User {
+                            break;
+                        }
+                        if entries[earlier].role == MessageRole::Assistant {
+                            hide_assistant[earlier] = true;
+                        }
+                    }
+                    let mut later = index + 1;
+                    while later < entries.len() {
+                        if entries[later].role == MessageRole::User {
+                            break;
+                        }
+                        if entries[later].role == MessageRole::Assistant {
+                            hide_assistant[later] = true;
+                        }
+                        later += 1;
+                    }
                 }
-                if !self.compact_mode
+            }
+            for (index, entry) in entries.iter().enumerate() {
+                if hide_assistant[index] {
+                    continue;
+                }
+                let shortened = (main_chat && worker_report_line(entry))
+                    .then(|| shorten_worker_report(entry));
+                let entry = shortened.as_ref().unwrap_or(entry);
+                if shortened.is_none()
+                    && !self.compact_mode
                     && let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id))
                 {
                     new_rows.extend(rows.iter().cloned());
@@ -10054,8 +10106,8 @@ impl Render for Transcript {
             .retain_rows(&self.rendered_rows);
         self.rendered_rows.clear();
         let mut compact_mode = crate::settings::transcript_compact_mode(cx);
-        // Main is the coordinator. Its transcript is Project style: the Worked
-        // line and no tool cards. The worker tab holds the detail.
+        // Main is the coordinator. Its transcript is the short Worked line
+        // and the checklist. The worker tab holds the detail.
         if self
             .chat_id
             .as_deref()
