@@ -114,8 +114,14 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
             ),
             tool(
                 "goal.complete",
-                "Mark the goal complete. Call this only when the objective is proven. Wakes stop.",
-                no_args(),
+                "Mark the goal complete. Call this only when every step of the goal is checked and you can say why. It is refused while a step is open, and the refusal names the open steps. Wakes stop.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "reason": { "type": "string", "description": "Why the goal is complete, in at least one sentence." }
+                    },
+                    "required": ["reason"]
+                }),
             ),
             tool(
                 "goal.clear",
@@ -200,6 +206,9 @@ pub async fn call(zeron: &Zeron, name: &str, args: Value) -> Result<Value, Strin
     if !catalog(&profile).iter().any(|tool| tool.name == name) {
         return Err(format!("unknown tool: {name}"));
     }
+    if forces(&args) {
+        return Err("only a person can set force; give a reason instead".into());
+    }
     let project = std::env::var("ARBOS_PROJECT").map_err(|_| "ARBOS_PROJECT is missing".to_string())?;
     let origin = std::env::var("ZERON_CHAT_ID").unwrap_or_default();
     let mut params = match args {
@@ -215,6 +224,11 @@ pub async fn call(zeron: &Zeron, name: &str, args: Value) -> Result<Value, Strin
         .call(zeron_rpc::methods::ARBOS_CALL, params)
         .await
         .map_err(|err| err.to_string())
+}
+
+/// `force` is the person's flag from the UI. No agent call carries it.
+fn forces(args: &Value) -> bool {
+    args.get("force").is_some_and(|force| !force.is_null())
 }
 
 fn op_for(name: &str) -> &'static str {
@@ -288,5 +302,20 @@ mod tests {
                 "{name} is gated wrong"
             );
         }
+    }
+
+    #[test]
+    fn goal_complete_needs_a_reason_and_never_a_force_flag() {
+        let complete = catalog("coordinator")
+            .into_iter()
+            .find(|tool| tool.name == "goal.complete")
+            .unwrap();
+        assert_eq!(complete.input_schema["required"], json!(["reason"]));
+        assert!(complete.input_schema["properties"].get("force").is_none());
+        assert!(complete.description.contains("every step of the goal is checked"));
+        assert!(forces(&json!({ "force": true })));
+        assert!(forces(&json!({ "force": false })));
+        assert!(!forces(&json!({ "reason": "The gate is green and both reports are in." })));
+        assert!(!forces(&json!({})));
     }
 }

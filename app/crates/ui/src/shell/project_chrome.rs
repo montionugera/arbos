@@ -345,7 +345,7 @@ impl Shell {
     }
 
     /// The durable goal from `goal.toml`: objective, a running clock, state,
-    /// Pause, and Clear. Stop on the composer ends the turn and leaves this
+    /// Pause, Complete, and Clear. Stop on the composer ends the turn and leaves this
     /// record in place. A finished checklist step does not remove the row.
     pub(super) fn render_active_goal(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let show = self.project.surface == Surface::Chat && self.selected_is_main(cx);
@@ -420,6 +420,21 @@ impl Shell {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_goal_pause(cx))),
             );
         }
+        if goal_can_complete(&state) {
+            actions = actions.child(
+                div()
+                    .id("goal-complete")
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .bg(theme.element_hover)
+                    .text_size(px(12.0))
+                    .text_color(theme.text)
+                    .child("Complete")
+                    .on_click(cx.listener(|this, _, _, cx| this.complete_shown_goal(cx))),
+            );
+        }
         actions = actions.child(
             div()
                 .id("goal-clear")
@@ -462,6 +477,20 @@ impl Shell {
         };
         if let Err(err) = result {
             tracing::warn!(error = %err, "goal pause was not changed");
+        }
+        self.apply_goal_row(path);
+        cx.notify();
+    }
+
+    /// The person completes the goal. No checklist or reason is asked for;
+    /// only Main's own call is held to those.
+    fn complete_shown_goal(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project(cx) else {
+            return;
+        };
+        let path = Path::new(&project.path);
+        if let Err(err) = zeron_engine::arbos_goal::force_complete_goal(path) {
+            tracing::warn!(error = %err, "goal was not completed");
         }
         self.apply_goal_row(path);
         cx.notify();
@@ -1593,6 +1622,11 @@ fn goal_pause_label(state: &str) -> Option<&'static str> {
         "complete" => None,
         _ => None,
     }
+}
+
+/// A person can complete an active or paused goal; a complete one is done.
+fn goal_can_complete(state: &str) -> bool {
+    matches!(state, "active" | "paused")
 }
 
 fn menu_label(text: &str, theme: &Theme) -> AnyElement {

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::arbos_layout::{layout_lock, root_of};
+use crate::arbos_layout::{layout_lock, root_of, status_items};
 
 /// Seconds between goal wakes when the agent has not picked an interval.
 pub const GOAL_INTERVAL_DEFAULT: u64 = 600;
@@ -22,6 +22,12 @@ pub const GOAL_INTERVAL_MIN: u64 = 30;
 pub const GOAL_INTERVAL_MAX: u64 = 86_400;
 /// Longest objective kept in the record.
 const OBJECTIVE_BYTES: usize = 2000;
+/// Fewest words a completion reason needs to count as a sentence.
+const REASON_WORDS: usize = 3;
+/// Fewest characters a completion reason needs to count as a sentence.
+const REASON_CHARS: usize = 20;
+/// Longest completion reason kept in the record.
+const REASON_BYTES: usize = 2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -54,6 +60,10 @@ pub struct GoalRecord {
     pub every_seconds: u64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub completed: String,
+    /// Why the goal was completed: Main's sentence, or a note that a person
+    /// completed it from the UI.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
     /// How many goal wakes have been sent.
     #[serde(default)]
     pub wakes: u64,
@@ -126,6 +136,11 @@ pub fn goal_wake_headline(objective: &str) -> String {
     }
 }
 
+/// The rule every goal wake repeats. The engine enforces it in
+/// [`complete_goal`].
+pub const GOAL_COMPLETE_RULE: &str =
+    "Call goal.complete only when every step of the goal is checked and you can say why.";
+
 /// The prompt a goal wake carries. The caller adds the wake mark. The first
 /// line is the headline; the notification block follows it.
 pub fn goal_wake_prompt(record: &GoalRecord, now: DateTime<Utc>) -> String {
@@ -139,7 +154,7 @@ pub fn goal_wake_prompt(record: &GoalRecord, now: DateTime<Utc>) -> String {
          Started {}. Elapsed {}. Wake {}.\n\
          This is a goal wake, not a message from the person. \
          Make progress or end the turn quietly. \
-         Call goal.complete only when the objective is proven. \
+         {GOAL_COMPLETE_RULE} \
          Call goal.schedule to pick how long to wait before the next wake.\n\
          </system_notification>",
         goal_wake_headline(&record.objective),
@@ -203,6 +218,7 @@ fn start_goal_at(
         last_wake: String::new(),
         every_seconds: 0,
         completed: String::new(),
+        reason: String::new(),
         wakes: 0,
     };
     write_goal(project, &record)?;
@@ -280,13 +296,75 @@ pub fn resume_goal(project: &Path) -> Result<GoalRecord, String> {
     })
 }
 
-/// `goal.complete`. Stops the loop and the clock.
-pub fn complete_goal(project: &Path) -> Result<GoalRecord, String> {
+/// `goal.complete` from Main. Allowed only on evidence: every checklist line
+/// of the current goal is ticked and `reason` says why in at least one
+/// sentence. The refusal names what is still open. Stops the loop and the
+/// clock.
+pub fn complete_goal(project: &Path, reason: &str) -> Result<GoalRecord, String> {
+    let reason = clip_to(reason, REASON_BYTES);
+    // `status_items` takes the layout lock, so it runs before `update` does.
+    let open: Vec<String> = status_items(project)
+        .into_iter()
+        .filter(|(done, _)| !done)
+        .map(|(_, text)| text)
+        .collect();
+    complete_goal_checked(project, &reason, &open)
+}
+
+fn complete_goal_checked(
+    project: &Path,
+    reason: &str,
+    open: &[String],
+) -> Result<GoalRecord, String> {
+    if !reason_is_a_sentence(reason) {
+        return Err(refusal(open, true));
+    }
+    if !open.is_empty() {
+        return Err(refusal(open, false));
+    }
+    finish_goal(project, reason)
+}
+
+/// A person completing from the UI. No checklist or reason is needed; a
+/// Main-only call cannot reach this.
+pub fn force_complete_goal(project: &Path) -> Result<GoalRecord, String> {
+    finish_goal(project, "Completed by the person.")
+}
+
+fn finish_goal(project: &Path, reason: &str) -> Result<GoalRecord, String> {
     update(project, |record| {
         record.state = GoalState::Complete;
         record.completed = Utc::now().to_rfc3339();
+        record.reason = reason.trim().to_owned();
         Ok(())
     })
+}
+
+/// At least one sentence: a few words, not just a word or a tick.
+fn reason_is_a_sentence(reason: &str) -> bool {
+    let reason = reason.trim();
+    reason.split_whitespace().count() >= REASON_WORDS && reason.chars().count() >= REASON_CHARS
+}
+
+/// What Main reads when the call is refused: the rule, what is still open,
+/// and the missing reason.
+fn refusal(open: &[String], reason_missing: bool) -> String {
+    let mut lines = vec!["The goal is not complete yet.".to_owned()];
+    if open.is_empty() {
+        lines.push("Every step is checked.".into());
+    } else {
+        lines.push(if open.len() == 1 {
+            "1 step is still open:".to_owned()
+        } else {
+            format!("{} steps are still open:", open.len())
+        });
+        lines.extend(open.iter().map(|line| format!("- {}", line.trim())));
+    }
+    if reason_missing {
+        lines.push("Say why in at least one sentence, in the reason.".into());
+    }
+    lines.push(GOAL_COMPLETE_RULE.into());
+    lines.join("\n")
 }
 
 /// `goal.clear`. Removes the record; the loop ends. `GOALS.md` and the
@@ -320,8 +398,12 @@ fn take_goal_wake_at(project: &Path, main_working: bool, now: DateTime<Utc>) -> 
 }
 
 fn clip(text: &str) -> String {
+    clip_to(text, OBJECTIVE_BYTES)
+}
+
+fn clip_to(text: &str, bytes: usize) -> String {
     let text = text.trim();
-    let mut end = OBJECTIVE_BYTES.min(text.len());
+    let mut end = bytes.min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -345,9 +427,26 @@ mod tests {
             last_wake: String::new(),
             every_seconds: 0,
             completed: String::new(),
+            reason: String::new(),
             wakes: 0,
         }
     }
+
+    /// A project folder with a status page holding these checklist lines.
+    fn project_with_checklist(lines: &[(bool, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let context = dir.path().join(".arbos").join("context");
+        fs::create_dir_all(&context).unwrap();
+        let mut page = String::from("# Status\n\n");
+        for (done, text) in lines {
+            let mark = if *done { "- [x]" } else { "- [ ]" };
+            page.push_str(&format!("{mark} {text}\n"));
+        }
+        fs::write(context.join("status.md"), page).unwrap();
+        dir
+    }
+
+    const REASON: &str = "Both workers reported and the gate is green.";
 
     #[test]
     fn interval_is_clamped() {
@@ -403,9 +502,109 @@ mod tests {
         assert!(prompt.contains("Goal: Ship the thing"));
         assert!(prompt.contains("Elapsed 1h 30m. Wake 3."));
         assert!(prompt.contains("Make progress or end the turn quietly."));
-        assert!(prompt.contains("Call goal.complete only when the objective is proven."));
+        assert!(prompt.contains(
+            "Call goal.complete only when every step of the goal is checked and you can say why."
+        ));
+        assert!(!prompt.contains("objective is proven"));
         assert_eq!(elapsed_text(45), "45s");
         assert_eq!(elapsed_text(600), "10m");
+    }
+
+    #[test]
+    fn complete_is_refused_while_a_step_is_open() {
+        let dir = project_with_checklist(&[
+            (true, "Split ran."),
+            (false, "Oak is ready."),
+            (false, "Pine is ready."),
+        ]);
+        let project = dir.path();
+        start_goal(project, "Ship the thing").unwrap();
+        let err = complete_goal(project, REASON).unwrap_err();
+        assert!(err.starts_with("The goal is not complete yet."), "{err}");
+        assert!(err.contains("2 steps are still open:"), "{err}");
+        assert!(err.contains("\n- Oak is ready."), "{err}");
+        assert!(err.contains("\n- Pine is ready."), "{err}");
+        assert!(!err.contains("Split ran."), "{err}");
+        assert!(err.ends_with(GOAL_COMPLETE_RULE), "{err}");
+        assert_eq!(read_goal(project).unwrap().state, GoalState::Active);
+    }
+
+    #[test]
+    fn complete_is_refused_without_a_sentence_of_reason() {
+        let dir = project_with_checklist(&[(true, "Oak is ready.")]);
+        let project = dir.path();
+        start_goal(project, "Ship the thing").unwrap();
+        for short in ["", "   ", "done", "Done. Yes.", "all steps checked"] {
+            let err = complete_goal(project, short).unwrap_err();
+            assert!(
+                err.contains("Say why in at least one sentence"),
+                "{short:?}: {err}"
+            );
+            assert!(err.contains("Every step is checked."), "{short:?}: {err}");
+            assert_eq!(read_goal(project).unwrap().state, GoalState::Active);
+        }
+        // Open steps and a missing reason are both named.
+        let dir = project_with_checklist(&[(false, "Oak is ready.")]);
+        let err = complete_goal(dir.path(), "").unwrap_err();
+        assert!(
+            err.contains("1 step is still open:\n- Oak is ready."),
+            "{err}"
+        );
+        assert!(err.contains("Say why in at least one sentence"), "{err}");
+    }
+
+    #[test]
+    fn complete_is_allowed_when_every_step_is_ticked_with_a_reason() {
+        let dir = project_with_checklist(&[
+            (true, "Split ran."),
+            (true, "Oak is ready."),
+            (true, "Pine is ready."),
+        ]);
+        let project = dir.path();
+        start_goal(project, "Ship the thing").unwrap();
+        let done = complete_goal(project, &format!("  {REASON}  ")).unwrap();
+        assert_eq!(done.state, GoalState::Complete);
+        assert_eq!(done.reason, REASON);
+        assert!(!done.completed.is_empty());
+        let stored = read_goal(project).unwrap();
+        assert_eq!(stored, done);
+        assert_eq!(goal_row(project).unwrap().state, "complete");
+        // No checklist at all leaves nothing open.
+        let dir = project_with_checklist(&[]);
+        start_goal(dir.path(), "Answer one question").unwrap();
+        assert_eq!(
+            complete_goal(dir.path(), REASON).unwrap().state,
+            GoalState::Complete
+        );
+    }
+
+    #[test]
+    fn a_person_completes_without_evidence() {
+        let dir = project_with_checklist(&[(false, "Oak is ready."), (false, "Pine is ready.")]);
+        let project = dir.path();
+        start_goal(project, "Ship the thing").unwrap();
+        assert!(complete_goal(project, "").is_err());
+        let done = force_complete_goal(project).unwrap();
+        assert_eq!(done.state, GoalState::Complete);
+        assert_eq!(done.reason, "Completed by the person.");
+        assert_eq!(read_goal(project).unwrap().state, GoalState::Complete);
+        assert!(take_goal_wake_at(project, false, at(23, 0)).is_none());
+        // Without a goal there is nothing to complete, with or without force.
+        assert!(force_complete_goal(dir.path().join("elsewhere").as_path()).is_err());
+    }
+
+    #[test]
+    fn a_reason_is_a_sentence_not_a_word() {
+        assert!(reason_is_a_sentence(REASON));
+        assert!(reason_is_a_sentence(
+            "The gate passed and the report is in."
+        ));
+        assert!(!reason_is_a_sentence(""));
+        assert!(!reason_is_a_sentence("done"));
+        assert!(!reason_is_a_sentence("Done, all good."));
+        assert!(!reason_is_a_sentence(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
     }
 
     #[test]
@@ -454,9 +653,10 @@ mod tests {
         assert_eq!(resume_goal(project).unwrap().state, GoalState::Active);
         assert_eq!(read_goal(project).unwrap().every_seconds, 900);
 
-        let complete = complete_goal(project).unwrap();
+        let complete = complete_goal(project, REASON).unwrap();
         assert_eq!(complete.state, GoalState::Complete);
         assert!(!complete.completed.is_empty());
+        assert_eq!(complete.reason, REASON);
         assert!(resume_goal(project).is_err());
         assert!(pause_goal(project).is_err());
         assert_eq!(goal_row(project).unwrap().state, "complete");
@@ -510,7 +710,7 @@ mod tests {
         assert_eq!(paused.state, GoalState::Paused);
         assert_eq!(paused.wakes, 0);
         assert!(paused.last_wake.is_empty());
-        complete_goal(project).unwrap();
+        complete_goal(project, REASON).unwrap();
         assert!(take_goal_wake_at(project, false, at(23, 0)).is_none());
         assert_eq!(read_goal(project).unwrap().state, GoalState::Complete);
     }
