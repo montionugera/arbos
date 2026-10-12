@@ -186,6 +186,32 @@ pub fn set_step(project: &Path, text: &str) -> Result<String, String> {
     Ok(step)
 }
 
+/// The harness's own line while Main's model is being retried or has
+/// paused. It replaces whatever step Main set; the verb rule is Main's, not
+/// the harness's.
+pub fn set_harness_step(project: &Path, text: &str) {
+    let _guard = live_lock();
+    let mut file = read_live(project);
+    file.step = text.trim().to_owned();
+    if let Err(err) = write_live(project, &file) {
+        tracing::warn!(error = %err, "live state was not written");
+    }
+}
+
+/// The model answers again: the harness line goes, unless Main has since
+/// set a step of its own.
+pub fn clear_harness_step(project: &Path, text: &str) {
+    let _guard = live_lock();
+    let mut file = read_live(project);
+    if file.step.trim() != text.trim() {
+        return;
+    }
+    file.step.clear();
+    if let Err(err) = write_live(project, &file) {
+        tracing::warn!(error = %err, "live state was not written");
+    }
+}
+
 /// Validate a step line and return it trimmed.
 pub fn check_step(text: &str) -> Result<String, String> {
     let step = text.split_whitespace().collect::<Vec<_>>();

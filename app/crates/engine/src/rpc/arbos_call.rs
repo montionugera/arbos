@@ -730,6 +730,7 @@ fn agent_row(agent: &AgentView) -> Value {
         "model": agent.model,
         "role": agent.role,
         "status": agent.status,
+        "step": agent.step,
         "chatId": agent.chat_id,
         "brief": agent.brief,
         "result": agent.result,

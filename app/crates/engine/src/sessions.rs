@@ -34,6 +34,7 @@ use zeron_proto::{
     UserInputAnswer, UserInputQuestion,
 };
 
+use crate::arbos_recovery::{RecoveryEffect, RecoveryTracker, TurnEnd};
 use crate::doc_host::{ChatDocHandle, DocHost};
 use crate::registry::{HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
@@ -2202,6 +2203,13 @@ fn wake_if_worker(inner: &Inner, chat_id: &str, cwd: &str, status: &DoneStatus, 
         DoneStatus::Errored => "error",
         DoneStatus::Interrupted => "stopped",
     };
+    end_worker_turn(inner, chat_id, cwd, label, reply);
+}
+
+/// Mark a worker's turn over with `label` (`done`, `error`, `stopped`) and
+/// wake Main with the reply. Nothing happens for a chat that is not a
+/// worker still going.
+fn end_worker_turn(inner: &Inner, chat_id: &str, cwd: &str, label: &str, reply: &str) {
     // One wake per worker turn: the layout marks the worker done on the
     // first call and answers nothing on a repeat.
     let Some(done) =
@@ -2258,6 +2266,100 @@ fn wake_if_worker(inner: &Inner, chat_id: &str, cwd: &str, status: &DoneStatus, 
     };
     if let Err(err) = queued {
         tracing::warn!(worker = %done.worker, error = %err, "worker wake was not queued");
+    }
+}
+
+/// Write one model-recovery change where the person and Main see it: a
+/// worker's `agent.toml` (status word and step), Main's live step, and, for
+/// an error, a line in the chat. `previous_step` is the line written before
+/// this one, so a clear leaves a step Main set itself alone.
+fn apply_recovery(
+    inner: &Inner,
+    chat_id: &str,
+    cwd: &str,
+    role: Option<&str>,
+    previous_step: &str,
+    effect: &RecoveryEffect,
+) {
+    let project = std::path::Path::new(cwd);
+    match role {
+        Some("worker") => match effect {
+            RecoveryEffect::Waiting { step } => {
+                crate::arbos_layout::note_worker_recovery(project, chat_id, "waiting", step);
+            }
+            RecoveryEffect::Working => {
+                crate::arbos_layout::note_worker_recovery(project, chat_id, "working", "");
+            }
+            RecoveryEffect::Error { reason } => {
+                end_worker_turn(inner, chat_id, cwd, "error", reason);
+            }
+        },
+        Some("coordinator") => match effect {
+            RecoveryEffect::Waiting { step } => crate::arbos_live::set_harness_step(project, step),
+            RecoveryEffect::Working | RecoveryEffect::Error { .. } => {
+                crate::arbos_live::clear_harness_step(project, previous_step);
+            }
+        },
+        _ => {}
+    }
+    match effect {
+        RecoveryEffect::Waiting { step } => {
+            tracing::info!(chat = %chat_id, step = %step, "model recovery under way");
+        }
+        RecoveryEffect::Working => {
+            tracing::info!(chat = %chat_id, "model recovery over");
+        }
+        RecoveryEffect::Error { reason } => {
+            tracing::warn!(chat = %chat_id, reason = %reason, "model recovery ended the turn");
+            if let Some(host) = inner.doc_host()
+                && let Ok(handle) = host.open(chat_id)
+            {
+                let _ = handle.write_system_message(
+                    &format!("model-recovery-{}", new_id()),
+                    reason,
+                    now_ms(),
+                );
+            }
+        }
+    }
+}
+
+/// Queue the empty prompt that continues a paused fx model response. It
+/// rides the chat's last run request so dispatch routes it into the parked
+/// runtime (or restarts one with the same configuration).
+fn resume_paused_model(inner: &Inner, chat_id: &str, cwd: &str) {
+    let Some(host) = inner.doc_host() else {
+        return;
+    };
+    let mut request = lock(&inner.last_requests)
+        .get(chat_id)
+        .cloned()
+        .unwrap_or(RunRequest {
+            prompt: String::new(),
+            harness: Some(HarnessId::Fx),
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: cwd.to_owned(),
+            sandbox: SandboxLevel::DangerFullAccess,
+            auto_approve: true,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+            mcp: None,
+        });
+    request.prompt = zeron_proto::ARBOS_CONTINUE_MARK.to_owned();
+    request.resume = None;
+    request.attachments.clear();
+    tracing::info!(chat = %chat_id, "resuming the paused model response");
+    if let Err(err) = host.queue_command(
+        chat_id,
+        SessionCommandPayload::Run {
+            request,
+            message_id: new_id(),
+        },
+    ) {
+        tracing::warn!(chat = %chat_id, error = %err, "model resume was not queued");
     }
 }
 
@@ -2522,11 +2624,14 @@ async fn drive_run(
     }
     // Main's turns feed the live step, the unread flag, and the link check.
     let mut main_turn = false;
+    // `coordinator`, `worker`, or `chat`: where a model-recovery line goes.
+    let mut agent_role: Option<String> = None;
     if harness_id == HarnessId::Fx
         && let Some(prep) =
             crate::arbos_layout::prepare_turn(std::path::Path::new(&request.cwd), &chat_id)
     {
         main_turn = prep.role == "coordinator";
+        agent_role = Some(prep.role.clone());
         request.model_options.insert(
             "_arbosFxHome".into(),
             serde_json::Value::String(prep.fx_home),
@@ -2811,6 +2916,9 @@ async fn drive_run(
             None => Some(std::time::Duration::from_secs(20)),
         };
     let mut self_continued_turn = false;
+    // fx's model-response recovery for this run: the live line, the worker's
+    // `waiting` status, the one automatic resume, and the five-minute rule.
+    let mut recovery = RecoveryTracker::default();
     // Spawn chips that have SETTLED (tagged Done seen). Content events for a
     // settled chip with no live sink are dropped — a straggler frame after
     // the freeze must not mint a new doc entry or wedge the transcript back
@@ -2850,6 +2958,39 @@ async fn drive_run(
                 },
                 _ = live_heartbeat.tick() => {
                     inner.touch_session(&chat_id);
+                    continue;
+                }
+                // The one automatic resume of a paused model response, once
+                // the paused turn has parked and fx's advised delay is up.
+                _ = tokio::time::sleep_until(
+                    recovery
+                        .resume_at()
+                        .map(tokio::time::Instant::from_std)
+                        .unwrap_or_else(tokio::time::Instant::now)
+                ), if recovery.resume_at().is_some() && idle_since.is_some() && !interrupted => {
+                    recovery.take_resume();
+                    resume_paused_model(&inner, &chat_id, &run_cwd);
+                    continue;
+                }
+                // A pause that outlives its limit is an error the person and
+                // Main hear about.
+                _ = tokio::time::sleep_until(
+                    recovery
+                        .error_at()
+                        .map(tokio::time::Instant::from_std)
+                        .unwrap_or_else(tokio::time::Instant::now)
+                ), if recovery.error_at().is_some() && !interrupted => {
+                    let previous_step = recovery.last_step.clone();
+                    if let Some(effect) = recovery.tick(std::time::Instant::now()) {
+                        apply_recovery(
+                            &inner,
+                            &chat_id,
+                            &run_cwd,
+                            agent_role.as_deref(),
+                            &previous_step,
+                            &effect,
+                        );
+                    }
                     continue;
                 }
                 // A hang-up restarts the idle window, however long the call.
@@ -3287,6 +3428,23 @@ async fn drive_run(
             }
             continue;
         }
+        // Model-response recovery lands before the parked gate: fx reports
+        // it mid-turn and clears it at the start of the resumed turn. It is
+        // a status line, not transcript content, so it is never folded.
+        if let AgentEvent::ModelRecovery { .. } = &event {
+            let previous_step = recovery.last_step.clone();
+            if let Some(effect) = recovery.observe(&event, std::time::Instant::now()) {
+                apply_recovery(
+                    &inner,
+                    &chat_id,
+                    &run_cwd,
+                    agent_role.as_deref(),
+                    &previous_step,
+                    &effect,
+                );
+            }
+            continue;
+        }
         // PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT
         // re-opens the session; everything else stays gated. The ACP child
         // keeps forwarding `session/update` frames after a turn completes,
@@ -3684,7 +3842,29 @@ async fn drive_run(
             // way (see `continues_with_sent_message`); rows the user queued
             // themselves still notify.
             let pending_steer = inner.has_pending_steers(&chat_id, &run_id);
-            if turn_was_active && !pending_steer {
+            // A turn fx paused mid-response is not over: its `Done` is the
+            // pause, not a reply. The worker stays `waiting`, Main is not
+            // woken, and one resume is scheduled after fx's advised delay
+            // (the five-minute rule covers a resume that never lands).
+            let held_by_pause = if *status == DoneStatus::Completed {
+                match recovery.turn_ended(std::time::Instant::now()) {
+                    TurnEnd::Over => false,
+                    TurnEnd::Held { resume_at } => {
+                        tracing::info!(
+                            chat = %chat_id,
+                            resume_in_seconds = resume_at.map(|at| {
+                                at.saturating_duration_since(std::time::Instant::now()).as_secs()
+                            }),
+                            "paused model response holds the turn"
+                        );
+                        true
+                    }
+                }
+            } else {
+                recovery = RecoveryTracker::default();
+                false
+            };
+            if turn_was_active && !pending_steer && !held_by_pause {
                 wake_if_worker(&inner, &chat_id, &run_cwd, status, &folded_text(&folded));
                 if main_turn {
                     // The step clears with the turn. Unread is set only when
@@ -3706,6 +3886,7 @@ async fn drive_run(
                 && !interrupted
                 && turn_was_active
                 && !pending_steer
+                && !held_by_pause
                 && !inner.continues_with_sent_message(&chat_id))
             .then(|| entry_id.clone());
             // PERSISTENT SESSION: a cleanly completed turn on a steerable
@@ -3764,6 +3945,20 @@ async fn drive_run(
                 tokio::time::Instant::now() + std::time::Duration::from_millis(STREAM_COMMIT_MS);
         }
     };
+
+    // A pause still open when the run ends cannot resume any more: the
+    // worker reads `error` with the reason instead of `waiting` forever.
+    let previous_step = recovery.last_step.clone();
+    if let Some(effect) = recovery.end() {
+        apply_recovery(
+            &inner,
+            &chat_id,
+            &run_cwd,
+            agent_role.as_deref(),
+            &previous_step,
+            &effect,
+        );
+    }
 
     // Any subagent still streaming when the run ends freezes as-is: the
     // parent process is gone, so nothing more can arrive on this stream.
