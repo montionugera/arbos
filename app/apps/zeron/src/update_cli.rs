@@ -13,12 +13,12 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
     let current = current_version();
     if !version_newer(&manifest.version, current) {
         println!(
-            "zeron {current} is up to date (latest: {}).",
+            "Arbos {current} is up to date (latest: {}).",
             manifest.version
         );
         return Ok(());
     }
-    println!("zeron {current} → {} available", manifest.version);
+    println!("Arbos {current} → {} available", manifest.version);
     if check_only {
         std::process::exit(1);
     }
@@ -57,7 +57,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             let staged =
                 zeron_update::stage_mac_app(edge_url, &manifest, &data_dir, None).await?;
             zeron_update::apply_mac_app(&staged, &bundle)?;
-            println!("updated {} — relaunch Zeron to finish.", bundle.display());
+            println!("updated {} — relaunch Arbos to finish.", bundle.display());
             Ok(())
         }
         #[cfg(windows)]
@@ -66,7 +66,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
                 zeron_update::windows::stage(edge_url, &manifest, &directory, None).await?;
             zeron_update::windows::apply(&staged, &directory, false)?;
             println!(
-                "updated to {} — relaunch Zeron to finish.",
+                "updated to {} — relaunch Arbos to finish.",
                 manifest.version
             );
             Ok(())
@@ -75,8 +75,8 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             bail!(
                 "this binary is not update-managed (source build or hand-copied).\n\
                  Linux: rebuild from source.\n\
-                 macOS: download the new Zeron.app dmg, or rebuild from source.\n\
-                 Windows: install with the Zeron setup .exe from {}, or rebuild from source.",
+                 macOS: download the new Arbos dmg, or rebuild from source.\n\
+                 Windows: install with the Arbos setup .exe from {}, or rebuild from source.",
                 zeron_update::LATEST_RELEASE_PAGE
             )
         }

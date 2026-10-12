@@ -1,6 +1,6 @@
 # Development media runtime
 
-Zeron packages do not contain the Codex voice runtime. On macOS, Linux and
+Arbos packages do not contain the Codex voice runtime. On macOS, Linux and
 Windows, local and remote voice run the `codex-voice-host` helper of the user's
 own standalone Codex installation (layout 1, version 0.159 or later), resolved
 from the same `codex` executable the harness uses. npm installations do not

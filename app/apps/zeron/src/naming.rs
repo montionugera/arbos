@@ -6,13 +6,19 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// Source trees whose string literals a person can see.
-    const SCANNED: [&str; 2] = ["crates/ui/src", "crates/theme/src"];
+    const SCANNED: [&str; 4] = [
+        "crates/ui/src",
+        "crates/theme/src",
+        "crates/update/src",
+        "apps/zeron/src",
+    ];
 
     /// Lines that may keep the old name: the deep-link scheme, the parser for
     /// the model-facing side-chat header, the HTTP user agent, a persisted
-    /// settings key, native class names, and panics or logs nobody reads in
-    /// the window.
-    const ALLOWED: [&str; 11] = [
+    /// settings key, native class names, the Windows data-directory name
+    /// (renaming it would strand a user's data), and panics or logs nobody
+    /// reads in the window.
+    const ALLOWED: [&str; 12] = [
         "zeron://",
         "[Message from Zeron chat ",
         "Reply to it with the Zeron `send_message` tool",
@@ -24,6 +30,7 @@ mod tests {
         "tracing::",
         "Zeron.app",
         r"Programs\Zeron",
+        "local.join(\"Zeron\")",
     ];
 
     fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -34,7 +41,10 @@ mod tests {
             let path = entry.path();
             if path.is_dir() {
                 rust_files(&path, out);
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+                // This file: the allowlist itself is full of the old name.
+                && path.file_name().is_some_and(|name| name != "naming.rs")
+            {
                 out.push(path);
             }
         }

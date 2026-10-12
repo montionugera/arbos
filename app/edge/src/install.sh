@@ -1,10 +1,10 @@
 #!/bin/sh
-# Zeron (native) headless installer.
+# Arbos (native) headless installer.
 #
 #   curl -fsSL https://zeron.sh/install.sh | sh
 #
 # Installs the native binary (requires the system ALSA runtime) to
-# ~/.zeron/app, puts `zeron` on PATH, adds a launcher entry and icon under
+# ~/.zeron/app, puts `arbos` on PATH, adds a launcher entry and icon under
 # $XDG_DATA_HOME (default ~/.local/share), and runs it as a local-only
 # systemd user service that survives reboots. Signing in is optional and
 # enables sync after a restart. Re-running
@@ -22,12 +22,12 @@ arch="$(uname -m)"
 case "$os" in
   Linux) plat=linux ;;
   Darwin)
-    echo "zeron install: on macOS, download the desktop app instead:" >&2
-    echo "  $BASE/releases/latest.txt → $BASE/releases/zeron-<version>-macos-arm64.dmg" >&2
+    echo "arbos install: on macOS, download the desktop app instead:" >&2
+    echo "  $BASE/releases/latest.txt → $BASE/releases/arbos-<version>-macos-arm64.dmg" >&2
     exit 1
     ;;
   *)
-    echo "zeron install: unsupported OS '$os' — only Linux for now." >&2
+    echo "arbos install: unsupported OS '$os' — only Linux for now." >&2
     exit 1
     ;;
 esac
@@ -35,25 +35,25 @@ case "$arch" in
   x86_64 | amd64) arch=x86_64 ;;
   aarch64 | arm64) arch=aarch64 ;;
   *)
-    echo "zeron install: unsupported architecture '$arch'." >&2
+    echo "arbos install: unsupported architecture '$arch'." >&2
     exit 1
     ;;
 esac
 
 # --- download ----------------------------------------------------------------
 ver="$(curl -fsSL "$BASE/releases/latest.txt" | tr -d '[:space:]')"
-[ -n "$ver" ] || { echo "zeron install: could not resolve latest version" >&2; exit 1; }
-file="zeron-$ver-$plat-$arch.tar.gz"
+[ -n "$ver" ] || { echo "arbos install: could not resolve latest version" >&2; exit 1; }
+file="arbos-$ver-$plat-$arch.tar.gz"
 data_root="$HOME/.zeron"
 app_root="$data_root/app"
 dest="$app_root/$ver"
 
 if [ -x "$dest/zeron" ]; then
-  echo "zeron $ver already downloaded — relinking."
+  echo "arbos $ver already downloaded — relinking."
 else
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  echo "downloading zeron $ver ($plat-$arch)…"
+  echo "downloading arbos $ver ($plat-$arch)…"
   curl -fSL --progress-bar "$BASE/releases/$file" -o "$tmp/$file"
   mkdir -p "$dest"
   tar -xzf "$tmp/$file" -C "$dest" --strip-components=1
@@ -62,7 +62,7 @@ fi
 # Probe before changing a working installation or starting its service. The
 # desktop and headless modes share one binary, including CPAL's ALSA linkage.
 if ! "$dest/zeron" --version >/dev/null; then
-  echo "zeron install: the downloaded executable could not start; see the loader error above." >&2
+  echo "arbos install: the downloaded executable could not start; see the loader error above." >&2
   echo "Install the missing runtime libraries (including ALSA, libasound.so.2), then rerun this installer." >&2
   exit 1
 fi
@@ -70,9 +70,15 @@ fi
 ln -sfn "$dest" "$app_root/current"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$app_root/current/zeron" "$HOME/.local/bin/zeron"
+# The rebrand's name, alongside the old one so nothing already scripted breaks.
+if [ -x "$app_root/current/arbos" ]; then
+  ln -sfn "$app_root/current/arbos" "$HOME/.local/bin/arbos"
+else
+  ln -sfn "$app_root/current/zeron" "$HOME/.local/bin/arbos"
+fi
 
 # --- desktop entry -------------------------------------------------------------
-# Launchers list Zeron through a per-user .desktop entry. The one in the tarball
+# Launchers list Arbos through a per-user .desktop entry. The one in the tarball
 # says `Exec=zeron` and `TryExec=zeron`, which only resolve when ~/.local/bin is
 # on the PATH of the desktop session (often not, e.g. a bare Wayland + fuzzel
 # setup) and TryExec then hides the entry outright. So write it with absolute
@@ -135,7 +141,7 @@ install_desktop_entry() {
 }
 # A missing desktop entry must never fail an otherwise good install.
 install_desktop_entry "$dest" "$app_root" \
-  || echo "warn: could not install the desktop entry — Zeron won't appear in application launchers"
+  || echo "warn: could not install the desktop entry — Arbos won't appear in application launchers"
 
 # --- service -----------------------------------------------------------------
 # The daemon is useful before auth: without a saved session it serves the local
@@ -146,7 +152,7 @@ if command -v systemctl >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
   mkdir -p "$HOME/.config/systemd/user"
   cat >"$HOME/.config/systemd/user/zeron.service" <<'UNIT'
 [Unit]
-Description=Zeron native headless engine
+Description=Arbos native headless engine
 After=network-online.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
@@ -169,7 +175,7 @@ UNIT
     || sudo -n loginctl enable-linger "$USER" 2>/dev/null \
     || echo "warn: could not enable linger — the engine stops when you log out (run: sudo loginctl enable-linger $USER)"
 else
-  echo "warn: systemd user session not available — run the engine manually with: zeron headless"
+  echo "warn: systemd user session not available — run the engine manually with: arbos headless"
 fi
 
 # --- agent CLIs ---------------------------------------------------------------
@@ -182,7 +188,7 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "✓ zeron $ver installed$path_hint"
+echo "✓ arbos $ver installed$path_hint"
 echo ""
 case "$service" in
   running)
@@ -191,11 +197,11 @@ case "$service" in
     echo ""
     echo "optional sync (local sessions stay local):"
     echo "  systemctl --user stop zeron"
-    echo "  zeron login"
+    echo "  arbos login"
     echo "  systemctl --user restart zeron"
     ;;
   manual)
-    echo "next: run the local-only engine with \`zeron headless\`."
-    echo "optional sync: run \`zeron login\` before starting the engine."
+    echo "next: run the local-only engine with \`arbos headless\`."
+    echo "optional sync: run \`arbos login\` before starting the engine."
     ;;
 esac

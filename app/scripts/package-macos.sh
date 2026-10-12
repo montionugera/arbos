@@ -1,32 +1,46 @@
 #!/usr/bin/env bash
 # macOS packaging: build the release binary for the host arch and produce
-#   target/package/zeron-<version>-macos-<arch>.dmg          (user download)
-#   target/package/zeron-<version>-macos-<arch>-app.tar.gz   (auto-updater)
-# containing Zeron.app (unsigned unless CODESIGN_IDENTITY is set).
+#   target/package/arbos-<version>-macos-<arch>.dmg          (user download)
+#   target/package/arbos-<version>-macos-<arch>-app.tar.gz   (auto-updater)
+# containing Arbos.app (unsigned unless CODESIGN_IDENTITY is set).
 #
 # Usage: scripts/package-macos.sh
-# Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
+# Env:   ARBOS_BUILD=<n> — the commit count, as CI passes it, making the
+#          version 0.2.112.<n> (the full build version the updater orders on).
+#        CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
 #        NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID — App Store Connect
-#        API key (.p8) for notarization; all three set → notarize + staple the
-#        app and the dmg, which removes the Gatekeeper warning entirely.
+#          API key (.p8) for notarization; all three set → notarize + staple the
+#          app and the dmg, which removes the Gatekeeper warning entirely.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
-VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+BASE="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+if [[ -n "${ARBOS_BUILD:-}" ]]; then
+  if [[ ! "$ARBOS_BUILD" =~ ^[0-9]+$ ]]; then
+    echo "ARBOS_BUILD must be a decimal build number" >&2
+    exit 1
+  fi
+  VERSION="${BASE}.${ARBOS_BUILD}"
+  export ARBOS_BUILD
+else
+  VERSION="$BASE"
+fi
 ARCH="$(uname -m)" # arm64 on Apple silicon runners
 OUT_DIR="$ROOT/target/package"
-APP="$OUT_DIR/Zeron.app"
-DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
-APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
+APP="$OUT_DIR/Arbos.app"
+DMG="$OUT_DIR/arbos-$VERSION-macos-$ARCH.dmg"
+APP_TARBALL="$OUT_DIR/arbos-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
 cargo build --release -p zeron
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/zeron"
+# The cargo binary is `zeron`; the bundle presents as Arbos, and the updater
+# stages exactly this name (Arbos.app/Contents/MacOS/Arbos).
+install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/Arbos"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
@@ -38,14 +52,14 @@ cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses"/parakeet-v3
 # Icon: iconset from the pre-masked macOS icon (squircle + margins + shadow
 # baked into dist/macos/icon-1024.png — sips can't alpha-mask, so the mask is
 # applied ahead of time; dist/zeron.png stays the full-bleed shared artwork).
-ICONSET="$OUT_DIR/zeron.iconset"
+ICONSET="$OUT_DIR/arbos.iconset"
 rm -rf "$ICONSET" && mkdir -p "$ICONSET"
 for size in 16 32 128 256 512; do
   sips -z "$size" "$size" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
   retina=$((size * 2))
   sips -z "$retina" "$retina" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/zeron.icns"
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/arbos.icns"
 rm -rf "$ICONSET"
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
@@ -73,7 +87,7 @@ if $NOTARIZE; then
   # Staple the bundle BEFORE tarring it: the auto-updater swaps the .app with
   # no dmg involved, so the tarball copy must carry its own ticket to pass
   # Gatekeeper offline.
-  ZIP="$OUT_DIR/zeron-notarize.zip"
+  ZIP="$OUT_DIR/arbos-notarize.zip"
   ditto -c -k --keepParent "$APP" "$ZIP"
   notarize "$ZIP"
   rm -f "$ZIP"
@@ -81,7 +95,7 @@ if $NOTARIZE; then
 fi
 
 # The auto-updater artifact.
-tar -czf "$APP_TARBALL" -C "$OUT_DIR" Zeron.app
+tar -czf "$APP_TARBALL" -C "$OUT_DIR" Arbos.app
 echo "packaged: $APP_TARBALL"
 
 # The dmg presents the classic drag-into-Applications layout over the
@@ -105,12 +119,12 @@ import dmgbuild
 app = os.environ["APP"]
 dmgbuild.build_dmg(
     filename=os.environ["DMG"],
-    volume_name="Zeron",
+    volume_name="Arbos",
     settings={
         "format": "UDZO",
         "files": [app],
         "symlinks": {"Applications": "/Applications"},
-        "icon": os.path.join(app, "Contents/Resources/zeron.icns"),
+        "icon": os.path.join(app, "Contents/Resources/arbos.icns"),
         "background": os.environ["BG_TIFF"],
         "show_status_bar": False,
         "show_tab_view": False,
@@ -122,7 +136,7 @@ dmgbuild.build_dmg(
         "window_rect": ((200, 120), (660, 400)),
         "icon_size": 104,
         "text_size": 12,
-        "icon_locations": {"Zeron.app": (165, 195), "Applications": (495, 195)},
+        "icon_locations": {"Arbos.app": (165, 195), "Applications": (495, 195)},
     },
 )
 PY

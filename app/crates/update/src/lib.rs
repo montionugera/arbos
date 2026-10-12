@@ -170,10 +170,11 @@ fn staged_cli(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// `zeron-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
+/// `arbos-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload,
+/// matching `scripts/package-macos.sh`.
 pub fn mac_app_artifact(version: &str) -> String {
     let (_, arch) = platform_key();
-    format!("zeron-{version}-macos-{arch}-app.tar.gz")
+    format!("arbos-{version}-macos-{arch}-app.tar.gz")
 }
 
 fn parse_version(v: &str) -> Option<Vec<u64>> {
@@ -418,12 +419,12 @@ impl std::fmt::Display for UpdateBlocker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Translocated | Self::DiskImage => f.write_str(
-                "Zeron is running from a temporary, read-only location. Move Zeron to your \
+                "Arbos is running from a temporary, read-only location. Move Arbos to your \
                  Applications folder and reopen it to turn on updates.",
             ),
             Self::NotWritable(dir) => write!(
                 f,
-                "Zeron doesn't have permission to replace itself in {}.",
+                "Arbos doesn't have permission to replace itself in {}.",
                 dir.display()
             ),
         }
@@ -957,11 +958,10 @@ pub fn restart_service() -> anyhow::Result<()> {
 // macOS app-bundle installs — the desktop path
 // ---------------------------------------------------------------------------
 
-/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/` (the
-/// staged bundle — idempotent). The bundle is unpacked beside its final name
-/// and renamed in only after its binary answers with the expected version, so
-/// an interrupted unpack can never be mistaken for a staged update. Returns
-/// the staged bundle.
+/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/Arbos.app`
+/// (idempotent). The bundle is unpacked beside its final name and renamed in
+/// only after its binary answers with the expected version, so an interrupted
+/// unpack can never be mistaken for a staged update. Returns the staged bundle.
 pub async fn stage_mac_app(
     edge_url: &str,
     manifest: &Manifest,
@@ -996,8 +996,8 @@ async fn stage_mac_app_verified(
     );
     let updates = data_dir.join("updates");
     let dir = updates.join(version);
-    let staged = dir.join("Zeron.app");
-    let staged_binary = staged.join("Contents/MacOS/zeron");
+    let staged = dir.join("Arbos.app");
+    let staged_binary = staged.join("Contents/MacOS/Arbos");
     if staged_binary.exists() && verify_staged_binary(&staged_binary, version).await.is_ok() {
         return Ok(staged);
     }
@@ -1018,13 +1018,13 @@ async fn stage_mac_app_verified(
             &unpack.to_string_lossy(),
         ],
     )
-    .map(|()| unpack.join("Zeron.app"));
+    .map(|()| unpack.join("Arbos.app"));
     std::fs::remove_file(&tarball).ok();
     let unpacked = unpacked?;
-    let unpacked_binary = unpacked.join("Contents/MacOS/zeron");
+    let unpacked_binary = unpacked.join("Contents/MacOS/Arbos");
     if !unpacked_binary.exists() {
         let _ = std::fs::remove_dir_all(&dir);
-        bail!("app tarball {file} did not contain Zeron.app");
+        bail!("app tarball {file} did not contain Arbos.app");
     }
     if let Err(err) = verify_staged_binary(&unpacked_binary, version).await {
         let _ = std::fs::remove_dir_all(&dir);
@@ -1817,12 +1817,12 @@ mod tests {
         );
         assert_eq!(
             detect_install_from_for_os(
-                Path::new("/Applications/Zeron.app/Contents/MacOS/zeron"),
+                Path::new("/Applications/Arbos.app/Contents/MacOS/Arbos"),
                 Some(Path::new("/Users/u")),
                 "macos",
             ),
             InstallKind::MacApp {
-                bundle: PathBuf::from("/Applications/Zeron.app")
+                bundle: PathBuf::from("/Applications/Arbos.app")
             }
         );
         // A path merely containing `.app` without the bundle layout is not a bundle.
@@ -1848,7 +1848,10 @@ mod tests {
             headless_artifact("0.2.0"),
             format!("arbos-0.2.0-{os}-{arch}.tar.gz")
         );
-        assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
+        assert_eq!(
+            mac_app_artifact("0.2.0"),
+            format!("arbos-0.2.0-macos-{arch}-app.tar.gz")
+        );
     }
 
     #[cfg(windows)]
@@ -1899,7 +1902,7 @@ mod tests {
                 .contains("not supported on windows")
         );
         assert!(
-            apply_mac_app(&data_dir.join("Zeron.app"), &data_dir.join("Installed.app"))
+            apply_mac_app(&data_dir.join("Arbos.app"), &data_dir.join("Installed.app"))
                 .unwrap_err()
                 .to_string()
                 .contains("not supported on windows")
@@ -2066,7 +2069,7 @@ mod tests {
         apply_headless(&app_root, "0.4.0").unwrap();
         assert_eq!(installed_version(&managed).as_deref(), Some("0.4.0"));
 
-        let bundle = tmp.path().join("Zeron.app");
+        let bundle = tmp.path().join("Arbos.app");
         std::fs::create_dir_all(bundle.join("Contents")).unwrap();
         std::fs::write(
             bundle.join("Contents/Info.plist"),
@@ -2085,28 +2088,38 @@ mod tests {
         let writable = |_: &Path| true;
         let read_only = |_: &Path| false;
         assert_eq!(
-            mac_bundle_blocker(Path::new("/Applications/Zeron.app"), writable),
+            mac_bundle_blocker(Path::new("/Applications/Arbos.app"), writable),
             None
         );
         assert_eq!(
             mac_bundle_blocker(
-                Path::new("/private/var/folders/x/T/AppTranslocation/ABC/d/Zeron.app"),
+                Path::new("/private/var/folders/x/T/AppTranslocation/ABC/d/Arbos.app"),
                 writable
             ),
             Some(UpdateBlocker::Translocated)
         );
         assert_eq!(
-            mac_bundle_blocker(Path::new("/Volumes/Zeron/Zeron.app"), read_only),
+            mac_bundle_blocker(Path::new("/Volumes/Arbos/Arbos.app"), read_only),
             Some(UpdateBlocker::DiskImage)
         );
         // An external drive the user can write to updates in place.
         assert_eq!(
-            mac_bundle_blocker(Path::new("/Volumes/Work/Zeron.app"), writable),
+            mac_bundle_blocker(Path::new("/Volumes/Work/Arbos.app"), writable),
             None
         );
         assert_eq!(
-            mac_bundle_blocker(Path::new("/Applications/Zeron.app"), read_only),
+            mac_bundle_blocker(Path::new("/Applications/Arbos.app"), read_only),
             Some(UpdateBlocker::NotWritable(PathBuf::from("/Applications")))
+        );
+        // The refusal a person reads names Arbos, not the old name.
+        assert_eq!(
+            UpdateBlocker::Translocated.to_string(),
+            "Arbos is running from a temporary, read-only location. Move Arbos to your \
+             Applications folder and reopen it to turn on updates."
+        );
+        assert_eq!(
+            UpdateBlocker::NotWritable(PathBuf::from("/Applications")).to_string(),
+            "Arbos doesn't have permission to replace itself in /Applications."
         );
     }
 
@@ -2180,6 +2193,96 @@ mod tests {
         )
         .unwrap();
         std::fs::read(tarball).unwrap()
+    }
+
+    /// An `arbos-<version>-macos-<arch>-app.tar.gz` holding `Arbos.app` whose
+    /// binary reports `reported` from `--version` — the payload shape
+    /// `scripts/package-macos.sh` produces.
+    #[cfg(target_os = "macos")]
+    fn fake_mac_app_tarball(dir: &Path, reported: &str) -> Vec<u8> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let app = dir.join("Arbos.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        let binary = app.join("Contents/MacOS/Arbos");
+        std::fs::write(&binary, format!("#!/bin/sh\necho \"Arbos {reported}\"\n")).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tarball = dir.join("app.tar.gz");
+        run(
+            "tar",
+            &[
+                "-czf",
+                &tarball.to_string_lossy(),
+                "-C",
+                &dir.to_string_lossy(),
+                "Arbos.app",
+            ],
+        )
+        .unwrap();
+        std::fs::read(tarball).unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn mac_staging_unpacks_arbos_app_and_its_arbos_executable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let (secret, public) = sign::generate().unwrap();
+        let payload = fake_mac_app_tarball(&tmp.path().join("pkg"), "9.9.9");
+        let file = mac_app_artifact("9.9.9");
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                file.clone(),
+                FileMeta {
+                    sha256: Some(format!("{:x}", Sha256::digest(&payload))),
+                    signature: Some(secret.sign(&payload).unwrap()),
+                },
+            )]
+            .into(),
+        };
+        let (base, server) = serve_forever(payload).await;
+        let staged = stage_mac_app_verified(&base, &manifest, &data_dir, &public, None)
+            .await
+            .unwrap();
+        server.abort();
+        // The staged bundle is the packaged shape, binary and all: the apply
+        // step swaps this directory in and relaunches it.
+        assert_eq!(
+            staged,
+            data_dir.join("updates/9.9.9/Arbos.app")
+        );
+        assert!(staged.join("Contents/MacOS/Arbos").is_file());
+        assert!(!staged.with_extension("partial").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn mac_staging_refuses_a_tarball_signed_by_nobody() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let payload = fake_mac_app_tarball(&tmp.path().join("pkg"), "9.9.9");
+        let file = mac_app_artifact("9.9.9");
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: [(
+                file.clone(),
+                FileMeta {
+                    sha256: Some(format!("{:x}", Sha256::digest(&payload))),
+                    signature: None,
+                },
+            )]
+            .into(),
+        };
+        let (base, server) = serve_forever(payload).await;
+        let error = stage_mac_app(&base, &manifest, &data_dir, None)
+            .await
+            .unwrap_err();
+        server.abort();
+        assert_eq!(error.to_string(), refusal(&file));
+        // A refused mac update stages nothing: no bundle exists to swap in
+        // later. (The empty per-version staging dir may remain; the next
+        // attempt removes and recreates it.)
+        assert!(!data_dir.join("updates/9.9.9/Arbos.app").exists());
     }
 
     #[cfg(unix)]

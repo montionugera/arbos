@@ -51,7 +51,7 @@ cp "$ROOT/crates/voice/NOTICE.md" "$STAGE/licenses/parakeet-v3.txt"
 
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
-# Install Zeron for this user (no root needed), in the layout the in-app
+# Install Arbos for this user (no root needed), in the layout the in-app
 # updater manages: ~/.zeron/app/<version> behind a `current` symlink — the
 # same layout `curl -fsSL https://zeron.sh/install.sh | sh` uses — with
 # ~/.local/bin/zeron and the desktop entry pointing through it.
@@ -70,7 +70,7 @@ if [ ! -x "$DEST/zeron" ]; then
   mv "$STAGE" "$DEST"
 fi
 if ! "$DEST/zeron" --version >/dev/null; then
-  echo "Zeron could not start; see the loader error above. Install the missing runtime libraries (including ALSA, libasound.so.2), then retry." >&2
+  echo "Arbos could not start; see the loader error above. Install the missing runtime libraries (including ALSA, libasound.so.2), then retry." >&2
   exit 1
 fi
 ln -sfn "$DEST" "$APP_ROOT/current"
@@ -82,7 +82,7 @@ else
   ln -sfn "$APP_ROOT/current/zeron" "$HOME/.local/bin/arbos"
 fi
 
-# Launchers list Zeron through a per-user .desktop entry. The one in the tarball
+# Launchers list Arbos through a per-user .desktop entry. The one in the tarball
 # says `Exec=zeron` and `TryExec=zeron`, which only resolve when ~/.local/bin is
 # on the PATH of the desktop session (often not, e.g. a bare Wayland + fuzzel
 # setup) and TryExec then hides the entry outright. So write it with absolute
@@ -144,12 +144,12 @@ install_desktop_entry() {
   return 0
 }
 install_desktop_entry "$HERE" "$APP_ROOT" \
-  || echo "warn: could not install the desktop entry — Zeron won't appear in application launchers"
+  || echo "warn: could not install the desktop entry — Arbos won't appear in application launchers"
 
-echo "Installed Zeron $VERSION. It updates itself from now on."
+echo "Installed Arbos $VERSION. It updates itself from now on."
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
-  *) echo "Add ~/.local/bin to your PATH to run \`zeron\` from a terminal." ;;
+  *) echo "Add ~/.local/bin to your PATH to run \`arbos\` from a terminal." ;;
 esac
 INSTALL
 sed -i "s/__VERSION__/$VERSION/" "$STAGE/install.sh"

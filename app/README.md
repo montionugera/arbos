@@ -1,18 +1,18 @@
-# Zeron
+# Arbos
 
 Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) locally by default, with optional multi-device sync.
 
 *English | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md)*
 
-![Zeron desktop app](docs/media/readme/app-screenshot.jpg)
+![Arbos desktop app](docs/media/readme/app-screenshot.jpg)
 
 ## Desktop app
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest):
+Download the latest release for your platform from [GitHub Releases](https://github.com/unarbos/arbos/releases/latest):
 
-- **macOS** — `zeron-<version>-macos-arm64.dmg`
+- **macOS** — `arbos-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
-- **Linux** — `zeron-<version>-linux-<arch>.tar.gz`, then run its `install.sh`
+- **Linux** — `arbos-<version>-linux-<arch>.tar.gz`, then run its `install.sh`
 
 No account or network connection is needed; sessions stay on your device. The app updates itself.
 
@@ -22,15 +22,15 @@ For servers and other machines without a display, such as a VPS that keeps agent
 
 ```bash
 curl -fsSL https://zeron.sh/install.sh | sh
-zeron status
+arbos status
 ```
 
 The installer starts the engine as a background service that survives reboots.
 
 ```bash
-zeron status      # local/synced mode and engine status
-zeron update      # update to the latest release
-zeron daemon start|stop|restart|status
+arbos status      # local/synced mode and engine status
+arbos update      # update to the latest release
+arbos daemon start|stop|restart|status
 ```
 
 ## Multi-device sync (optional)
@@ -38,16 +38,16 @@ zeron daemon start|stop|restart|status
 Sign in to start an agent on one device and follow or drive it from another:
 
 ```bash
-zeron daemon stop
-zeron login        # or: zeron logout to return to local-only
-zeron daemon start
+arbos daemon stop
+arbos login        # or: arbos logout to return to local-only
+arbos daemon start
 ```
 
 Devices signed in to the same account can read and write each other's workspace files, so only sign in devices you trust. Existing local sessions are never uploaded.
 
 ## Sponsors
 
-Thank you to [The Context Company](https://www.thecontextcompany.com/) for sponsoring Zeron. You can help fund Zeron's development too by [becoming a sponsor on GitHub](https://github.com/sponsors/zeronsh).
+Thank you to [The Context Company](https://www.thecontextcompany.com/) for sponsoring Arbos. You can help fund Arbos's development too by [becoming a sponsor on GitHub](https://github.com/sponsors/zeronsh).
 
 ---
 
