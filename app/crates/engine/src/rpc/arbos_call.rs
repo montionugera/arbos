@@ -11,7 +11,7 @@ use super::EngineRpc;
 use crate::arbos_goal;
 use crate::arbos_layout::{self, AgentView};
 use crate::new_id;
-use crate::{arbos_live, arbos_wakes};
+use crate::{arbos_context, arbos_live, arbos_wakes};
 
 impl EngineRpc {
     pub(super) fn arbos_call(&self, params: Value) -> Result<Value, String> {
@@ -112,6 +112,17 @@ impl EngineRpc {
                 Ok(json!({ "step": step }))
             }
             "live" => Ok(live_row(project_path)),
+            "context_usage" => {
+                let main = arbos_layout::main_chat_id(project_path);
+                let window = self
+                    .doc_host
+                    .open(&main)
+                    .ok()
+                    .and_then(|handle| handle.doc().context_usage())
+                    .and_then(|usage| usage.window);
+                let view = arbos_context::usage(project_path, window);
+                serde_json::to_value(view).map_err(|err| err.to_string())
+            }
             "seen" => {
                 arbos_live::mark_seen(project_path)?;
                 Ok(live_row(project_path))

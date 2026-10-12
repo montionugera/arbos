@@ -16,6 +16,7 @@ agents.send steers a running worker, renames it, or changes its model for the ne
 goal.show, goal.schedule, goal.pause, goal.resume, goal.complete, and goal.clear manage the project's durable goal. \
 preferences.write appends one dated line to the person's preferences, shared by every project. \
 status.step sets the live step the person sees: six words at most, starting with a verb. \
+context.usage reports how full the context window is. \
 context.read and context.write use paths under the project context directory, \
 such as internal/note.md or status.md. \
 A worker's file under docs/ or internal/ must start with its own arbos agentId frontmatter. \
@@ -143,6 +144,11 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
                     "required": ["text"]
                 }),
             ),
+            tool(
+                "context.usage",
+                "How full your context window is: percent used, tokens per bucket (system prompt, tools, rules, skills, summarized conversation, conversation), and the input tokens of recent turns.",
+                no_args(),
+            ),
         ]);
     }
     tools.extend([
@@ -183,6 +189,7 @@ fn main_only(name: &str) -> bool {
         || name.starts_with("goal.")
         || name.starts_with("preferences.")
         || name.starts_with("status.")
+        || name == "context.usage"
 }
 
 pub async fn call(zeron: &Zeron, name: &str, args: Value) -> Result<Value, String> {
@@ -225,6 +232,7 @@ fn op_for(name: &str) -> &'static str {
         "goal.clear" => "goal_clear",
         "preferences.write" => "preferences_write",
         "status.step" => "step",
+        "context.usage" => "context_usage",
         "context.read" => "read",
         "context.write" => "write",
         _ => "",
@@ -264,6 +272,7 @@ mod tests {
             "goal.clear",
             "preferences.write",
             "status.step",
+            "context.usage",
             "context.read",
             "context.write",
         ] {
@@ -275,7 +284,7 @@ mod tests {
         for name in &main {
             assert_eq!(
                 main_only(name),
-                !name.starts_with("context."),
+                !worker.contains(name),
                 "{name} is gated wrong"
             );
         }
