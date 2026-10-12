@@ -43,8 +43,10 @@ jobs:
           # main is a newer build, so the update strip can offer a restart.
           export ARBOS_BUILD="$(git rev-list --count HEAD)"
           scripts/package-linux.sh
-      - name: Write the release manifest
+      - name: Merge the release manifest
         working-directory: app
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           ver=$(tr -d '\n' < target/package/version.txt)
@@ -52,17 +54,11 @@ jobs:
           name="arbos-${ver}-linux-${arch}.tar.gz"
           tarball="target/package/${name}"
           test -f "$tarball"
-          python3 - "$ver" "$name" "$tarball" <<'PY'
-          import hashlib, json, pathlib, sys
-          version, name, tarball = sys.argv[1:]
-          path = pathlib.Path(tarball)
-          digest = hashlib.sha256(path.read_bytes()).hexdigest()
-          manifest = {"version": version, "files": {name: {"sha256": digest}}}
-          pathlib.Path("target/package/manifest.json").write_text(json.dumps(manifest) + "\n")
-          pathlib.Path("target/package/latest.txt").write_text(version + "\n")
-          print(name)
-          print(digest)
-          PY
+          digest=$(sha256sum "$tarball" | cut -d' ' -f1)
+          # The Mac workflow publishes to the same manifest. Start from the
+          # one on the release so its entries survive instead of overwriting it.
+          scripts/ci/fetch-release-manifest.sh edge target/package
+          scripts/ci/merge-release-manifest.py target/package/manifest.json "$ver" "${name}=${digest}"
       - name: Refuse a Mac artifact
         working-directory: app
         run: |
@@ -95,10 +91,10 @@ jobs:
           test -f "$name"
           test -f manifest.json
           test -f latest.txt
-          notes="Linux tarball only. This release does not include a Mac disk image or an unsigned Mac build."
+          notes="Arbos edge builds from main. The Linux tarball is published by the Linux tarball workflow. The Mac app is published by the macOS release workflow, signed and notarized."
           if ! gh release view edge >/dev/null 2>&1; then
             gh release create edge \
-              --title "Linux edge" \
+              --title "Arbos edge" \
               --notes "$notes" \
               --target "${{ github.event.workflow_run.head_sha }}"
           fi
