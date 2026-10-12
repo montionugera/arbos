@@ -10,6 +10,9 @@ const SQUEEZED_WINDOW: f32 = 1160.0;
 /// What the rail, the conversation and the surface host leave Files there.
 const SQUEEZED_FILES: f32 =
     SQUEEZED_WINDOW - project_chrome::RAIL_WIDTH - CHAT_PANEL_MIN - RIGHT_PANE_MIN;
+/// Too narrow for the rail beside the other three columns (968px), so the
+/// fit hides the rail, the oldest of them; Files still has its own width.
+const NARROW_WINDOW: f32 = 960.0;
 
 struct ClosedFixture;
 impl Render for ClosedFixture {
@@ -380,7 +383,7 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 window
                     .update(cx, |shell, window, cx| {
                         shell.toggle_right_pane_expand(cx);
-                        window.resize(gpui::size(px(1000.0), px(720.0)));
+                        window.resize(gpui::size(px(NARROW_WINDOW), px(720.0)));
                         window.bounds_changed(cx);
                     })
                     .unwrap();
@@ -407,7 +410,10 @@ fn files_panel_workspace_navigation_and_external_updates() {
                         // The narrow fit already hid the sidebar. Takeover must
                         // keep it hidden and give only the chat's space to the editor.
                         assert_eq!(shell.sidebar_now(), 0.0);
-                        assert_eq!(shell.right_visible_width(cx), 1000.0 - FILES_PANEL_DEFAULT);
+                        assert_eq!(
+                            shell.right_visible_width(cx),
+                            NARROW_WINDOW - FILES_PANEL_DEFAULT
+                        );
                         shell.toggle_right_pane_expand(cx);
                     })
                     .unwrap();

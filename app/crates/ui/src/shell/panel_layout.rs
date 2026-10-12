@@ -94,8 +94,13 @@ pub(super) fn horizontal_panel_fit(
         } else {
             CHAT_PANEL_MIN
         };
+        // The left column is the fixed rail, not the resizable sidebar.
         let minimum = chat_floor
-            + if sidebar_open { SIDEBAR_MIN } else { 0.0 }
+            + if sidebar_open {
+                project_chrome::RAIL_WIDTH
+            } else {
+                0.0
+            }
             + if right_open { RIGHT_PANE_MIN } else { 0.0 }
             + if files_open { FILES_PANEL_MIN } else { 0.0 };
         if minimum <= viewport {
@@ -649,5 +654,37 @@ impl Shell {
             self.split_panel_widths(cx);
             self.split_viewport = Some(viewport);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every column open: the rail, the conversation, the surface host and
+    /// Files at their minimums. The oldest column hides one pixel below it.
+    #[test]
+    fn the_fit_budgets_the_rail_for_the_left_column() {
+        let all = project_chrome::RAIL_WIDTH + CHAT_PANEL_MIN + RIGHT_PANE_MIN + FILES_PANEL_MIN;
+        assert_eq!(all, 968.0);
+        let fit = |viewport| {
+            horizontal_panel_fit(
+                viewport,
+                SIDEBAR_DEFAULT,
+                (true, 1),
+                (true, 2),
+                (true, 3),
+                false,
+            )
+        };
+        let whole = fit(all);
+        assert!(whole.sidebar && whole.right && whole.files);
+        assert_eq!(whole.sidebar_limit, project_chrome::RAIL_WIDTH);
+        // The old sidebar's minimum would have hidden a panel up to 1122px.
+        let roomy = fit(SIDEBAR_MIN + CHAT_PANEL_MIN + RIGHT_PANE_MIN + FILES_PANEL_MIN - 1.0);
+        assert!(roomy.sidebar && roomy.right && roomy.files);
+        let short = fit(all - 1.0);
+        assert!(!short.sidebar, "the oldest column goes first");
+        assert!(short.right && short.files);
     }
 }

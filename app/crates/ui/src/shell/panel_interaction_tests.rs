@@ -65,8 +65,9 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
 const RAIL: f32 = project_chrome::RAIL_WIDTH;
 /// Leaves 1300px beside the rail for the three other columns.
 const WINDOW: f32 = RAIL + 1300.0;
-/// Room for the rail and two of the three other columns, not all three.
-const NARROW: f32 = 1000.0;
+/// Room for the rail and two of the three other columns, not all three
+/// (their minimums add up to 968px).
+const NARROW: f32 = 940.0;
 
 fn change(
     shell: &Entity<Shell>,
