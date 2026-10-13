@@ -238,10 +238,7 @@ impl Shell {
             strip = strip.child(self.overflow_tab(hidden, next, &theme, cx));
         }
         strip = strip.child(self.new_chat_tab(&theme, cx));
-        strip
-            .child(div().flex_1())
-            .child(self.context_tab(surface, &theme, cx))
-            .into_any_element()
+        strip.child(div().flex_1()).into_any_element()
     }
 
     pub(super) fn render_icon_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1486,27 +1483,6 @@ impl Shell {
             .into_any_element()
     }
 
-    fn context_tab(&self, surface: Surface, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let active = surface == Surface::Context;
-        div()
-            .id("project-tab-context")
-            .h(px(26.0))
-            .px(px(10.0))
-            .flex()
-            .items_center()
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .text_size(px(12.0))
-            .text_color(if active { theme.text } else { theme.text_muted })
-            .bg(if active {
-                theme.element_hover
-            } else {
-                gpui::transparent_black()
-            })
-            .child("Context")
-            .on_click(cx.listener(|this, _, _, cx| this.show_project_context(cx)))
-            .into_any_element()
-    }
 }
 
 enum StatusBlock {

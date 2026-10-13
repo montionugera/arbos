@@ -64,7 +64,7 @@ use crate::terminal::panel::{clamp_terminal_height, TerminalPanel, ToggleTermina
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
 
-mod actions_ui;
+mod worktree_setup;
 mod chat_dropzone;
 #[cfg(test)]
 mod chat_dropzone_tests;
@@ -85,7 +85,6 @@ use panel_layout::{panel_content_tween, AuxiliaryPanel, FitInputs, HorizontalPan
 mod panel_interaction_tests;
 pub(crate) mod project_icon;
 mod search_warm;
-mod session_info;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -2024,8 +2023,6 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
-    /// Host-owned project Actions cached per (device, space).
-    project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
     /// scope/base pick and diff watch (multiple diff panels, user request).
     diffs: std::collections::HashMap<u64, Entity<Changes>>,
@@ -2240,8 +2237,6 @@ pub struct Shell {
     project: project_chrome::ProjectChrome,
     sidebar_tween: Option<WidthTween>,
     files_tween: Option<WidthTween>,
-    /// The session card's reveal (0 closed → 1 open).
-    session_info_tween: Option<WidthTween>,
     files_content_tween: Option<WidthTween>,
     /// The last tracked frame: its chat, the window fit, and for each of
     /// `[sidebar, surface host, Files]` the width painted and the width its
@@ -2550,7 +2545,6 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
-            project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
             files_subs: std::collections::HashMap::new(),
@@ -2688,7 +2682,6 @@ impl Shell {
             project: project_chrome::ProjectChrome::default(),
             sidebar_tween: None,
             files_tween: None,
-            session_info_tween: None,
             files_content_tween: None,
             painted_columns: None,
             fit_exits: [None; 3],
@@ -10872,9 +10865,6 @@ impl Shell {
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
-        if let Some(overlay) = self.render_project_action_overlay(viewport, window, cx) {
-            overlays.push(overlay);
-        }
 
         if let Some(chat_id) = self.delete_confirm.clone() {
             let title = transcript::single_line(
@@ -11192,35 +11182,13 @@ impl Shell {
         }
         self.composer
             .update(cx, |composer, cx| composer.set_dock_frame(dock_frame, cx));
-        // The session card: docked, the transcript holds its room free on
-        // the right and the composer follows the column left by half of it,
-        // so column and card center together.
-        let session_reveal = if has_selection {
-            self.session_info_reveal()
-        } else {
-            0.0
-        };
-        // The column's LIVE width: while the sidebar or a pane animates,
-        // `main_content_width` already holds the end width, and a reserve or
-        // card placed from it would jump ahead of the column and wait.
-        let live_main_width = (self.viewport_width
-            - self.sidebar_now()
-            - self.right_visible_width(cx)
-            - self.files_visible_width(cx))
-        .max(0.0);
-        let session_layout =
-            session_info::session_card_layout(live_main_width, ui_settings.transcript_width);
-        let session_reserve = session_layout.reserve * session_reveal;
-        self.transcript.update(cx, |transcript, cx| {
-            transcript.set_right_reserve(session_reserve, cx)
-        });
         // Panel open/close glides the composer width; a window resize or a
         // seam drag is direct manipulation, so the width tracks the pointer.
         let direct_width =
             self.reduced_motion || self.viewport_resized || self.pane_resize_dragging.is_some();
         let composer_width = self.composer_dock.borrow_mut().layout_width(
             composer_target_width(
-                main_content_width - session_reserve,
+                main_content_width,
                 ui_settings.transcript_width,
                 has_selection,
             ),
@@ -11373,16 +11341,7 @@ impl Shell {
         } else {
             None
         };
-        let status = div()
-            .relative()
-            .left(px(-session_reserve / 2.0))
-            .child(self.render_status_strip(composer_width, cx));
-        let session_card = self.render_session_info(
-            session_layout,
-            session_reveal,
-            self.viewport_height - Theme::TITLEBAR_HEIGHT - self.bottom_stack.get() - 24.0,
-            cx,
-        );
+        let status = self.render_status_strip(composer_width, cx);
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
@@ -11446,7 +11405,6 @@ impl Shell {
                         ))
                 },
             )
-            .children(session_card)
             .when_some(harness_update_card, |column, chip| {
                 // Home notices stay anchored to the window bottom, behind the
                 // dock. Clip paint and hitboxes at the same measured terminal
@@ -11528,7 +11486,6 @@ impl Shell {
                                     div()
                                         .id("persistent-composer")
                                         .relative()
-                                        .left(px(-session_reserve / 2.0))
                                         .w(px(composer_width))
                                         .opacity(composer_opacity)
                                         .mx_auto()

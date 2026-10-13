@@ -850,9 +850,6 @@ pub struct UiSettings {
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_space_id: Option<String>,
-    /// Last successfully launched Action per project in this viewport.
-    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub last_project_action_by_space_id: std::collections::HashMap<String, String>,
     /// Open session tabs in visual order (drag-reorder edits in place).
     /// Device-local: a tab is a local viewport onto the synced session list —
     /// closing one never archives the session. Ids of archived/deleted chats
@@ -976,9 +973,6 @@ pub struct UiSettings {
     pub files_word_wrap: bool,
     /// Include hidden and ignored entries in workspace file trees.
     pub files_show_all: bool,
-    /// The session card (project, device, side chats, actions) beside the
-    /// transcript.
-    pub session_info_open: bool,
     /// Interactive identity overlay; imported themes default to their own accent.
     pub accent: zeron_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
@@ -1031,7 +1025,6 @@ impl Default for UiSettings {
             sidebar_show_project_filter: true,
             github_star_banner_dismissed: false,
             last_space_id: None,
-            last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
@@ -1086,7 +1079,6 @@ impl Default for UiSettings {
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
             files_show_all: false,
-            session_info_open: false,
             accent: zeron_theme::AccentSelection::default(),
             surface: zeron_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
@@ -1682,7 +1674,6 @@ impl UiSettings {
             sidebar_show_project_filter,
             github_star_banner_dismissed,
             last_space_id,
-            last_project_action_by_space_id,
             open_tabs,
             space_filter,
             sidebar_sections_by_profile,
@@ -1729,7 +1720,6 @@ impl UiSettings {
             files_autosave_delay_ms,
             files_word_wrap,
             files_show_all,
-            session_info_open,
             accent,
             surface,
             new_thread_composer_background,
@@ -2709,10 +2699,6 @@ mod tests {
             sidebar_show_project_filter: false,
             github_star_banner_dismissed: true,
             last_space_id: Some("space-1".into()),
-            last_project_action_by_space_id: std::collections::HashMap::from([(
-                "space-1".into(),
-                "dev".into(),
-            )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
             sidebar_sections_by_profile: HashMap::new(),
@@ -2804,7 +2790,6 @@ mod tests {
             code_font_family: crate::typography::UiFontFamily::Geist,
             code_font_size: 11.0,
             files_show_all: true,
-            session_info_open: true,
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
             new_thread_composer_background: Some(NewThreadComposerBackground {
