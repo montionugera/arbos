@@ -939,6 +939,73 @@ async fn a_turn_interrupted_by_quit_resumes_on_the_next_launch() {
     }
 }
 
+/// Boot recovery runs inside assembly, before the app tells the engine which
+/// IPC port it serves. A revived run must still carry the engine's MCP
+/// server — on the rig a worker resumed after an update had no `arbos` tools
+/// ("No MCP runtime is available") because it started before the port was
+/// known. The revival waits for `set_ipc_port`, which follows assembly.
+#[tokio::test]
+async fn a_run_revived_at_boot_carries_the_engines_tools() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("device-id"), "dev-tools").unwrap();
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let harness = |held: bool| HoldsUntilInterrupted {
+        requests: requests.clone(),
+        held: Arc::new(Mutex::new(held)),
+    };
+
+    {
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(harness(true)));
+        let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
+            .expect("engine core assembles");
+        pre_title(&core);
+        queue_run(&core, "finish the pull request", "/tmp", "msg-user-1");
+        wait_for(
+            || {
+                entries_now(&core)
+                    .iter()
+                    .any(|e| e.status == Some(MessageStatus::Streaming))
+            },
+            "the held turn to start streaming",
+        )
+        .await;
+        core.shutdown().await;
+        drop(core);
+    }
+
+    // Relaunch: the port is told a moment after assembly, as in the app,
+    // where the revival task has already had its first turn on the runtime.
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(harness(false)));
+    let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    core.sessions.set_ipc_port(4321);
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "the interrupted turn to complete after relaunch",
+    )
+    .await;
+    let recorded = requests.lock().unwrap().clone();
+    let revived = recorded
+        .iter()
+        .skip(1)
+        .find(|r| r.prompt == "finish the pull request")
+        .expect("the relaunch re-dispatched the interrupted prompt");
+    let mcp = revived
+        .mcp
+        .as_ref()
+        .expect("the revived run carries the engine's MCP server");
+    assert_eq!(
+        mcp.env.get("ZERON_IPC_PORT").map(String::as_str),
+        Some("4321")
+    );
+    core.shutdown().await;
+}
+
 /// The agent reports where it runs with symlinks resolved; the chat names
 /// its folder through the symlink. A crash mid-turn leaves the resolved
 /// spelling stored (only a turn's Done restores the request's), and the

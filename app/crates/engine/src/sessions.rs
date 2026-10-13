@@ -209,6 +209,10 @@ struct Inner {
     /// Loopback IPC port this engine serves, once known (0 = not serving):
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
+    /// The same port as a signal: a run revived at boot waits on it, since
+    /// boot recovery runs before the port is served and a run that starts
+    /// earlier gets no `arbos` tools.
+    ipc_port_tx: watch::Sender<u16>,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
@@ -264,6 +268,7 @@ impl SessionsEngine {
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
                 cancelled_sends: Mutex::new(HashMap::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
+                ipc_port_tx: watch::Sender::new(0),
                 journal,
                 registry,
                 doc_host: Mutex::new(None),
@@ -291,6 +296,22 @@ impl SessionsEngine {
         self.inner
             .ipc_port
             .store(port, std::sync::atomic::Ordering::Relaxed);
+        self.inner.ipc_port_tx.send_replace(port);
+    }
+
+    /// Boot recovery revives runs before the engine serves its IPC port
+    /// (`set_ipc_port` follows assembly), and a run that starts before the
+    /// port is known gets no `arbos` tools: on the rig a worker resumed after
+    /// an update answered every `context.*` call with "No MCP runtime is
+    /// available". Wait for the port, briefly — an engine that serves none
+    /// (tests, a viewport without a port) goes on after the grace as before.
+    async fn await_agent_tools(&self) {
+        const GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut port = self.inner.ipc_port_tx.subscribe();
+        if *port.borrow() != 0 {
+            return;
+        }
+        let _ = tokio::time::timeout(GRACE, port.wait_for(|port| *port != 0)).await;
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -1372,6 +1393,7 @@ impl SessionsEngine {
         let attempt = self.inner.journal.note_resume_attempt(&chat_id);
         let sessions = self.clone();
         tokio::spawn(async move {
+            sessions.await_agent_tools().await;
             let Some(host) = sessions.inner.doc_host() else {
                 return;
             };
