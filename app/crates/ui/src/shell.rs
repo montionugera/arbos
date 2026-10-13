@@ -4290,6 +4290,9 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::ForkThrough { chat_id, entry_id } => {
+                self.fork_chat_through(chat_id, entry_id.clone(), cx);
+            }
         }
     }
 

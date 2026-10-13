@@ -111,9 +111,9 @@ pub(super) struct ProjectRow {
     home: String,
 }
 
-struct ChatTab {
+pub(super) struct ChatTab {
     id: String,
-    title: String,
+    pub(super) title: String,
     main: bool,
     worker: bool,
     /// `working`, `waiting`, `done`, `error`, `stopped`, or empty.
@@ -1175,7 +1175,7 @@ impl Shell {
         })
     }
 
-    fn chat_tabs(&self, space_id: &str, cx: &gpui::App) -> Vec<ChatTab> {
+    pub(super) fn chat_tabs(&self, space_id: &str, cx: &gpui::App) -> Vec<ChatTab> {
         let state = self.state.read(cx);
         let path = state
             .spaces

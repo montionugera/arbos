@@ -1114,6 +1114,10 @@ pub struct Row {
     /// settled row, beside the timestamp; tools and transport-only metadata
     /// are deliberately excluded.
     pub copy_text: Option<SharedString>,
+    /// The entry-level hover strip offers Fork here: the last row of a
+    /// completed assistant entry, where a new chat can branch off with the
+    /// conversation through this message.
+    pub fork_point: bool,
     /// Hidden while the named compact-work fold is closed.
     pub compact_fold: Option<SharedString>,
 }
@@ -1629,6 +1633,7 @@ pub fn rows_for_entry(
             // `createdAt` exists — the optimistic echo included).
             timestamp: Some(entry.created_at),
             copy_text,
+            fork_point: false,
             compact_fold: None,
         }];
     }
@@ -1689,6 +1694,7 @@ pub fn rows_for_entry(
                 entry_id: entry.id.clone().into(),
                 timestamp: None,
                 copy_text: None,
+                fork_point: false,
                 compact_fold: None,
             });
             *group_ix += 1;
@@ -1832,6 +1838,7 @@ pub fn rows_for_entry(
                                 entry_id: entry_id.clone(),
                                 timestamp: None,
                                 copy_text: None,
+                                fork_point: false,
                                 compact_fold: None,
                                 kind: if streaming {
                                     RowKind::LiveMarkdown {
@@ -1863,6 +1870,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             timestamp: None,
                             copy_text: None,
+                            fork_point: false,
                             compact_fold: None,
                             kind: RowKind::GeneratedImage {
                                 owner: entry.device_id.clone(),
@@ -1897,6 +1905,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             timestamp: None,
                             copy_text: None,
+                            fork_point: false,
                             compact_fold: None,
                         });
                     }
@@ -1915,6 +1924,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             timestamp: None,
                             copy_text: None,
+                            fork_point: false,
                             compact_fold: None,
                         });
                     }
@@ -1934,6 +1944,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             timestamp: None,
                             copy_text: None,
+                            fork_point: false,
                             compact_fold: None,
                         });
                     }
@@ -1972,6 +1983,7 @@ pub fn rows_for_entry(
                 row.turn_start = false;
                 row.timestamp = None;
                 row.copy_text = None;
+                row.fork_point = false;
                 row.compact_fold = Some(work_id.clone());
             }
             let header = Row {
@@ -1995,6 +2007,7 @@ pub fn rows_for_entry(
                 entry_id: entry.id.clone().into(),
                 timestamp: None,
                 copy_text: None,
+                fork_point: false,
                 compact_fold: None,
             };
             let pos = compact_group_pos.unwrap_or(rows.len());
@@ -2025,6 +2038,10 @@ pub fn rows_for_entry(
     {
         last.timestamp = Some(entry.created_at);
         last.copy_text = assistant_copy_text(entry);
+        // A fork copies the history through the latest completed response,
+        // so only a completed assistant entry is a place to branch from.
+        last.fork_point = entry.role == MessageRole::Assistant
+            && entry.status == Some(MessageStatus::Complete);
         last.version ^= 1 << 62;
     }
     rows
@@ -3621,6 +3638,9 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// The message footer's Fork: a new chat of the same project seeded
+    /// with `chat_id`'s conversation through the entry `entry_id`.
+    ForkThrough { chat_id: String, entry_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -7783,6 +7803,12 @@ impl Transcript {
         let copied_message = self.copied_message.as_ref() == Some(&row.entry_id);
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
+        // Fork branches the conversation this transcript shows; a subagent's
+        // read-only doc is not a conversation to branch.
+        let fork_chat_id = row
+            .fork_point
+            .then(|| self.doc_override.is_none().then(|| self.chat_id.clone()).flatten())
+            .flatten();
         let strip = row.timestamp.map(|ms| {
             let timestamp = div()
                 .text_size(crate::typography::ui_rems(12.0))
@@ -7793,6 +7819,7 @@ impl Transcript {
                 let fade_key = format!("copy-message-hover-{entry_id}");
                 div()
                     .id(SharedString::from(format!("copy-message-{entry_id}")))
+                    .debug_selector(|| format!("copy-message-{entry_id}"))
                     .size(px(Theme::SPACE_MD * 2.0))
                     .flex()
                     .items_center()
@@ -7821,12 +7848,46 @@ impl Transcript {
                         .text_color(theme.text_muted),
                     )
             });
+            let fork = fork_chat_id.map(|chat_id| {
+                let entry_id = copy_entry_id.clone();
+                let fade_key = format!("fork-message-hover-{entry_id}");
+                div()
+                    .id(SharedString::from(format!("fork-message-{entry_id}")))
+                    .debug_selector(|| format!("fork-message-{entry_id}"))
+                    .role(gpui::Role::Button)
+                    .aria_label("Fork chat from here")
+                    .size(px(Theme::SPACE_MD * 2.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(Theme::CONTROL_RADIUS))
+                    .cursor_pointer()
+                    .bg(motion::hover_blend(
+                        &fade_key,
+                        gpui::transparent_black(),
+                        crate::theme::ink(0.08),
+                    ))
+                    .on_hover(motion::hover_listener(fade_key))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(TranscriptEvent::ForkThrough {
+                            chat_id: chat_id.clone(),
+                            entry_id: entry_id.to_string(),
+                        });
+                    }))
+                    .tooltip(crate::settings::widgets::text_tooltip("Fork chat from here"))
+                    .child(
+                        crate::icons::icon(crate::icons::FORK)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+            });
             let metadata = div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM));
-            let metadata = metadata.child(timestamp).children(copy);
+            let metadata = metadata.child(timestamp).children(copy).children(fork);
             div()
                 .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
                 .pt(px(Theme::SPACE_SM))
@@ -11721,6 +11782,7 @@ mod tests {
             entry_id: entry_id.into(),
             timestamp: None,
             copy_text: None,
+            fork_point: false,
             compact_fold: None,
         }
     }
@@ -12210,6 +12272,58 @@ mod tests {
             Some(command)
         );
         crate::markdown::selection::clear_if_owner("probe-0");
+    }
+
+    /// The hover strip under a finished assistant message offers Fork beside
+    /// Copy; an aborted reply still shows its strip, but a fork copies the
+    /// history through the latest completed response, so it has no Fork.
+    #[gpui::test]
+    fn message_footer_offers_fork_on_completed_assistant_messages(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        for (status, expect_fork) in [
+            (MessageStatus::Aborted, false),
+            (MessageStatus::Complete, true),
+        ] {
+            cx.update(|_, cx| {
+                state.update(cx, |state, _| {
+                    state.selected_chat = Some("chat-a".into());
+                    state.transcript_replayed = true;
+                    state.transcript = vec![assistant(
+                        "reply",
+                        status,
+                        vec![text_part("text", "Done.")],
+                    )];
+                    state.transcript_revision += 1;
+                });
+                transcript.update(cx, |this, cx| {
+                    this.sync(cx);
+                    let row = this.rows.last().expect("the reply has a row").clone();
+                    this.hovered_entry = Some((row.id.clone(), row.entry_id.clone()));
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            assert_eq!(cx.debug_bounds("fork-message-reply").is_some(), expect_fork);
+            assert!(cx.debug_bounds("copy-message-reply").is_some());
+        }
     }
 
     #[gpui::test]
