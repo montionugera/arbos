@@ -85,7 +85,10 @@ mod project_chrome;
 use panel_layout::{panel_content_tween, AuxiliaryPanel, FitInputs, HorizontalPanelFit};
 #[cfg(test)]
 mod panel_interaction_tests;
+pub(crate) mod project_glyph;
 pub(crate) mod project_icon;
+#[cfg(test)]
+mod project_rail_tests;
 #[cfg(test)]
 mod project_tabs_tests;
 mod search_warm;
@@ -10541,6 +10544,15 @@ impl Shell {
             self.finish_rename_chat(false, cx);
             return true;
         }
+        if self.renaming_project() {
+            self.finish_rename_project(false, cx);
+            return true;
+        }
+        if self.project.icon_for.is_some() {
+            self.project.icon_for = None;
+            cx.notify();
+            return true;
+        }
         if self.rename_space_dialog.is_some() {
             self.rename_space_dialog = None;
             cx.notify();
@@ -13437,6 +13449,7 @@ impl Render for Shell {
             }
         }
         self.focus_rename_chat(window, cx);
+        self.focus_rename_project(window, cx);
 
         self.render_time = Some(self.motion_time());
         if self.all_file_edits_flushed(cx)
