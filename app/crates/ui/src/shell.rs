@@ -4079,8 +4079,7 @@ impl Shell {
                     }
                     // Footer rows exist on the explorer only; an editor
                     // surface never emits them.
-                    FilesEvent::OpenSubagent { .. }
-                    | FilesEvent::OpenChildChat(_)
+                    FilesEvent::OpenChildChat(_)
                     | FilesEvent::RenameChildChat(_)
                     | FilesEvent::ChildChatContextMenu { .. }
                     | FilesEvent::NewChildChat

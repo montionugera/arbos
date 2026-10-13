@@ -33,7 +33,6 @@ pub mod preview;
 mod rename;
 pub mod search;
 mod sections;
-mod subagents;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tree;
@@ -213,12 +212,6 @@ pub enum FilesEvent {
     ShowAllFilesChanged(bool),
     CloseReady,
     CloseCancelled,
-    /// A footer row: open this subagent's transcript in the right pane.
-    OpenSubagent {
-        doc_id: String,
-        title: String,
-        frozen: bool,
-    },
     /// A footer row: open this side chat (by id) in the right pane.
     OpenChildChat(String),
     /// A footer row's double-click: edit this side chat's title in place.
@@ -306,7 +299,7 @@ pub struct FilesSurface {
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
     started: bool,
-    /// The Subagents / Chats footer under the tree.
+    /// The Chats footer under the tree.
     sections: sections::ExplorerSections,
     _observe: Subscription,
     _search_events: Subscription,
@@ -336,8 +329,8 @@ impl Render for FilesSurface {
             self.render_explorer(&theme, cx).into_any_element()
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
-        // The explorer docks its Subagents / Chats sections under the tree;
-        // an editor surface has no footer.
+        // The explorer docks its Chats section under the tree; an editor
+        // surface has no footer.
         let sections = (!is_editor).then(|| self.render_sections(&theme, cx));
         div()
             .id(SharedString::from(format!(

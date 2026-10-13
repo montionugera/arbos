@@ -428,13 +428,6 @@ impl Shell {
             content_width,
         } = self.titlebar_trailing_layout(on_canvas, cx);
 
-        let running_subagents = {
-            let state = self.state.read(cx);
-            state
-                .selected_chat
-                .as_deref()
-                .map_or(0, |chat| state.running_subagents_for(chat, Utc::now()))
-        };
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -552,15 +545,6 @@ impl Shell {
                                 .aria_label(files_panel_label)
                                 .when(self.files_panel_open(cx) && fit.files, |button| {
                                     button.bg(crate::theme::wash(0.09))
-                                })
-                                // Running subagents live in this panel: mark the
-                                // button so they are findable while it is closed.
-                                .when(running_subagents > 0, |button| {
-                                    crate::running_pill::mark_files_button(
-                                        button,
-                                        running_subagents,
-                                        &theme,
-                                    )
                                 }),
                             )
                             .child(header_icon_button_with(
