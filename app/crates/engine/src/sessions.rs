@@ -1250,21 +1250,7 @@ impl SessionsEngine {
                 self.inner
                     .remember_harness_session(&chat_id, &session_id, &cwd);
             }
-            // The revival prompt: the last user message (idempotent re-dispatch
-            // under the SAME id — `write_user_message` dedupes by id, so the
-            // transcript never shows a duplicate).
-            let prompt = handle.doc().read_entries().ok().and_then(|entries| {
-                entries
-                    .iter()
-                    .rev()
-                    .find(|e| e.role == MessageRole::User)
-                    .and_then(|e| {
-                        e.parts.iter().find_map(|p| match p {
-                            MessagePart::Text { text, .. } => Some((e.id.clone(), text.clone())),
-                            _ => None,
-                        })
-                    })
-            });
+            let prompt = Self::revival_prompt(&handle);
             let attempts = self.inner.journal.resume_attempts(&chat_id);
             // Fresh: the crashed reply's streaming entry is recent — or no
             // reply entry reached disk at all (the doc saves on a debounce,
@@ -1305,73 +1291,145 @@ impl SessionsEngine {
             if !will_resume {
                 continue;
             }
-            let attempt = self.inner.journal.note_resume_attempt(&chat_id);
             let (user_id, prompt_text) = prompt.expect("gated by will_resume");
-            let sessions = self.clone();
-            tokio::spawn(async move {
-                let Some(host) = sessions.inner.doc_host() else {
-                    return;
-                };
-                let request = sessions
-                    .last_request(&chat_id)
-                    .or_else(|| host.request_from_chat_row(&chat_id, &prompt_text))
-                    // Last resort: the journal's own cwd (zeron's draft config)
-                    // — a crash can predate the debounced workspace-row write.
-                    .or_else(|| {
-                        let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
-                        Some(RunRequest {
-                            mcp: None,
-                            prompt: String::new(),
-                            harness: None,
-                            model: None,
-                            reasoning: None,
-                            model_options: Default::default(),
-                            cwd,
-                            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                            auto_approve: false,
-                            attachments: Vec::new(),
-                            resume: None,
-                            worktree: None,
-                        })
-                    });
-                let Some(mut request) = request else {
-                    tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
-                    return;
-                };
-                request.prompt = prompt_text;
-                request.resume = None; // dispatch re-injects the remembered session
-                request.attachments = Vec::new();
-                let harness_id = host.harness_for_request(&chat_id, &request);
-                match host
-                    .dispatch_with_source_context(
-                        &sessions,
-                        &chat_id,
-                        harness_id,
-                        request,
-                        Some(user_id),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(chat = %chat_id, attempt, "auto-resumed crashed run")
-                    }
-                    Err(err) => {
-                        tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
-                    }
-                }
-            });
+            self.revive(chat_id, user_id, prompt_text, "auto-resumed crashed run");
         }
+        recovered += self.resume_interrupted_by_quit()?;
         Ok(recovered)
     }
 
-    /// Graceful shutdown: interrupt every live run so streaming entries settle.
+    /// Launch recovery for the runs a graceful shutdown interrupted: Quit, or
+    /// the in-app update relaunching Arbos, ends every live turn cleanly, so
+    /// the journal closes in `Done{interrupted}` and the crash scan above
+    /// never sees it. Without this, a worker mid-task stayed `working` in its
+    /// `agent.toml` for ever, no child ran for it, and Main was never told
+    /// (seen on 2026-10-13: an update orphaned `pill-count-rows` while it
+    /// watched its pull request's CI). Each marked run is picked back up the
+    /// way a crashed one is — same prompt id, same remembered harness
+    /// session, same revival budget — when the quit is fresh.
+    fn resume_interrupted_by_quit(&self) -> Result<usize, EngineError> {
+        const MAX_AUTO_RESUME: u32 = 3;
+        const RESUME_FRESH_MS: i64 = 12 * 60 * 60 * 1000;
+
+        let mut resumed = 0usize;
+        for (chat_id, quit_at_ms) in self.inner.journal.take_interrupted_by_quit()? {
+            if lock(&self.inner.runs).contains_key(&chat_id) {
+                continue;
+            }
+            let fresh = now_ms() - quit_at_ms < RESUME_FRESH_MS;
+            let attempts = self.inner.journal.resume_attempts(&chat_id);
+            let handle = self.doc_handle(&chat_id)?;
+            let prompt = Self::revival_prompt(&handle);
+            let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
+            tracing::info!(chat = %chat_id, will_resume, attempts, fresh, "run interrupted when Arbos quit");
+            if !will_resume {
+                continue;
+            }
+            let (user_id, prompt_text) = prompt.expect("gated by will_resume");
+            self.revive(
+                chat_id,
+                user_id,
+                prompt_text,
+                "resumed run interrupted when Arbos quit",
+            );
+            resumed += 1;
+        }
+        Ok(resumed)
+    }
+
+    /// The revival prompt: the last user message (idempotent re-dispatch
+    /// under the SAME id — `write_user_message` dedupes by id, so the
+    /// transcript never shows a duplicate).
+    fn revival_prompt(handle: &ChatDocHandle) -> Option<(String, String)> {
+        handle.doc().read_entries().ok().and_then(|entries| {
+            entries
+                .iter()
+                .rev()
+                .find(|e| e.role == MessageRole::User)
+                .and_then(|e| {
+                    e.parts.iter().find_map(|p| match p {
+                        MessagePart::Text { text, .. } => Some((e.id.clone(), text.clone())),
+                        _ => None,
+                    })
+                })
+        })
+    }
+
+    /// Re-dispatch an interrupted turn against its remembered harness session.
+    fn revive(&self, chat_id: String, user_id: String, prompt_text: String, outcome: &'static str) {
+        let attempt = self.inner.journal.note_resume_attempt(&chat_id);
+        let sessions = self.clone();
+        tokio::spawn(async move {
+            let Some(host) = sessions.inner.doc_host() else {
+                return;
+            };
+            let request = sessions
+                .last_request(&chat_id)
+                .or_else(|| host.request_from_chat_row(&chat_id, &prompt_text))
+                // Last resort: the journal's own cwd (zeron's draft config)
+                // — a crash can predate the debounced workspace-row write.
+                .or_else(|| {
+                    let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
+                    Some(RunRequest {
+                        mcp: None,
+                        prompt: String::new(),
+                        harness: None,
+                        model: None,
+                        reasoning: None,
+                        model_options: Default::default(),
+                        cwd,
+                        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                        auto_approve: false,
+                        attachments: Vec::new(),
+                        resume: None,
+                        worktree: None,
+                    })
+                });
+            let Some(mut request) = request else {
+                tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
+                return;
+            };
+            request.prompt = prompt_text;
+            request.resume = None; // dispatch re-injects the remembered session
+            request.attachments = Vec::new();
+            let harness_id = host.harness_for_request(&chat_id, &request);
+            match host
+                .dispatch_with_source_context(
+                    &sessions,
+                    &chat_id,
+                    harness_id,
+                    request,
+                    Some(user_id),
+                )
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(chat = %chat_id, attempt, "{outcome}")
+                }
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
+                }
+            }
+        });
+    }
+
+    /// Graceful shutdown: interrupt every live run so streaming entries
+    /// settle. A turn still in flight is marked so the next launch resumes
+    /// it (`resume_interrupted_by_quit`); a parked idle runtime is not a
+    /// turn and is simply closed.
     pub async fn shutdown(&self) {
         self.inner
             .shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
         self.inner.voice.retire();
         let chats: Vec<String> = lock(&self.inner.runs).keys().cloned().collect();
+        let quit_at = now_ms();
         for chat_id in chats {
+            if self.turn_in_flight(&chat_id) {
+                self.inner
+                    .journal
+                    .mark_interrupted_by_quit(&chat_id, quit_at);
+            }
             if let Err(err) = self.terminate(&chat_id).await {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
             }

@@ -96,6 +96,44 @@ impl RunJournal {
         let _ = std::fs::remove_file(self.attempts_path(chat_id));
     }
 
+    fn quit_marker_path(&self, chat_id: &str) -> PathBuf {
+        self.dir
+            .join(format!("{}.resume-on-launch", sanitize_id(chat_id)))
+    }
+
+    /// A graceful shutdown (Quit, or the in-app update relaunching Arbos)
+    /// interrupts every live run cleanly, so the journal ends in `Done` and
+    /// the crash scan never sees it. This marker, holding the quit time in
+    /// ms, is what tells the next launch to pick the run back up.
+    pub fn mark_interrupted_by_quit(&self, chat_id: &str, at_ms: i64) {
+        if let Err(err) = std::fs::write(self.quit_marker_path(chat_id), at_ms.to_string()) {
+            tracing::warn!(chat = %chat_id, error = %err, "resume-on-launch marker write failed");
+        }
+    }
+
+    /// Chats a graceful shutdown interrupted, with the quit time of each; the
+    /// markers are consumed so one quit never revives a run twice.
+    pub fn take_interrupted_by_quit(&self) -> Result<Vec<(String, i64)>, JournalError> {
+        let mut marked = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("resume-on-launch") {
+                continue;
+            }
+            let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let at_ms = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            marked.push((chat_id.to_string(), at_ms));
+            let _ = std::fs::remove_file(&path);
+        }
+        marked.sort();
+        Ok(marked)
+    }
+
     /// Append one event; returns its journal seq.
     pub fn append(&self, chat_id: &str, event: &AgentEvent) -> Result<u64, JournalError> {
         let mut files = self.lock();
