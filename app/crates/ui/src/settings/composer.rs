@@ -77,8 +77,10 @@ pub struct ComposerDefaults {
 
 impl ComposerDefaults {
     /// Load from `{data_dir}/composer-defaults.json`; defaults on any failure.
+    /// Picks made for agents this build no longer ships are dropped on the
+    /// way in (see [`Self::forget_unshipped`]).
     pub fn load(data_dir: &Path) -> Self {
-        match std::fs::read_to_string(Self::path(data_dir)) {
+        let mut defaults = match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(text) => match serde_json::from_str::<ComposerDefaults>(&text) {
                 Ok(defaults) => defaults,
                 Err(err) => {
@@ -87,7 +89,44 @@ impl ComposerDefaults {
                 }
             },
             Err(_) => Self::default(),
+        };
+        defaults.forget_unshipped();
+        defaults
+    }
+
+    /// Drop every remembered pick made for a harness this build does not
+    /// ship. The file outlives app updates, so a build that used to offer
+    /// several agents leaves behind a last-used harness, model label and
+    /// effort that would otherwise name a foreign model on the chip until
+    /// the catalog loads (and for good when it fails to load). The global
+    /// effort goes too when the last-used harness was foreign: it was picked
+    /// for that model's ladder. Returns whether anything was dropped.
+    pub fn forget_unshipped(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(harness) = self.harness
+            && !harness.is_shipped()
+        {
+            self.harness = None;
+            self.reasoning = None;
+            changed = true;
         }
+        let before = self.model_by_harness.len()
+            + self.reasoning_by_model.len()
+            + self.model_options_by_model.len()
+            + self.favorites.len();
+        self.model_by_harness
+            .retain(|harness, _| harness.is_shipped());
+        self.reasoning_by_model
+            .retain(|harness, _| harness.is_shipped());
+        self.model_options_by_model
+            .retain(|harness, _| harness.is_shipped());
+        self.favorites
+            .retain(|favorite| favorite.harness.is_shipped());
+        let after = self.model_by_harness.len()
+            + self.reasoning_by_model.len()
+            + self.model_options_by_model.len()
+            + self.favorites.len();
+        changed || before != after
     }
 
     /// Write atomically (temp file + rename) so a crash mid-write never corrupts.
@@ -225,26 +264,73 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let mut defaults = ComposerDefaults {
-            harness: Some(HarnessId::ClaudeCode),
+            harness: Some(HarnessId::Fx),
             reasoning: Some(ReasoningLevel::XHigh),
             ..Default::default()
         };
-        defaults.remember_model(
-            HarnessId::ClaudeCode,
-            "claude-fable-5".into(),
-            "Fable 5".into(),
-        );
-        defaults.remember_model(HarnessId::Codex, "gpt-5.2-codex".into(), "GPT-5.2".into());
+        defaults.remember_model(HarnessId::Fx, "glm-5.3".into(), "glm-5.3".into());
         defaults
-            .model_options_mut(HarnessId::ClaudeCode, "claude-fable-5")
+            .model_options_mut(HarnessId::Fx, "glm-5.3")
             .insert("contextWindow".into(), "1m".into());
         defaults.save(dir.path()).unwrap();
         let loaded = ComposerDefaults::load(dir.path());
         assert_eq!(loaded, defaults);
         assert_eq!(
-            loaded.model_for(HarnessId::ClaudeCode).map(|m| &*m.label),
-            Some("Fable 5")
+            loaded.model_for(HarnessId::Fx).map(|m| &*m.label),
+            Some("glm-5.3")
         );
+    }
+
+    /// A file written by a build that offered several agents still names
+    /// the last one used. Loading drops every pick for an agent this build
+    /// does not ship, so the chip never starts on a foreign model, and the
+    /// next save writes the file clean.
+    #[test]
+    fn load_forgets_picks_for_agents_this_build_does_not_ship() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale = ComposerDefaults {
+            harness: Some(HarnessId::Codex),
+            reasoning: Some(ReasoningLevel::High),
+            ..Default::default()
+        };
+        stale.remember_model(HarnessId::Codex, "gpt-6.1-sol".into(), "GPT-6.1-Sol".into());
+        stale.remember_reasoning(HarnessId::Codex, Some("gpt-6.1-sol"), ReasoningLevel::High);
+        stale
+            .model_options_mut(HarnessId::Codex, "gpt-6.1-sol")
+            .insert("serviceTier".into(), "fast".into());
+        stale.toggle_favorite(HarnessId::Codex, "gpt-6.1-sol");
+        stale.remember_model(HarnessId::Fx, "glm-5.3".into(), "glm-5.3".into());
+        stale.harness = Some(HarnessId::Codex);
+        stale.save(dir.path()).unwrap();
+
+        let loaded = ComposerDefaults::load(dir.path());
+        assert_eq!(loaded.harness, None);
+        assert_eq!(loaded.reasoning, None);
+        assert!(loaded.model_for(HarnessId::Codex).is_none());
+        assert!(
+            loaded
+                .reasoning_for(HarnessId::Codex, Some("gpt-6.1-sol"))
+                .is_none()
+        );
+        assert!(
+            loaded
+                .model_options_for(HarnessId::Codex, "gpt-6.1-sol")
+                .is_none()
+        );
+        assert!(!loaded.is_favorite(HarnessId::Codex, "gpt-6.1-sol"));
+        // The shipped agent's memory survives.
+        assert_eq!(
+            loaded.model_for(HarnessId::Fx).map(|m| &*m.id),
+            Some("glm-5.3")
+        );
+
+        // A file that only names the shipped agent is left alone.
+        let mut clean = ComposerDefaults::default();
+        clean.remember_model(HarnessId::Fx, "glm-5.3".into(), "glm-5.3".into());
+        clean.remember_reasoning(HarnessId::Fx, Some("glm-5.3"), ReasoningLevel::High);
+        let before = clean.clone();
+        assert!(!clean.forget_unshipped());
+        assert_eq!(clean, before);
     }
 
     #[test]
@@ -290,17 +376,17 @@ mod tests {
     fn favorites_toggle_and_persist() {
         let dir = tempfile::tempdir().unwrap();
         let mut defaults = ComposerDefaults::default();
-        assert!(defaults.toggle_favorite(HarnessId::ClaudeCode, "claude-opus-5"));
-        assert!(defaults.toggle_favorite(HarnessId::Codex, "gpt-5.2-codex"));
-        assert!(defaults.is_favorite(HarnessId::ClaudeCode, "claude-opus-5"));
+        assert!(defaults.toggle_favorite(HarnessId::Fx, "glm-5.3"));
+        assert!(defaults.toggle_favorite(HarnessId::Fx, "glm-5.2"));
+        assert!(defaults.is_favorite(HarnessId::Fx, "glm-5.3"));
         // Same id under a different harness is a distinct star.
-        assert!(!defaults.is_favorite(HarnessId::Codex, "claude-opus-5"));
+        assert!(!defaults.is_favorite(HarnessId::Mock, "glm-5.3"));
         defaults.save(dir.path()).unwrap();
         assert_eq!(ComposerDefaults::load(dir.path()), defaults);
         // Untoggle removes, preserving the other's order.
-        assert!(!defaults.toggle_favorite(HarnessId::ClaudeCode, "claude-opus-5"));
-        assert!(!defaults.is_favorite(HarnessId::ClaudeCode, "claude-opus-5"));
-        assert!(defaults.is_favorite(HarnessId::Codex, "gpt-5.2-codex"));
+        assert!(!defaults.toggle_favorite(HarnessId::Fx, "glm-5.3"));
+        assert!(!defaults.is_favorite(HarnessId::Fx, "glm-5.3"));
+        assert!(defaults.is_favorite(HarnessId::Fx, "glm-5.2"));
     }
 
     #[test]
