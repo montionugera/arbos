@@ -1464,20 +1464,22 @@ fn person_can_read(sentence: &str) -> bool {
 /// Main shows one plan sentence. A paragraph that names a file is not shown —
 /// except the turn's final reply. That is the answer the person waited for;
 /// hiding it would leave an earlier progress line standing as if the work
-/// were still going, so it is shown whole when no clean sentence is in it.
+/// were still going. A turn's entry holds every line Main wrote between its
+/// tool calls, so the answer is the last text part: that part is shown
+/// whole and the progress lines before it go.
 fn plan_entry(entry: &SessionMessageEntry, final_reply: bool) -> SessionMessageEntry {
     let mut copy = entry.clone();
+    if final_reply && let Some(answer) = last_text_part(&copy) {
+        copy.parts.retain(|part| match part {
+            MessagePart::Text { id, .. } => *id == answer,
+            _ => true,
+        });
+        return copy;
+    }
     let sentence = copy.parts.iter().find_map(|part| match part {
         MessagePart::Text { text, .. } => first_clean_sentence(text),
         _ => None,
     });
-    let has_words = copy.parts.iter().any(|part| match part {
-        MessagePart::Text { text, .. } => !text.trim().is_empty(),
-        _ => false,
-    });
-    if sentence.is_none() && final_reply && has_words {
-        return copy;
-    }
     let mut placed = false;
     copy.parts = copy
         .parts
@@ -1496,6 +1498,15 @@ fn plan_entry(entry: &SessionMessageEntry, final_reply: bool) -> SessionMessageE
         })
         .collect();
     copy
+}
+
+/// The id of the entry's last text part with words in it: the answer, when
+/// the entry is a turn's final reply.
+fn last_text_part(entry: &SessionMessageEntry) -> Option<String> {
+    entry.parts.iter().rev().find_map(|part| match part {
+        MessagePart::Text { id, text } if !text.trim().is_empty() => Some(id.clone()),
+        _ => None,
+    })
 }
 
 fn user_plain_text(entry: &SessionMessageEntry) -> String {
@@ -12203,6 +12214,59 @@ mod tests {
         );
         let blank = assistant("blank", MessageStatus::Complete, vec![text_part("t", "  ")]);
         assert_eq!(plan_entry(&blank, true).parts, vec![]);
+    }
+
+    /// One turn is one entry: a progress line, a tool call, another line,
+    /// another call, then the answer. On the rig the pane kept the first
+    /// progress line ("The tool is live — selecting it for the capture.") and
+    /// never showed the answer that named the saved file. The final reply is
+    /// the last text part, shown whole; mid-turn the first clean sentence
+    /// still stands in for the entry.
+    #[test]
+    fn main_shows_the_last_line_of_the_final_reply_as_the_answer() {
+        let tool = |id: &str| MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Unknown {
+                name: "Selecting MCP tool".into(),
+                input: None,
+            },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        };
+        let answer = "The screenshot is saved — `.arbos/context/screenshots/shot.png` (117 KB) — \
+            but my current model can't view images, so open the file yourself.";
+        let entry = assistant(
+            "turn",
+            MessageStatus::Complete,
+            vec![
+                text_part("t1", "The tool is live — selecting it for the capture."),
+                tool("c1"),
+                text_part("t2", "Captured — viewing the picture to describe it."),
+                tool("c2"),
+                text_part("t3", answer),
+            ],
+        );
+        assert_eq!(
+            plan_entry(&entry, false).parts,
+            vec![
+                text_part("t1", "The tool is live — selecting it for the capture."),
+                tool("c1"),
+                tool("c2"),
+            ]
+        );
+        assert_eq!(
+            plan_entry(&entry, true).parts,
+            vec![tool("c1"), tool("c2"), text_part("t3", answer)]
+        );
     }
 
     /// The final reply is the last complete assistant entry before the
