@@ -2280,10 +2280,11 @@ pub(super) enum SpacesMenuRow {
     AddSpace,
 }
 
-/// New project navigates devices, locations, then folders on a command-palette surface.
+/// The remote folder browser walks a device's locations, then its folders,
+/// on a command-palette surface. A project on this machine is picked with
+/// the system's own folder dialog instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProjectStep {
-    Devices,
     Locations,
     Folders,
 }
@@ -2585,12 +2586,32 @@ struct Crumb {
 }
 
 enum CrumbTarget {
-    Devices,
     Locations,
     Location(String, Option<String>),
     Folder(String),
     /// The `…` fold; opens [`Shell::render_project_crumb_menu`].
     More,
+}
+
+/// A new project's row: the folder is its root, and — with no name set —
+/// the folder's name is its name (`Space::display_name`).
+pub(super) fn space_from_folder(
+    space_id: &str,
+    device_id: &str,
+    path: &str,
+    git_detected: bool,
+) -> Space {
+    Space {
+        id: space_id.to_owned(),
+        device_id: device_id.to_owned(),
+        path: path.to_owned(),
+        name: None,
+        git_detected,
+        git_checked_at: None,
+        checkout_id: None,
+        repository_id: None,
+        created_at: Utc::now(),
+    }
 }
 
 fn device_glyph(platform: &str) -> &'static str {
@@ -5933,21 +5954,66 @@ impl Shell {
 
     // ---- add-space flow ----
 
+    /// New project on `device_id`: this machine's own folder dialog, or the
+    /// in-app browser for a device elsewhere (that is where the folder is).
     pub(super) fn open_add_space_on_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
-        let device = self
-            .state
-            .read(cx)
+        let state = self.state.read(cx);
+        if state.local_device_id.as_deref() == Some(device_id) {
+            self.open_add_space(cx);
+            return;
+        }
+        let device = state
             .devices
             .iter()
             .find(|device| device.id == device_id)
             .cloned();
-        self.open_add_space(cx);
         if let Some(device) = device {
-            self.add_space_pick_device(device, cx);
+            self.open_add_space_browser(device, cx);
         }
     }
 
+    /// `+ project`: the system's folder dialog for this machine. The chosen
+    /// folder becomes the project's root, and its name the project's name.
     pub(super) fn open_add_space(&mut self, cx: &mut Context<Self>) {
+        self.close_add_space(cx);
+        self.command_palette = None;
+        if self.state.read(cx).local_device_id.is_none() {
+            self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
+            cx.notify();
+            return;
+        }
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add project".into()),
+        });
+        self.project_folder_prompt = Some(cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(folder) = paths.into_iter().next() else {
+                return;
+            };
+            this.update(cx, |shell, cx| shell.add_project_folder(folder, cx))
+                .ok();
+        }));
+    }
+
+    /// A folder picked for a new project on this machine.
+    pub(super) fn add_project_folder(&mut self, folder: std::path::PathBuf, cx: &mut Context<Self>) {
+        let Some(device_id) = self.state.read(cx).local_device_id.clone() else {
+            self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
+            cx.notify();
+            return;
+        };
+        let git_detected = folder.join(".git").exists();
+        let path = folder.to_string_lossy().into_owned();
+        self.create_space(device_id, path, git_detected, cx);
+    }
+
+    /// The in-app folder browser for `device`, opened on its locations.
+    pub(super) fn open_add_space_browser(&mut self, device: Device, cx: &mut Context<Self>) {
         self.release_home_folder_search(cx);
         self.command_palette = None;
         self.project_crumb_menu = popover::Popup::default();
@@ -5955,7 +6021,7 @@ impl Shell {
         // bubble to the palette frame (`add_space_key`) instead of moving the
         // text caret — Enter and ⌘Enter are both handled there.
         let search =
-            cx.new(|cx| ComposerInput::with_context("Search devices…", "PaletteSearch", cx));
+            cx.new(|cx| ComposerInput::with_context("Search locations…", "PaletteSearch", cx));
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 // Typing `/` after a query that names a folder descends into
@@ -5974,9 +6040,9 @@ impl Shell {
             }
         });
         self.add_space = Some(AddSpaceFlow {
-            step: ProjectStep::Devices,
+            step: ProjectStep::Locations,
             location: None,
-            device: None,
+            device: Some(device),
             search,
             browser: Loadable::Idle,
             drives: Loadable::Idle,
@@ -5997,6 +6063,7 @@ impl Shell {
             home_search: HomeFolderSearch::default(),
             _search_events: search_events,
         });
+        self.load_space_drives(cx);
         cx.notify();
     }
 
@@ -6097,34 +6164,6 @@ impl Shell {
         .detach();
     }
 
-    /// Selecting a device advances to its locations.
-    fn add_space_pick_device(&mut self, device: Device, cx: &mut Context<Self>) {
-        let Some(flow) = self.add_space.as_mut() else {
-            return;
-        };
-        flow.focus_pending = true;
-        flow.step = ProjectStep::Locations;
-        flow.location = None;
-        flow.load_task = None;
-        flow.drives_task = None;
-        flow.list_scroll.set_offset(gpui::Point::default());
-        flow.device = Some(device);
-        flow.browser = Loadable::Idle;
-        flow.drives = Loadable::Idle;
-        flow.browser_path = None;
-        flow.home = None;
-        flow.browser_repo = false;
-        flow.active = 0;
-        flow.error = None;
-        let search = flow.search.clone();
-        search.update(cx, |input, cx| {
-            input.set_placeholder("Search locations…", cx);
-            input.set_text("", cx);
-        });
-        self.load_space_drives(cx);
-        cx.notify();
-    }
-
     fn add_space_goto_location(
         &mut self,
         name: String,
@@ -6151,13 +6190,14 @@ impl Shell {
         self.search_home_folders(cx);
     }
 
-    fn add_space_back_to(&mut self, step: ProjectStep, cx: &mut Context<Self>) {
+    /// Back to the device's locations, clearing the folder state.
+    fn add_space_back_to_locations(&mut self, cx: &mut Context<Self>) {
         self.release_home_folder_search(cx);
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
         flow.focus_pending = true;
-        flow.step = step;
+        flow.step = ProjectStep::Locations;
         flow.load_task = None;
         flow.browser = Loadable::Idle;
         flow.browser_path = None;
@@ -6166,37 +6206,12 @@ impl Shell {
         flow.active = 0;
         flow.error = None;
         flow.list_scroll.set_offset(gpui::Point::default());
-        if step == ProjectStep::Devices {
-            flow.drives_task = None;
-            flow.device = None;
-            flow.drives = Loadable::Idle;
-            flow.home = None;
-        }
         let search = flow.search.clone();
         search.update(cx, |input, cx| {
-            input.set_placeholder(
-                if step == ProjectStep::Devices {
-                    "Search devices…"
-                } else {
-                    "Search locations…"
-                },
-                cx,
-            );
+            input.set_placeholder("Search locations…", cx);
             input.set_text("", cx);
         });
         cx.notify();
-    }
-
-    fn add_space_devices(&self, cx: &App) -> Vec<Device> {
-        let Some(flow) = &self.add_space else {
-            return Vec::new();
-        };
-        let devices = &self.state.read(cx).devices;
-        let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
-        popover::filter_indices(flow.search.read(cx).text(), &names)
-            .into_iter()
-            .map(|ix| devices[ix].clone())
-            .collect()
     }
 
     fn add_space_locations(&self, cx: &App) -> Vec<(String, Option<String>)> {
@@ -6328,12 +6343,6 @@ impl Shell {
             return;
         };
         match flow.step {
-            ProjectStep::Devices => {
-                if let Some(device) = self.add_space_devices(cx).get(flow.active).cloned() {
-                    self.add_space_pick_device(device, cx);
-                }
-                return;
-            }
             ProjectStep::Locations => {
                 if let Some((name, path)) = self.add_space_locations(cx).get(flow.active).cloned() {
                     self.add_space_goto_location(name, path, cx);
@@ -6550,10 +6559,8 @@ impl Shell {
     }
 
     /// Create the space for the browser's current folder.
+    /// ⌘⏎ in the browser: add the open folder on the browser's device.
     fn submit_add_space(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
         let Some(flow) = self.add_space.as_ref() else {
             return;
         };
@@ -6568,6 +6575,25 @@ impl Shell {
         };
         let path = listing.path.clone();
         let git_detected = flow.browser_repo;
+        self.create_space(device.id, path, git_detected, cx);
+    }
+
+    /// Make `path` on `device_id` a project. An existing project for the
+    /// same folder is opened instead. The row shows at once; the engine's
+    /// answer confirms it or takes it back and reports why — on the browser
+    /// when it is open, else as a notice.
+    fn create_space(
+        &mut self,
+        device_id: String,
+        path: String,
+        git_detected: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
+            cx.notify();
+            return;
+        };
         // Same (device, folder) already has a space → just switch to it. The
         // engine dedupes this case too (a createSpace for a duplicate pair
         // no-ops), so creating would leave the minted id dangling.
@@ -6576,32 +6602,21 @@ impl Shell {
             .read(cx)
             .spaces
             .iter()
-            .find(|s| s.device_id == device.id && same_folder_path(&s.path, &path))
+            .find(|s| s.device_id == device_id && same_folder_path(&s.path, &path))
             .map(|s| s.id.clone())
         {
             self.close_add_space(cx);
             self.land_in_space(existing, cx);
             return;
         }
-        let Some(flow) = self.add_space.as_mut() else {
-            return;
-        };
-        flow.submit_busy = true;
-        flow.error = None;
+        if let Some(flow) = self.add_space.as_mut() {
+            flow.submit_busy = true;
+            flow.error = None;
+        }
         let space_id = uuid::Uuid::new_v4().to_string();
         // Optimistic echo: the watch frame carrying the real row replaces it
         // by id (apply_spaces re-sorts; same-id upsert is idempotent).
-        let space = Space {
-            id: space_id.clone(),
-            device_id: device.id.clone(),
-            path: path.clone(),
-            name: None,
-            git_detected,
-            git_checked_at: None,
-            checkout_id: None,
-            repository_id: None,
-            created_at: Utc::now(),
-        };
+        let space = space_from_folder(&space_id, &device_id, &path, git_detected);
         self.state.update(cx, |s, cx| {
             if !s.spaces.iter().any(|existing| existing.id == space.id) {
                 s.spaces.push(space);
@@ -6611,7 +6626,7 @@ impl Shell {
         let params = serde_json::json!({
             "op": "createSpace",
             "spaceId": space_id,
-            "deviceId": device.id,
+            "deviceId": device_id,
             "path": path,
             "gitDetected": git_detected,
         });
@@ -6625,14 +6640,21 @@ impl Shell {
                         shell.land_in_space(submit_id.clone(), cx);
                     }
                     Err(err) => {
-                        // Roll the optimistic row back; surface the error inline.
+                        // Roll the optimistic row back; surface the error.
                         shell.state.update(cx, |s, cx| {
                             s.spaces.retain(|space| space.id != submit_id);
                             cx.notify();
                         });
-                        if let Some(flow) = shell.add_space.as_mut() {
-                            flow.submit_busy = false;
-                            flow.error = Some(format!("{err}").into());
+                        match shell.add_space.as_mut() {
+                            Some(flow) => {
+                                flow.submit_busy = false;
+                                flow.error = Some(format!("{err}").into());
+                            }
+                            None => shell.show_notice(
+                                crate::toast::ToastKind::Error,
+                                format!("Could not add the project: {err}"),
+                                cx,
+                            ),
                         }
                     }
                 }
@@ -6640,20 +6662,21 @@ impl Shell {
             })
             .ok();
         });
-        if let Some(flow) = self.add_space.as_mut() {
-            flow.submit_task = Some(task);
+        match self.add_space.as_mut() {
+            Some(flow) => flow.submit_task = Some(task),
+            None => self.project_folder_prompt = Some(task),
         }
         cx.notify();
     }
 
-    /// Back traverses folders, then locations, then devices.
+    /// Back traverses folders, then locations; from the locations it closes
+    /// the browser.
     fn add_space_go_up(&mut self, cx: &mut Context<Self>) {
         let Some(flow) = &self.add_space else {
             return;
         };
         match flow.step {
-            ProjectStep::Devices => return,
-            ProjectStep::Locations => self.add_space_back_to(ProjectStep::Devices, cx),
+            ProjectStep::Locations => self.close_add_space(cx),
             ProjectStep::Folders => {
                 let listing = flow.browser.ready();
                 let root = flow
@@ -6667,7 +6690,7 @@ impl Shell {
                 if let Some(parent) = parent {
                     self.add_space_descend(parent, false, cx);
                 } else {
-                    self.add_space_back_to(ProjectStep::Locations, cx);
+                    self.add_space_back_to_locations(cx);
                 }
             }
         }
@@ -6711,7 +6734,6 @@ impl Shell {
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = match self.add_space.as_ref().map(|f| f.step) {
-                    Some(ProjectStep::Devices) => self.add_space_devices(cx).len(),
                     Some(ProjectStep::Locations) => self.add_space_locations(cx).len(),
                     _ => self.add_space_folder_rows(cx).len(),
                 };
@@ -6872,32 +6894,6 @@ impl Shell {
         };
         let mut rows: Vec<AnyElement> = Vec::new();
         match step {
-            ProjectStep::Devices => {
-                for (ix, device) in self.add_space_devices(cx).into_iter().enumerate() {
-                    let online = self.state.read(cx).device_online(&device.id, Utc::now());
-                    let name = device.name.clone();
-                    rows.push(
-                        row(ix)
-                            .child(glyph_el(device_glyph(&device.platform)))
-                            .child(label_el(name))
-                            .child(
-                                div()
-                                    .size(px(5.0))
-                                    .flex_none()
-                                    .rounded_full()
-                                    .bg(if online {
-                                        theme.success
-                                    } else {
-                                        theme.text_faint
-                                    }),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.add_space_pick_device(device.clone(), cx)
-                            }))
-                            .into_any_element(),
-                    );
-                }
-            }
             ProjectStep::Locations => {
                 for (ix, (name, path)) in self.add_space_locations(cx).into_iter().enumerate() {
                     let glyph = if path.is_none() {
@@ -7008,7 +7004,6 @@ impl Shell {
             );
         } else if count == 0 && !(step == ProjectStep::Locations && drives_loading) {
             let (title, hint) = match step {
-                ProjectStep::Devices => ("No devices found", "Try another device name.".into()),
                 ProjectStep::Locations => {
                     ("No locations found", "Try Home or a drive name.".into())
                 }
@@ -7049,12 +7044,7 @@ impl Shell {
         // Breadcrumbs: one line that scrolls sideways under edge fades rather
         // than wrapping, and follows the open folder as the path grows. Deep
         // paths fold their middle folders into a `…` menu.
-        let mut specs: Vec<Crumb> = vec![Crumb {
-            name: "New project".into(),
-            glyph: None,
-            current: step == ProjectStep::Devices,
-            target: CrumbTarget::Devices,
-        }];
+        let mut specs: Vec<Crumb> = Vec::new();
         let mut crumb_key = String::new();
         if let Some(device) = device {
             crumb_key.push_str(&device.id);
@@ -7180,11 +7170,8 @@ impl Shell {
                     })
                     .hover(|s| s.bg(theme.element_hover).text_color(theme.text));
                 el = match spec.target {
-                    CrumbTarget::Devices => el.on_click(cx.listener(|this, _, _, cx| {
-                        this.add_space_back_to(ProjectStep::Devices, cx)
-                    })),
                     CrumbTarget::Locations => el.on_click(cx.listener(|this, _, _, cx| {
-                        this.add_space_back_to(ProjectStep::Locations, cx)
+                        this.add_space_back_to_locations(cx)
                     })),
                     CrumbTarget::Location(name, path) => {
                         el.on_click(cx.listener(move |this, _, _, cx| {
@@ -7238,13 +7225,9 @@ impl Shell {
             .overflow_x_scroll()
             .track_scroll(&crumb_scroll)
             .children(trail);
-        // ← mirrors the Left key: up one level, and back to Cmd+K from the
-        // first step.
-        let back_label = if step == ProjectStep::Devices {
-            "Back to commands"
-        } else {
-            "Back"
-        };
+        // ← mirrors the Left key: up one level; from the locations it closes
+        // the browser.
+        let back_label = "Back";
         let crumbs = div()
             .h(px(36.0))
             .flex_none()
@@ -7270,14 +7253,7 @@ impl Shell {
                     .aria_label(back_label)
                     .tooltip(crate::settings::widgets::text_tooltip(back_label))
                     .hover(|s| s.bg(theme.element_hover))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if this.add_space.as_ref().map(|f| f.step) == Some(ProjectStep::Devices) {
-                            this.close_add_space(cx);
-                            this.toggle_command_palette(window, cx);
-                        } else {
-                            this.add_space_go_up(cx);
-                        }
-                    }))
+                    .on_click(cx.listener(|this, _, _, cx| this.add_space_go_up(cx)))
                     .child(
                         icon(icons::ARROW_LEFT)
                             .size(px(16.0))
@@ -7299,23 +7275,11 @@ impl Shell {
             crate::settings::badge_combo(if valid { combo } else { id.default_combo() })
         };
         let can_add = !busy && listing.is_some();
-        let footer = command_palette::palette_footer()
-            .child(command_palette::command_key_hint(&theme, "↑ ↓", "Navigate"))
-            .child(command_palette::command_key_hint(
-                &theme,
-                "↵",
-                if step == ProjectStep::Folders {
-                    "Open"
-                } else {
-                    "Select"
-                },
-            ))
-            .when(step != ProjectStep::Devices, |el| {
-                el.child(command_palette::command_key_hint(&theme, "←", "Back"))
-            })
-            .child(command_palette::command_key_hint(&theme, "Esc", "Close"))
-            .when(step == ProjectStep::Folders, |el| {
-                el.child(div().flex_1()).child(
+        // The footer holds one thing: adding the open folder.
+        let footer = (step == ProjectStep::Folders).then(|| {
+            command_palette::palette_footer()
+                .child(div().flex_1())
+                .child(
                     div()
                         .id("project-add")
                         .flex()
@@ -7351,7 +7315,7 @@ impl Shell {
                                 .child(if busy { "Adding…" } else { "Add project" }),
                         ),
                 )
-            });
+        });
         let card =
             command_palette::palette_card("add-space-palette", &focus, viewport, &theme)
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
@@ -7382,7 +7346,7 @@ impl Shell {
                             .child(error),
                     )
                 })
-                .child(footer);
+                .children(footer);
         Some(command_palette::palette_overlay(viewport, card))
     }
 
@@ -7771,7 +7735,7 @@ mod project_flow_tests {
     }
 
     #[gpui::test]
-    fn devices_locations_folders_and_back_clear_stale_state(cx: &mut gpui::TestAppContext) {
+    fn locations_folders_and_back_clear_stale_state(cx: &mut gpui::TestAppContext) {
         let data = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -7803,17 +7767,14 @@ mod project_flow_tests {
             )
         });
         shell.update(cx, |shell, cx| {
-            shell.open_add_space(cx);
-            assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::Devices);
-            assert!(shell.add_space.as_ref().unwrap().device.is_none());
-            let search = shell.add_space.as_ref().unwrap().search.clone();
-            search.update(cx, |input, cx| input.set_text("server", cx));
-            assert_eq!(shell.add_space_devices(cx).len(), 1);
-            shell.add_space_open_active(cx);
+            // A device elsewhere opens the in-app browser on its locations;
+            // there is no device list to pick from.
+            shell.open_add_space_on_device("remote", cx);
             let flow = shell.add_space.as_mut().unwrap();
             assert_eq!(flow.step, ProjectStep::Locations);
             assert_eq!(flow.device.as_ref().unwrap().id, "remote");
             assert!(flow.search.read(cx).is_empty());
+            let search = flow.search.clone();
             flow.drives = Loadable::Ready(vec![DriveEntry {
                 name: "Projects".into(),
                 path: "/projects".into(),
@@ -7834,16 +7795,207 @@ mod project_flow_tests {
                 ProjectStep::Locations
             );
             assert!(shell.add_space.as_ref().unwrap().browser.ready().is_none());
-            shell.add_space_go_up(cx);
-            let flow = shell.add_space.as_ref().unwrap();
-            assert_eq!(flow.step, ProjectStep::Devices);
-            assert!(flow.device.is_none());
-            assert!(flow.drives.ready().is_none());
-            assert!(flow.search.read(cx).is_empty());
-            // Slash navigation only applies to folders, never device search.
+            // Slash navigation only applies to folders, never locations.
             search.update(cx, |input, cx| input.set_text("/projects/", cx));
             assert!(!shell.add_space_slash_descend(cx));
+            // Back from the locations closes the browser.
+            shell.add_space_go_up(cx);
+            assert!(shell.add_space.is_none());
         });
+    }
+}
+
+#[cfg(test)]
+mod new_project_folder_tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[test]
+    fn a_chosen_folder_is_the_project_root_and_names_the_project() {
+        let space = space_from_folder("space-1", "local", "/Users/jacob/code/my-app", true);
+        assert_eq!(space.path, "/Users/jacob/code/my-app");
+        assert_eq!(space.display_name(), "my-app");
+        assert!(space.git_detected);
+        assert_eq!(space.device_id, "local");
+        // A trailing separator does not change the name.
+        assert_eq!(
+            space_from_folder("space-2", "local", "/srv/site/", false).display_name(),
+            "site"
+        );
+    }
+
+    /// The engine side of a shell under test: a channel pair the shell's
+    /// RPC client writes requests to and reads replies from.
+    struct FakeEngine {
+        runtime: tokio::runtime::Runtime,
+        requests: tokio::sync::mpsc::Receiver<String>,
+        replies: tokio::sync::mpsc::Sender<String>,
+    }
+
+    impl FakeEngine {
+        fn take(&mut self, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
+            let mut found = Vec::new();
+            cx.run_until_parked();
+            while let Ok(request) = self.requests.try_recv() {
+                found.push(serde_json::from_str(&request).unwrap());
+            }
+            found
+        }
+
+        fn reply(&self, request: &serde_json::Value, ok: serde_json::Value) {
+            let reply = serde_json::json!({ "id": request["id"], "ok": ok });
+            // The client's reader task runs on this runtime: let it drain.
+            self.runtime.block_on(async {
+                self.replies.send(reply.to_string()).await.unwrap();
+                while self.replies.capacity() < self.replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
+    }
+
+    fn shell_with_engine(
+        cx: &mut TestAppContext,
+    ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir, FakeEngine) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (out, requests) = tokio::sync::mpsc::channel(64);
+        let (replies, inbound) = tokio::sync::mpsc::channel(64);
+        let engine = {
+            let _guard = runtime.enter();
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound))
+        };
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
+            // Landing in the new project routes to its chat.
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let data_dir = dir.path().to_path_buf();
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            Shell::new(
+                state,
+                crate::EngineBootConfig {
+                    data_dir,
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("local".into());
+                    state.devices = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id": "local", "name": "Studio", "platform": "macos", "lastSeenAt": null,
+                        }))
+                        .unwrap(),
+                    ];
+                    state.set_test_engine(engine);
+                });
+            })
+            .unwrap();
+        let fake = FakeEngine {
+            runtime,
+            requests,
+            replies,
+        };
+        (window, dir, fake)
+    }
+
+    #[gpui::test]
+    fn new_project_asks_the_system_for_a_folder_and_makes_it_the_project(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, dir, mut engine) = shell_with_engine(cx);
+        let folder = dir.path().join("my-app");
+        std::fs::create_dir_all(folder.join(".git")).unwrap();
+
+        // `+ project` is the system's folder dialog — no in-app picker.
+        window
+            .update(cx, |shell, _, cx| shell.open_add_space(cx))
+            .unwrap();
+        assert!(cx.did_prompt_for_paths());
+        window
+            .read_with(cx, |shell, _| assert!(shell.add_space.is_none()))
+            .unwrap();
+
+        // Cancelling the dialog adds nothing.
+        cx.simulate_path_prompt_response(|options| {
+            // A folder dialog: one folder, no files.
+            assert!(options.directories && !options.files && !options.multiple);
+            None
+        });
+        assert!(engine.take(cx).is_empty());
+        window
+            .read_with(cx, |shell, cx| assert!(shell.state.read(cx).spaces.is_empty()))
+            .unwrap();
+
+        // Choosing a folder creates the project there, on this machine.
+        window
+            .update(cx, |shell, _, cx| shell.open_add_space(cx))
+            .unwrap();
+        let chosen = folder.clone();
+        cx.simulate_path_prompt_response(move |_| Some(vec![chosen]));
+        let requests = engine.take(cx);
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        let request = &requests[0];
+        assert_eq!(request["method"], methods::MUTATE);
+        assert_eq!(request["params"]["op"], "createSpace");
+        assert_eq!(request["params"]["deviceId"], "local");
+        assert_eq!(request["params"]["path"], folder.to_string_lossy().as_ref());
+        assert_eq!(request["params"]["gitDetected"], true);
+        let space_id = request["params"]["spaceId"].as_str().unwrap().to_owned();
+        // The row shows at once: the folder is the root and names the project.
+        window
+            .read_with(cx, |shell, cx| {
+                let state = shell.state.read(cx);
+                let space = state.spaces.iter().find(|s| s.id == space_id).unwrap();
+                assert_eq!(space.path, folder.to_string_lossy());
+                assert_eq!(space.display_name(), "my-app");
+                assert!(space.git_detected);
+            })
+            .unwrap();
+        // The engine's answer lands the person in the new project.
+        engine.reply(request, serde_json::json!({ "ok": true }));
+        cx.run_until_parked();
+        window
+            .read_with(cx, |shell, cx| {
+                assert_eq!(
+                    shell.state.read(cx).selected_space.as_deref(),
+                    Some(space_id.as_str())
+                );
+            })
+            .unwrap();
+
+        // Picking the same folder again opens that project instead of
+        // creating another.
+        window
+            .update(cx, |shell, _, cx| shell.open_add_space(cx))
+            .unwrap();
+        cx.simulate_path_prompt_response(move |_| Some(vec![folder]));
+        assert!(engine.take(cx).is_empty());
+        window
+            .read_with(cx, |shell, cx| assert_eq!(shell.state.read(cx).spaces.len(), 1))
+            .unwrap();
     }
 }
 
@@ -7957,8 +8109,7 @@ mod home_folder_search_tests {
                     state.devices = vec![picked.clone()];
                     state.set_test_engine(engine);
                 });
-                shell.open_add_space(cx);
-                shell.add_space_pick_device(picked, cx);
+                shell.open_add_space_browser(picked, cx);
             })
             .unwrap();
         let fake = FakeEngine {
@@ -8105,10 +8256,7 @@ mod home_folder_search_tests {
                             Some("/mnt/data".into()),
                             cx,
                         ),
-                        "device" => {
-                            shell.add_space_back_to(ProjectStep::Devices, cx);
-                            shell.add_space_pick_device(device("local"), cx);
-                        }
+                        "device" => shell.open_add_space_browser(device("local"), cx),
                         "close" => shell.close_add_space(cx),
                         _ => unreachable!(),
                     })

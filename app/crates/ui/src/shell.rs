@@ -2122,6 +2122,8 @@ pub struct Shell {
     /// The add-space palette (device tabs + folder search), `Some`
     /// while open.
     add_space: Option<AddSpaceFlow>,
+    /// The system folder dialog for a new project, then its createSpace.
+    project_folder_prompt: Option<Task<()>>,
     /// The New project palette's collapsed-breadcrumbs (`…`) menu.
     project_crumb_menu: popover::Popup<()>,
     command_palette: Option<command_palette::CommandPalette>,
@@ -2615,6 +2617,7 @@ impl Shell {
             section_menu_active: None,
             delete_space_confirm: None,
             add_space: None,
+            project_folder_prompt: None,
             project_crumb_menu: popover::Popup::default(),
             command_palette: None,
             search_warm: None,
