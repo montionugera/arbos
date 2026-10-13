@@ -93,12 +93,12 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
   # No --deep (Apple deprecated it): the nested fx executable is signed
   # first, on its own, then the bundle.
-  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/fx"
+  codesign --force --identifier sh.zeron.app.fx --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/fx"
   codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
   # requires right-click → Open on first launch without notarization).
-  codesign --force --sign - "$APP/Contents/MacOS/fx"
+  codesign --force --identifier sh.zeron.app.fx --sign - "$APP/Contents/MacOS/fx"
   codesign --deep --force --entitlements "$ROOT/dist/macos/voice.entitlements" --sign - "$APP"
 fi
 
