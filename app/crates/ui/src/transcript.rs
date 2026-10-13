@@ -1461,13 +1461,23 @@ fn person_can_read(sentence: &str) -> bool {
     !HIDDEN.iter().any(|word| lower.contains(word))
 }
 
-/// Main shows one plan sentence. A paragraph that names a file is not shown.
-fn plan_entry(entry: &SessionMessageEntry) -> SessionMessageEntry {
+/// Main shows one plan sentence. A paragraph that names a file is not shown —
+/// except the turn's final reply. That is the answer the person waited for;
+/// hiding it would leave an earlier progress line standing as if the work
+/// were still going, so it is shown whole when no clean sentence is in it.
+fn plan_entry(entry: &SessionMessageEntry, final_reply: bool) -> SessionMessageEntry {
     let mut copy = entry.clone();
     let sentence = copy.parts.iter().find_map(|part| match part {
         MessagePart::Text { text, .. } => first_clean_sentence(text),
         _ => None,
     });
+    let has_words = copy.parts.iter().any(|part| match part {
+        MessagePart::Text { text, .. } => !text.trim().is_empty(),
+        _ => false,
+    });
+    if sentence.is_none() && final_reply && has_words {
+        return copy;
+    }
     let mut placed = false;
     copy.parts = copy
         .parts
@@ -1501,6 +1511,34 @@ fn user_plain_text(entry: &SessionMessageEntry) -> String {
 }
 
 /// The current goal turn. Older turns stay above it and do not push this line off.
+/// The id of each turn's final reply: the last complete assistant entry
+/// before the person's next message. The open turn's reply is included only
+/// when Main is not `working`, since until then its last entry may be a
+/// progress line with more to come.
+fn final_reply_ids(entries: &[SessionMessageEntry], working: bool) -> HashSet<&str> {
+    let mut ids = HashSet::new();
+    let mut last_reply: Option<&str> = None;
+    for entry in entries {
+        match entry.role {
+            MessageRole::User => {
+                if let Some(id) = last_reply.take() {
+                    ids.insert(id);
+                }
+            }
+            MessageRole::Assistant => {
+                last_reply = (entry.status == Some(MessageStatus::Complete)).then_some(&*entry.id);
+            }
+            MessageRole::System => {}
+        }
+    }
+    if let Some(id) = last_reply
+        && !working
+    {
+        ids.insert(id);
+    }
+    ids
+}
+
 fn goal_turn_start(entries: &[SessionMessageEntry]) -> usize {
     entries
         .iter()
@@ -5062,6 +5100,19 @@ impl Transcript {
                 0
             };
             let entries = &entries[turn_at..];
+            // Each turn's final reply (the last assistant entry before the
+            // person's next message) is shown even when it names a file. The
+            // open turn's last entry counts only once Main has stopped working,
+            // so a progress line is not mistaken for the answer.
+            let final_replies = if main_chat {
+                let working = self.chat_id.as_deref().is_some_and(|id| {
+                    state.indicator_for(id, chrono::Utc::now())
+                        == zeron_proto::view::Indicator::Working
+                });
+                final_reply_ids(entries, working)
+            } else {
+                HashSet::new()
+            };
             let mut plan_line = false;
             // A question after the plan still gets one sentence back. The
             // plan itself stays. Older assistant paragraphs stay hidden.
@@ -5083,7 +5134,7 @@ impl Transcript {
                     asked_after_plan = true;
                 }
                 let planned = (main_chat && entry.role == MessageRole::Assistant).then(|| {
-                    let mut filtered = plan_entry(entry);
+                    let mut filtered = plan_entry(entry, final_replies.contains(entry.id.as_str()));
                     if plan_line && !asked_after_plan {
                         filtered
                             .parts
@@ -5097,7 +5148,10 @@ impl Transcript {
                     .as_ref()
                     .or(shortened.as_ref())
                     .unwrap_or(entry);
+                // Prepared rows hold the whole paragraph; a planned entry
+                // must go through rows_for so the filter is what is drawn.
                 if shortened.is_none()
+                    && planned.is_none()
                     && !self.compact_mode
                     && let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id))
                 {
@@ -12116,7 +12170,7 @@ mod tests {
             MessageStatus::Complete,
             vec![text_part("t", PR_REPLY)],
         );
-        let shown = plan_entry(&entry);
+        let shown = plan_entry(&entry, false);
         assert_eq!(
             shown.parts,
             vec![text_part(
@@ -12124,6 +12178,65 @@ mod tests {
                 "The PR is up: https://github.com/unarbos/arbos/pull/839."
             )]
         );
+    }
+
+    const SCREENSHOT_REPLY: &str = "I can't take the screenshot: `screencapture` fails with \
+        \"could not create image from window/display\" on this display, and the window-list \
+        route needs a macOS permission. Nothing was written to `.arbos/context/docs/`.";
+
+    /// Every sentence of the final reply names a path, so the plan filter has
+    /// nothing to show. On the rig that left the earlier "capturing it" line
+    /// standing as if Main were still at work. The turn's final reply is shown
+    /// whole instead; the same text mid-turn stays hidden as before.
+    #[test]
+    fn main_shows_the_turns_final_reply_even_when_it_names_a_path() {
+        assert_eq!(first_clean_sentence(SCREENSHOT_REPLY), None);
+        let reply = assistant(
+            "final",
+            MessageStatus::Complete,
+            vec![text_part("t", SCREENSHOT_REPLY)],
+        );
+        assert_eq!(plan_entry(&reply, false).parts, vec![]);
+        assert_eq!(
+            plan_entry(&reply, true).parts,
+            vec![text_part("t", SCREENSHOT_REPLY)]
+        );
+        let blank = assistant("blank", MessageStatus::Complete, vec![text_part("t", "  ")]);
+        assert_eq!(plan_entry(&blank, true).parts, vec![]);
+    }
+
+    /// The final reply is the last complete assistant entry before the
+    /// person's next message. The open turn's reply counts only once Main
+    /// has stopped working; a streaming or aborted tail is not a reply.
+    #[test]
+    fn final_reply_is_the_last_complete_assistant_entry_of_each_turn() {
+        let user = |id: &str| SessionMessageEntry {
+            role: MessageRole::User,
+            ..assistant(
+                id,
+                MessageStatus::Complete,
+                vec![text_part("u", "hello there")],
+            )
+        };
+        let entries = vec![
+            user("q1"),
+            assistant("a1", MessageStatus::Complete, vec![]),
+            assistant("a2", MessageStatus::Complete, vec![]),
+            user("q2"),
+            assistant("a3", MessageStatus::Complete, vec![]),
+            assistant("a4", MessageStatus::Complete, vec![]),
+        ];
+        assert_eq!(
+            final_reply_ids(&entries, false),
+            HashSet::from(["a2", "a4"])
+        );
+        assert_eq!(final_reply_ids(&entries, true), HashSet::from(["a2"]));
+        let mut streaming = entries.clone();
+        streaming.push(assistant("a5", MessageStatus::Streaming, vec![]));
+        assert_eq!(final_reply_ids(&streaming, false), HashSet::from(["a2"]));
+        let mut aborted = entries;
+        aborted.push(assistant("a5", MessageStatus::Aborted, vec![]));
+        assert_eq!(final_reply_ids(&aborted, false), HashSet::from(["a2"]));
     }
 
     /// A reply that is nothing but the link is shown as is; the slashes in a
