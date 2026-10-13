@@ -71,6 +71,8 @@ mod chat_dropzone_tests;
 #[cfg(test)]
 mod chat_rename_tests;
 mod command_palette;
+#[cfg(test)]
+mod composer_placement_tests;
 mod file_mutations;
 mod files_panel;
 mod harness_updates;
@@ -11139,15 +11141,15 @@ impl Shell {
             self.reduced_motion,
             frame_time,
         );
-        let chat_has_messages = {
-            let state = self.state.read(cx);
-            !state.transcript.is_empty() || !state.pending_echoes().is_empty()
-        };
-        // A new chat has no messages yet, so the bar stays in the center.
-        // Until history arrives, keep the bar down so an existing chat does
-        // not jump. After the first message it sits under the transcript.
-        let composer_docked =
-            has_selection && (chat_has_messages || !self.state.read(cx).transcript_replayed);
+        // A selected chat docks the bar at the foot of the column from its
+        // first frame, whether or not its history has arrived and whether or
+        // not it has any messages. Lifting an empty chat into the hero route
+        // put the bar, and its placeholder, up the column whenever the empty
+        // replay landed (user report: "Do anything…" at the top of a new
+        // chat); the hero layout also assumes the new-chat canvas's two-row
+        // composer, which a selected chat never renders. Only the canvas,
+        // with no selection, centers the bar.
+        let composer_docked = has_selection;
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
