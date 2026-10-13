@@ -1156,6 +1156,30 @@ pub fn skillSourceLabel(source: SkillSource) []const u8 {
     };
 }
 
+/// The scope word on a catalog root line. A model that reads only the path
+/// of a home root takes it for the project's skill folder and saves the next
+/// project skill there; the label names the owner of each root.
+pub fn skillRootScopeLabel(source: SkillSource) []const u8 {
+    return switch (source) {
+        .workspace_fx,
+        .workspace_arbos,
+        .workspace_shared,
+        .workspace_opencode,
+        .workspace_codex,
+        .workspace_claude,
+        .workspace_agents,
+        .workspace_claw,
+        => "this project",
+        .global_fx,
+        .global_opencode,
+        .global_codex,
+        .global_claude,
+        .global_agents,
+        .global_claw,
+        => "home root, shared by every project, not this project's",
+    };
+}
+
 pub fn skillSourceShortLabel(source: SkillSource) []const u8 {
     return switch (source) {
         .workspace_fx => "workspace .fx",
@@ -3189,7 +3213,7 @@ fn renderSkillPrompt(
             const index = roots.items.len;
             var line: std.Io.Writer.Allocating = .init(alloc);
             defer line.deinit();
-            try line.writer.print("Root {d}: ", .{index});
+            try line.writer.print("Root {d} ({s}): ", .{ index, skillRootScopeLabel(skill.source) });
             try model_context_encoding.writeScalar(&line.writer, root);
             try line.writer.writeByte('\n');
             const owned = try line.toOwnedSlice();
@@ -4588,6 +4612,17 @@ test "buildSkillsSystemPromptSection includes all visible skills without active 
     try std.testing.expect(std.mem.find(u8, result.text, "<available_skills>") != null);
     try std.testing.expect(std.mem.find(u8, result.text, "- deploy: deployment help") != null);
     try std.testing.expect(std.mem.find(u8, result.text, "- review: review help") != null);
+    // Each root says whose it is: a home root is not the project's folder.
+    try std.testing.expect(std.mem.find(u8, result.text, "Root 0 (this project): /tmp\n") != null);
+    try std.testing.expect(std.mem.find(u8, result.text, "home root, shared by every project, not this project's") == null);
+    const home_skills = [_]Skill{
+        .{ .name = "review", .description = "review help", .path = "/home/x/.fx/skills/review", .source = .global_fx },
+        .{ .name = "deploy", .description = "deployment help", .path = "/repo/.arbos/skills/deploy", .source = .workspace_arbos },
+    };
+    var labeled = try buildSkillsSystemPromptSectionWithLimits(alloc, &home_skills, .{});
+    defer labeled.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, labeled.text, "Root 0 (home root, shared by every project, not this project's): /home/x/.fx/skills\n") != null);
+    try std.testing.expect(std.mem.find(u8, labeled.text, "Root 1 (this project): /repo/.arbos/skills\n") != null);
     try std.testing.expect(std.mem.find(u8, result.text, "Explicitly referenced skills") == null);
     try std.testing.expect(std.mem.find(u8, result.text, "Run deploy steps") == null);
 }
