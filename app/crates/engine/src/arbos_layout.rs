@@ -36,6 +36,9 @@ The person already has one plan sentence. Do not write another paragraph after a
 Do not name a file, a path, GOALS.md, or status.md in text the person reads. \
 Read `.arbos/context/GOALS.md` first. \
 Write what you learn to `.arbos/context/`. \
+A project skill lives at `.arbos/skills/<name>/SKILL.md`, under the project root, not under context. \
+Its first lines are `---`, `name: <name>`, `description: <one sentence on when to use it>`, `---`, then the steps. \
+Write it with write_file. You and every worker of this project find it there; do not install it anywhere else unless the person asks. \
 The checklist is only the active goal's steps. Do not add a step from an older goal. \
 When you tick one step, leave the other steps of this goal in place. \
 A `/goal` line already includes the workers to spawn. Send them at once. Do not wait for `/skill`. \
@@ -135,7 +138,8 @@ mcp_arbos_screenshot_capture saves a picture of the Arbos project window under t
 The path is relative to context, for example internal/note.md. \
 Then reply with that path and stop. \
 Read `.arbos/context/GOALS.md` first. \
-Write what you learn to `.arbos/context/`.";
+Write what you learn to `.arbos/context/`. \
+Project skills live at `.arbos/skills/<name>/SKILL.md`; load one when its description matches the brief.";
 
 /// The house rules every worker gets after [`WORKER_PROMPT`]. `{id}` is the
 /// worker's agent id. [`worker_prompt`] fills it in.
