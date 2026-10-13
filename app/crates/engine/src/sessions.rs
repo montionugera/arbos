@@ -2396,6 +2396,24 @@ fn end_worker_turn(inner: &Inner, chat_id: &str, cwd: &str, label: &str, reply: 
     }
 }
 
+/// Something in the fold is still running: a tool part not yet resolved (a
+/// command, a subagent) or a question the person has not answered. Silence
+/// then belongs to that part, not to the model. The live-plan chip is a
+/// singleton that never resolves, so it is exempt.
+fn turn_in_flight(folded: &[MessagePart]) -> bool {
+    folded.iter().any(|part| match part {
+        MessagePart::Tool {
+            id,
+            resolved: false,
+            ..
+        } => id != zeron_proto::LIVE_PLAN_TOOL_ID,
+        MessagePart::Input {
+            resolved: false, ..
+        } => true,
+        _ => false,
+    })
+}
+
 /// Write one model-recovery change where the person and Main see it: a
 /// worker's `agent.toml` (status word and step), Main's live step, and, for
 /// an error, a line in the chat. `previous_step` is the line written before
@@ -2753,16 +2771,12 @@ async fn drive_run(
     let mut main_turn = false;
     // `coordinator`, `worker`, or `chat`: where a model-recovery line goes.
     let mut agent_role: Option<String> = None;
-    // The agent's fx home, kept for the silent-model pulse (the worker's
-    // usage ledger lives at `<fx_home>/.fx/usage.jsonl`).
-    let mut fx_home: Option<std::path::PathBuf> = None;
     if harness_id == HarnessId::Fx
         && let Some(prep) =
             crate::arbos_layout::prepare_turn(std::path::Path::new(&request.cwd), &chat_id)
     {
         main_turn = prep.role == "coordinator";
         agent_role = Some(prep.role.clone());
-        fx_home = Some(std::path::PathBuf::from(&prep.fx_home));
         request.model_options.insert(
             "_arbosFxHome".into(),
             serde_json::Value::String(prep.fx_home),
@@ -3050,17 +3064,13 @@ async fn drive_run(
     // fx's model-response recovery for this run: the live line, the worker's
     // `waiting` status, the one automatic resume, and the five-minute rule.
     let mut recovery = RecoveryTracker::default();
-    // The silent-model pulse covers what fx cannot report: a worker's model
-    // settling requests with no content, no error, and no recovery frame.
-    // It reads the worker's own usage ledger (Main's line comes from the
-    // frames; a side chat has no worker status to hold), so only a worker
-    // turn inside a project gets one.
-    let mut pulse = crate::arbos_recovery::SilentModelPulse::new(
-        match (agent_role.as_deref(), fx_home.as_deref()) {
-            (Some("worker"), Some(home)) => Some(home.to_path_buf()),
-            _ => None,
-        },
-    );
+    // The silent-model pulse covers what fx cannot report in time: a
+    // worker's model sending nothing (fx waits on a response head without
+    // limit and calls a started stream stalled only after ten minutes). Only
+    // a worker turn inside a project gets one — Main's line comes from the
+    // frames, and a side chat has no worker status to hold.
+    let mut pulse =
+        crate::arbos_recovery::SilentModelPulse::new(agent_role.as_deref() == Some("worker"));
     // The newest event on this run's stream, whatever it was. The live
     // heartbeat above proves the loop runs, not that the model is answering;
     // the pulse measures turn silence from here.
@@ -3139,21 +3149,17 @@ async fn drive_run(
                     }
                     continue;
                 }
-                // SILENT-MODEL PULSE: a worker's model can settle requests
-                // with no content, no error, and no recovery frame — fx has
-                // no signal for that today, so nothing on the stream says
-                // the person is waiting (2026-10-12: three settlements ~300 s
-                // apart held a live worker on `working` for eleven minutes).
-                // While the turn is live, fx's recovery tracker is quiet,
-                // and the stream has said nothing for
-                // `SILENT_MODEL_AFTER`, the pulse baselines the worker's
-                // usage ledger and re-reads it every `SILENT_MODEL_POLL`: one
-                // newer `incident` (a request settled) flips the worker to
+                // SILENT-MODEL PULSE: a worker's model can send nothing for
+                // minutes with no recovery frame — fx waits on a response
+                // head without limit and calls a started stream stalled only
+                // after ten minutes (2026-10-13: a ten-minute engy stall held
+                // a live worker on `working` throughout). While the turn is
+                // live, fx's recovery tracker is quiet, nothing in the fold
+                // is still running (an open tool call or question owns its
+                // own silence), and the stream has said nothing for
+                // `SILENT_MODEL_AFTER`, the pulse flips the worker to
                 // `waiting` through the same writer a reported retry uses.
-                // The silence is the guard, not the incidents — a healthy
-                // worker logs dozens per turn — so this branch never fires
-                // while events flow, and never touches a turn fx is already
-                // reporting or holding open.
+                // Any event restores `working` below.
                 _ = tokio::time::sleep_until(
                     pulse
                         .next_due(last_event_at)
@@ -3162,7 +3168,8 @@ async fn drive_run(
                 ), if pulse.next_due(last_event_at).is_some()
                     && idle_since.is_none()
                     && !interrupted
-                    && recovery.is_clear() => {
+                    && recovery.is_clear()
+                    && !turn_in_flight(&folded) => {
                     if let Some(effect) = pulse.tick(std::time::Instant::now(), last_event_at) {
                         apply_recovery(
                             &inner,
@@ -3325,13 +3332,7 @@ async fn drive_run(
                     && idle_since.is_none()
                     && !interrupted
                     && steerable
-                    && !folded.iter().any(|p| match p {
-                        MessagePart::Tool { id, resolved: false, .. } => {
-                            id != zeron_proto::LIVE_PLAN_TOOL_ID
-                        }
-                        MessagePart::Input { resolved: false, .. } => true,
-                        _ => false,
-                    }) =>
+                    && !turn_in_flight(&folded) =>
                 {
                     tracing::warn!(
                         chat = %chat_id,
