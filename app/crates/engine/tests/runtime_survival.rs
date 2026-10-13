@@ -1038,3 +1038,74 @@ async fn the_idle_reaper_spares_a_runtime_holding_background_work() {
     .await;
     rig.core.sessions.shutdown().await;
 }
+
+/// A summary replaces Main's conversation. The live runtime still holds the
+/// old provider session, so the next send must not ride its mailbox (that
+/// kept the whole 150k-token history and dropped the summary on the rig,
+/// 2026-10-13): it gets a fresh runtime that carries the summary.
+#[tokio::test]
+async fn a_summary_replaces_the_live_runtime_and_hands_it_the_summary() {
+    let rig = rig();
+    let project = rig._dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    zeron_engine::arbos_layout::ensure(&project, Some("Loop")).unwrap();
+    zeron_engine::arbos_layout::claim_main(&project, CHAT).unwrap();
+    let in_project = |prompt: &str| {
+        let mut request = request(prompt);
+        request.cwd = project.display().to_string();
+        request
+    };
+
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, in_project("hello there"), None)
+        .await
+        .unwrap();
+    settle(&rig, 1).await;
+    assert!(rig.core.sessions.live_run_steerable(CHAT));
+
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, in_project("/summarize"), None)
+        .await
+        .unwrap();
+    assert!(
+        project
+            .join(".arbos")
+            .join("runtime")
+            .join("main-summary.md")
+            .is_file(),
+        "the summary was written"
+    );
+    assert!(
+        !rig.core.sessions.live_run_steerable(CHAT),
+        "the summarized runtime still offers its mailbox"
+    );
+
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, in_project("what next?"), None)
+        .await
+        .unwrap();
+    settle(&rig, 2).await;
+    assert_eq!(
+        rig.ledger.spawns.load(Ordering::SeqCst),
+        2,
+        "a fresh runtime"
+    );
+    assert_eq!(
+        rig.ledger.kills.load(Ordering::SeqCst),
+        1,
+        "the old one is gone"
+    );
+    let prompts = rig.ledger.prompts.lock().unwrap();
+    let (delivered, _) = &prompts[1];
+    assert!(
+        delivered.starts_with("Summarized conversation."),
+        "the fresh runtime got the summary: {delivered:?}"
+    );
+    assert!(delivered.contains("hello there"), "{delivered:?}");
+    assert!(delivered.ends_with("what next?"), "{delivered:?}");
+    drop(prompts);
+    rig.core.sessions.shutdown().await;
+}

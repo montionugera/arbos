@@ -68,6 +68,10 @@ type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnsw
 struct HarnessSessionRef {
     session_id: String,
     cwd: String,
+    /// The session a summary retired. Its runtime dies later (replaced on the
+    /// next send, or reaped idle) and its last `Done` names this id: that
+    /// must not revive the resume the summary tombstoned.
+    retired_session_id: Option<String>,
 }
 
 /// The configuration a live harness runtime launched with. The steering
@@ -178,6 +182,19 @@ struct RunHandle {
     /// is unambiguously before the stop (cancelled with it) or after it
     /// (re-dispatched to a fresh runtime — never lost).
     retiring: Arc<std::sync::atomic::AtomicBool>,
+    /// The conversation was summarized: this runtime's provider session is
+    /// the history the summary replaced. The next send starts a fresh
+    /// runtime, which carries the summary, instead of riding this mailbox.
+    superseded: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RunHandle {
+    /// The live runtime takes the next prompt into its mailbox.
+    fn accepts_prompts(&self) -> bool {
+        self.steerable
+            && !self.retiring.load(std::sync::atomic::Ordering::Acquire)
+            && !self.superseded.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
@@ -468,7 +485,7 @@ impl SessionsEngine {
     pub fn live_run_steerable(&self, chat_id: &str) -> bool {
         lock(&self.inner.runs)
             .get(chat_id)
-            .is_some_and(|h| h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire))
+            .is_some_and(RunHandle::accepts_prompts)
     }
 
     /// The last request dispatched for a chat (steer→new-turn fallback).
@@ -634,7 +651,7 @@ impl SessionsEngine {
             let user_id = message_id.unwrap_or_else(new_id);
             handle.write_user_message(&user_id, &shown, now_ms())?;
             self.inner.note_message(chat_id, &shown);
-            if self.is_working(chat_id) {
+            if self.is_mid_turn(chat_id) {
                 let _ = handle.write_system_message(
                     &format!("summarize-wait-{}", new_id()),
                     "Main is still working. Wait, then summarize.",
@@ -651,6 +668,7 @@ impl SessionsEngine {
             if crate::arbos_layout::tombstone_after_summary(&result) {
                 let notice = result.expect("a written summary");
                 self.inner.drop_harness_resume(chat_id, &request.cwd);
+                self.inner.supersede_live_runtime(chat_id);
                 let _ = handle.write_system_message(
                     &format!("summarize-{}", new_id()),
                     &notice,
@@ -678,7 +696,7 @@ impl SessionsEngine {
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
-                h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire),
+                h.accepts_prompts(),
                 h.runtime_config.route(harness_id, &request),
                 h.steer_tx.clone(),
                 h.routed_steers.clone(),
@@ -919,6 +937,7 @@ impl SessionsEngine {
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 fork_history_sent: fork_history_sent.clone(),
                 retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                superseded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         self.set_status(
@@ -1018,7 +1037,7 @@ impl SessionsEngine {
     ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
-            .filter(|h| h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire))
+            .filter(|h| h.accepts_prompts())
             .map(|h| {
                 (
                     h.run_id.clone(),
@@ -1519,6 +1538,14 @@ impl SessionsEngine {
                 .is_some_and(|session| session.status == SessionStatus::Working)
     }
 
+    /// A turn is in progress. Unlike `is_working`, a live runtime parked
+    /// between turns does not count: a summary may replace it.
+    fn is_mid_turn(&self, chat_id: &str) -> bool {
+        lock(&self.inner.statuses)
+            .get(chat_id)
+            .is_some_and(|session| session.status == SessionStatus::Working)
+    }
+
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         self.inner.set_status(chat_id, status, fresh_start);
     }
@@ -1840,12 +1867,26 @@ impl Inner {
     /// Drop the saved fx session so the next turn starts fresh.
     /// An empty id is the tombstone: resume stops here and does not
     /// fall through to an older session.
+    /// After a summary the live runtime's provider session is stale history.
+    /// Dropping the resume id alone is not enough: an idle live runtime takes
+    /// the next send into its mailbox and the old conversation goes on. Mark
+    /// it so the next send replaces the runtime and carries the summary.
+    fn supersede_live_runtime(&self, chat_id: &str) {
+        if let Some(handle) = lock(&self.runs).get(chat_id) {
+            handle
+                .superseded
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
     fn drop_harness_resume(&self, chat_id: &str, cwd: &str) {
+        let retired_session_id = self.resume_for(chat_id, cwd);
         lock(&self.harness_sessions).insert(
             chat_id.to_string(),
             HarnessSessionRef {
                 session_id: String::new(),
                 cwd: cwd.to_string(),
+                retired_session_id,
             },
         );
         if let Some(ws) = self.workspace() {
@@ -1860,13 +1901,23 @@ impl Inner {
         if session_id.is_empty() {
             return;
         }
-        lock(&self.harness_sessions).insert(
-            chat_id.to_string(),
-            HarnessSessionRef {
-                session_id: session_id.to_string(),
-                cwd: cwd.to_string(),
-            },
-        );
+        {
+            let mut sessions = lock(&self.harness_sessions);
+            let retired_session_id = sessions
+                .get(chat_id)
+                .and_then(|known| known.retired_session_id.clone());
+            if retired_session_id.as_deref() == Some(session_id) {
+                return;
+            }
+            sessions.insert(
+                chat_id.to_string(),
+                HarnessSessionRef {
+                    session_id: session_id.to_string(),
+                    cwd: cwd.to_string(),
+                    retired_session_id,
+                },
+            );
+        }
         if let Some(ws) = self.workspace() {
             ws.set_chat_harness_session(chat_id, session_id, cwd);
         }
@@ -2698,6 +2749,7 @@ fn maybe_auto_summarize(
     if crate::arbos_layout::tombstone_after_summary(&result) {
         let notice = result.expect("a written summary");
         inner.drop_harness_resume(chat_id, cwd);
+        inner.supersede_live_runtime(chat_id);
         let _ = handle.write_system_message(
             &format!("summarize-auto-{}", new_id()),
             &notice,
