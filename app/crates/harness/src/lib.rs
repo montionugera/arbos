@@ -308,7 +308,13 @@ pub mod windows_process;
 /// the current process. This lets GUI/service launches find user-installed
 /// CLIs such as Homebrew's `gh` without changing the daemon's own environment.
 pub fn compose_login_shell_path(cmd: &mut tokio::process::Command) {
-    compose_path(cmd.as_std_mut(), std::iter::empty());
+    compose_login_shell_path_std(cmd.as_std_mut());
+}
+
+/// `compose_login_shell_path` for a synchronous child, such as the
+/// subscription poller's `gh` call.
+pub fn compose_login_shell_path_std(cmd: &mut std::process::Command) {
+    compose_path(cmd, std::iter::empty());
 }
 
 /// Compose the child's PATH: the resolved executable's directory first, then

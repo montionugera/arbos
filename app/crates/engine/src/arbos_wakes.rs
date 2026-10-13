@@ -188,12 +188,29 @@ pub fn spawn(host: DocHost, workspace: WorkspaceHost, sessions: SessionsEngine) 
 
 fn tick(host: &DocHost, workspace: &WorkspaceHost, sessions: &SessionsEngine, poll_github: bool) {
     crate::arbos_remote::mirror(host, workspace);
+    // The GitHub key is read once per poll window, from the store Settings
+    // Keys writes — never from a variable this process happened to inherit.
+    let token = poll_github.then(github_token).flatten();
     for (chat_id, cwd) in main_chats(workspace) {
-        if let Err(err) = tick_project(host, sessions, &chat_id, &cwd, poll_github) {
+        if let Err(err) = tick_project(
+            host,
+            sessions,
+            &chat_id,
+            &cwd,
+            poll_github,
+            token.as_deref(),
+        ) {
             tracing::warn!(chat = %chat_id, error = %err, "subscription project tick failed");
         }
         tick_goal(host, sessions, &chat_id, &cwd);
     }
+}
+
+/// The person's GitHub key, as Settings Keys stores it. Workers receive the
+/// same key as `GH_TOKEN`; the poller reads the store itself, so a
+/// subscription never depends on how this process was launched.
+fn github_token() -> Option<String> {
+    zeron_harness::secrets::read("github")
 }
 
 /// The durable goal: wake idle Main when the goal's interval has passed.
@@ -245,6 +262,7 @@ fn tick_project(
     chat_id: &str,
     cwd: &str,
     poll_github: bool,
+    token: Option<&str>,
 ) -> Result<(), String> {
     let project = Path::new(cwd);
     let mut state = read_state(cwd);
@@ -280,8 +298,8 @@ fn tick_project(
         let before = serde_json::to_string(&*slot).unwrap_or_default();
         let event = match sub.kind.as_str() {
             "timer" => timer_body(&sub, slot).map(|due| due.then(|| json!({}))),
-            "github_pr" if poll_github => github_pr_body(&sub, slot),
-            "github_ci" if poll_github => github_ci_body(&sub, slot),
+            "github_pr" if poll_github => github_pr_body(&sub, slot, token),
+            "github_ci" if poll_github => github_ci_body(&sub, slot, token),
             "slack" if poll_github => slack_body(&sub, slot),
             "github_pr" | "github_ci" | "slack" => Ok(None),
             other => {
@@ -412,11 +430,20 @@ pub fn wake_body(batch: &[Firing]) -> String {
 
 fn summary_of(sub: &Subscription, id: &str, fields: &Value) -> String {
     match sub.kind.as_str() {
-        "github_pr" => format!(
-            "Pull request {} on {} went red.",
-            sub.pr.unwrap_or_default(),
-            sub.repo
-        ),
+        "github_pr" => {
+            let pr = sub.pr.unwrap_or_default();
+            if let Some(state) = fields.get("state").and_then(Value::as_str) {
+                if state == "merged" {
+                    format!("Pull request {pr} on {} merged.", sub.repo)
+                } else {
+                    format!("Pull request {pr} on {} was closed.", sub.repo)
+                }
+            } else if fields.get("failed").and_then(Value::as_u64).unwrap_or(0) > 0 {
+                format!("Pull request {pr} on {} went red.", sub.repo)
+            } else {
+                format!("Pull request {pr} on {} went green.", sub.repo)
+            }
+        }
         "github_ci" => format!(
             "CI on {} branch {} finished: {} passed, {} failed.",
             sub.repo,
@@ -758,70 +785,154 @@ fn timer_body(sub: &Subscription, state: &mut WakeState) -> Result<bool, String>
     Ok(true)
 }
 
-fn github_pr_body(sub: &Subscription, state: &mut WakeState) -> Result<Option<Value>, String> {
+fn github_pr_body(
+    sub: &Subscription,
+    state: &mut WakeState,
+    token: Option<&str>,
+) -> Result<Option<Value>, String> {
     let Some(pr) = sub.pr else {
         return Err("github_pr needs a pr number".into());
     };
-    if !valid_repo(&sub.repo) {
+    poll_github_pr(&sub.repo, pr, token, &mut state.last_key)
+}
+
+/// One `github_pr` poll: GitHub is asked through the person's key from
+/// Settings Keys, and the event is the head commit's CI finishing — green or
+/// red — or the pull request merging or closing, each the first time it
+/// happens. `last_key` is the subscription slot's memory of what already
+/// fired, so each outcome wakes Main once.
+pub fn poll_github_pr(
+    repo: &str,
+    pr: u64,
+    token: Option<&str>,
+    last_key: &mut String,
+) -> Result<Option<Value>, String> {
+    if !valid_repo(repo) {
         return Err("github_pr repo must be owner/name".into());
     }
-    let value = gh_json(&[
-        "pr",
-        "view",
-        &pr.to_string(),
-        "--repo",
-        &sub.repo,
-        "--json",
-        "statusCheckRollup,headRefOid,title,url",
-    ])?;
+    let Some(token) = token else {
+        tracing::warn!(
+            repo = repo,
+            pr,
+            "github_pr subscription is waiting for the GitHub key in Settings Keys"
+        );
+        return Ok(None);
+    };
+    let pr_number = pr.to_string();
+    let value = gh_json(
+        &[
+            "pr",
+            "view",
+            &pr_number,
+            "--repo",
+            repo,
+            "--json",
+            "state,statusCheckRollup,headRefOid,title,url",
+        ],
+        Some(token),
+    )?;
+    let Some(mut fields) = pr_outcome(&value, last_key) else {
+        return Ok(None);
+    };
+    fields["pr"] = json!(pr);
+    fields["repo"] = json!(repo);
+    Ok(Some(fields))
+}
+
+/// The pull request event hiding in one `gh pr view --json` reply: the head
+/// commit's CI once every check has finished — green or red — and the pull
+/// request merging or closing. `last_key` remembers what already fired, so
+/// each outcome wakes Main once.
+pub fn pr_outcome(value: &Value, last_key: &mut String) -> Option<Value> {
+    let state = value.get("state").and_then(Value::as_str).unwrap_or("");
+    let title = value.get("title").cloned().unwrap_or(Value::Null);
+    let url = value.get("url").cloned().unwrap_or(Value::Null);
+    if state.eq_ignore_ascii_case("merged") || state.eq_ignore_ascii_case("closed") {
+        let key = format!("pr:{}", state.to_ascii_lowercase());
+        if *last_key == key {
+            return None;
+        }
+        *last_key = key;
+        return Some(json!({
+            "state": state.to_ascii_lowercase(),
+            "title": title,
+            "url": url,
+        }));
+    }
     let sha = value
         .get("headRefOid")
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    if sha.is_empty() {
-        return Ok(None);
+        .filter(|sha| !sha.is_empty())?;
+    let rollup = value.get("statusCheckRollup");
+    let checks = rollup.and_then(Value::as_array)?;
+    // No checks yet, or one still running: nothing has finished.
+    if checks.is_empty() || !checks.iter().all(check_done) {
+        return None;
     }
-    let key = format!("{sha}:red");
-    if state.last_key == key {
-        return Ok(None);
+    let key = format!("{sha}:ci");
+    if *last_key == key {
+        return None;
     }
-    let failed = failed_checks(value.get("statusCheckRollup"));
-    if failed.is_empty() {
-        return Ok(None);
-    }
-    state.last_key = key;
-    let title = value.get("title").and_then(Value::as_str).unwrap_or("");
-    let url = value.get("url").and_then(Value::as_str).unwrap_or("");
-    Ok(Some(json!({
-        "pr": pr,
-        "repo": sub.repo,
+    *last_key = key;
+    let failed = failed_checks(rollup);
+    Some(json!({
+        "sha": sha,
+        "passed": checks.len() as u64 - failed.len() as u64,
+        "failed": failed.len() as u64,
+        "failedChecks": failed,
         "title": title,
         "url": url,
-        "sha": sha,
-        "failed": failed,
-    })))
+    }))
 }
 
-fn github_ci_body(sub: &Subscription, state: &mut WakeState) -> Result<Option<Value>, String> {
+/// A rollup check that has finished: a check run's `status` is COMPLETED; a
+/// commit status's `state` is anything but a pending one.
+fn check_done(check: &Value) -> bool {
+    if let Some(status) = check.get("status").and_then(Value::as_str) {
+        return status.eq_ignore_ascii_case("completed");
+    }
+    match check.get("state").and_then(Value::as_str) {
+        Some(state) => {
+            !state.eq_ignore_ascii_case("expected") && !state.eq_ignore_ascii_case("pending")
+        }
+        None => false,
+    }
+}
+
+fn github_ci_body(
+    sub: &Subscription,
+    state: &mut WakeState,
+    token: Option<&str>,
+) -> Result<Option<Value>, String> {
     if !valid_repo(&sub.repo) {
         return Err("github_ci repo must be owner/name".into());
     }
     if !valid_branch(&sub.branch) {
         return Err("github_ci needs a branch".into());
     }
-    let value = gh_json(&[
-        "run",
-        "list",
-        "--repo",
-        &sub.repo,
-        "--branch",
-        &sub.branch,
-        "--limit",
-        "30",
-        "--json",
-        "databaseId,conclusion,displayTitle,name,url,status,headSha",
-    ])?;
+    let Some(token) = token else {
+        tracing::warn!(
+            repo = %sub.repo,
+            branch = %sub.branch,
+            "github_ci subscription is waiting for the GitHub key in Settings Keys"
+        );
+        return Ok(None);
+    };
+    let value = gh_json(
+        &[
+            "run",
+            "list",
+            "--repo",
+            &sub.repo,
+            "--branch",
+            &sub.branch,
+            "--limit",
+            "30",
+            "--json",
+            "databaseId,conclusion,displayTitle,name,url,status,headSha",
+        ],
+        Some(token),
+    )?;
     let Some(runs) = value.as_array() else {
         return Ok(None);
     };
@@ -953,13 +1064,24 @@ fn valid_branch(branch: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
 }
 
-fn gh_json(args: &[&str]) -> Result<Value, String> {
+/// One `gh` call, answered as JSON. `gh` is found through the login shell's
+/// PATH, like every other GitHub call the engine makes — a GUI launch's own
+/// PATH misses Homebrew's `gh` — and it never prompts, because a GUI launch
+/// has no terminal to answer one. The key from Settings Keys rides in
+/// `GH_TOKEN`, which `gh` reads itself; it is never an argument, so a failed
+/// call cannot log it.
+fn gh_json(args: &[&str], token: Option<&str>) -> Result<Value, String> {
     let mut command = Command::new("gh");
+    zeron_harness::compose_login_shell_path_std(&mut command);
     command
         .args(args)
+        .env("GH_PROMPT_DISABLED", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(token) = token {
+        command.env("GH_TOKEN", token);
+    }
     let output = command.output().map_err(|err| err.to_string())?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
@@ -1153,6 +1275,142 @@ mod tests {
         assert_eq!(outcome["runs"].as_array().unwrap().len(), 2);
         assert_eq!(key, "sha:abc");
         assert!(ci_outcome(&finished, &mut key).is_none());
+    }
+
+    fn pr_view(state: &str, sha: &str, checks: Value) -> Value {
+        json!({
+            "state": state,
+            "headRefOid": sha,
+            "title": "Show waiting for a worker whose model settles silently",
+            "url": "https://github.com/unarbos/arbos/pull/849",
+            "statusCheckRollup": checks,
+        })
+    }
+
+    const SHA: &str = "ce22ddd5617830793e8836b4374f70008b3e8343";
+
+    #[test]
+    fn pr_ci_wakes_once_when_the_head_commit_finishes_green_or_red() {
+        let running = pr_view(
+            "OPEN",
+            SHA,
+            json!([
+                {"name": "CI", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "test", "status": "IN_PROGRESS", "conclusion": null},
+                {"context": "legacy", "state": "PENDING"},
+            ]),
+        );
+        let mut key = String::new();
+        assert!(pr_outcome(&running, &mut key).is_none());
+        assert_eq!(key, "");
+
+        let green = pr_view(
+            "OPEN",
+            SHA,
+            json!([
+                {"name": "CI", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"context": "legacy", "state": "SUCCESS"},
+            ]),
+        );
+        let outcome = pr_outcome(&green, &mut key).unwrap();
+        assert_eq!(outcome["sha"], SHA);
+        assert_eq!(outcome["passed"], 3);
+        assert_eq!(outcome["failed"], 0);
+        assert_eq!(key, format!("{SHA}:ci"));
+        assert!(
+            pr_outcome(&green, &mut key).is_none(),
+            "one wake per commit"
+        );
+
+        // A new commit on the pull request, and this time a check failed.
+        let red = pr_view(
+            "OPEN",
+            "28a918e328a918e328a918e328a918e328a918e3",
+            json!([
+                {"name": "CI", "status": "COMPLETED", "conclusion": "FAILURE"},
+                {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            ]),
+        );
+        let outcome = pr_outcome(&red, &mut key).unwrap();
+        assert_eq!(outcome["sha"], "28a918e328a918e328a918e328a918e328a918e3");
+        assert_eq!(outcome["failed"], 1);
+        assert_eq!(outcome["failedChecks"][0], "CI: failure");
+        assert!(pr_outcome(&red, &mut key).is_none());
+    }
+
+    #[test]
+    fn pr_merge_and_close_wake_once_each_after_ci() {
+        let mut key = String::new();
+        let green = pr_view(
+            "OPEN",
+            SHA,
+            json!([
+                {"name": "CI", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            ]),
+        );
+        assert!(pr_outcome(&green, &mut key).unwrap()["passed"] == 1);
+
+        let merged = pr_view("MERGED", SHA, json!([]));
+        let outcome = pr_outcome(&merged, &mut key).unwrap();
+        assert_eq!(outcome["state"], "merged");
+        assert_eq!(key, "pr:merged");
+        assert!(
+            pr_outcome(&merged, &mut key).is_none(),
+            "the merge wakes once"
+        );
+
+        let closed = pr_view("CLOSED", SHA, json!([]));
+        let outcome = pr_outcome(&closed, &mut key).unwrap();
+        assert_eq!(outcome["state"], "closed");
+        assert_eq!(key, "pr:closed");
+        assert!(pr_outcome(&closed, &mut key).is_none());
+
+        // A pull request with no checks at all still wakes when it closes.
+        let mut bare = String::new();
+        assert!(pr_outcome(&pr_view("OPEN", SHA, json!(null)), &mut bare).is_none());
+        assert!(pr_outcome(&pr_view("OPEN", SHA, json!([])), &mut bare).is_none());
+        assert!(pr_outcome(&pr_view("MERGED", SHA, json!(null)), &mut bare).is_some());
+    }
+
+    #[test]
+    fn the_pr_summary_names_what_happened() {
+        let sub = Subscription {
+            kind: "github_pr".into(),
+            prompt: String::new(),
+            every_seconds: 0,
+            hour: None,
+            minute: None,
+            repo: "unarbos/arbos".into(),
+            pr: Some(849),
+            branch: String::new(),
+            channel: String::new(),
+            created: "2026-10-13T01:41:00Z".into(),
+        };
+        assert_eq!(
+            summary_of(&sub, "pr-849", &json!({"state": "merged"})),
+            "Pull request 849 on unarbos/arbos merged."
+        );
+        assert_eq!(
+            summary_of(&sub, "pr-849", &json!({"state": "closed"})),
+            "Pull request 849 on unarbos/arbos was closed."
+        );
+        assert_eq!(
+            summary_of(
+                &sub,
+                "pr-849",
+                &json!({"sha": "abc", "passed": 3, "failed": 0})
+            ),
+            "Pull request 849 on unarbos/arbos went green."
+        );
+        assert_eq!(
+            summary_of(
+                &sub,
+                "pr-849",
+                &json!({"sha": "abc", "passed": 2, "failed": 1})
+            ),
+            "Pull request 849 on unarbos/arbos went red."
+        );
     }
 
     #[test]
