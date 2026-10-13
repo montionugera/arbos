@@ -343,10 +343,55 @@ fn compose_path<'a>(
     if let Some(shell_path) = shell_env::login_shell_path() {
         paths.extend(std::env::split_paths(shell_path));
     }
+    paths.extend(homebrew_bin_dirs());
     let mut seen = std::collections::HashSet::new();
     paths.retain(|p| !p.as_os_str().is_empty() && seen.insert(p.clone()));
     if let Ok(joined) = std::env::join_paths(paths) {
         cmd.env("PATH", joined);
+    }
+}
+
+/// Homebrew's bin directories, last on a child's PATH. A GUI launch on macOS
+/// has neither on its own PATH, and the login shell adds one only when the
+/// person's dotfiles do; on the Mac rig a GUI user with no `.zprofile` left
+/// the subscription poller's `gh` call failing with "No such file or
+/// directory" every 20 s. Only directories that exist are added, after
+/// everything the person set, so they never shadow a chosen tool.
+fn homebrew_bin_dirs() -> Vec<std::path::PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    ["/opt/homebrew/bin", "/usr/local/bin"]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .filter(|dir| dir.is_dir())
+        .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn homebrew_dirs_come_last_and_only_when_present() {
+    let mut cmd = std::process::Command::new("true");
+    compose_login_shell_path_std(&mut cmd);
+    let path = cmd
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value.map(|v| v.to_os_string()))
+        .expect("PATH is set on the child");
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+    let expected = homebrew_bin_dirs();
+    if cfg!(target_os = "macos") {
+        for dir in &expected {
+            assert!(dir.is_dir());
+            assert!(dirs.contains(dir), "{} missing from {:?}", dir.display(), dirs);
+        }
+    } else {
+        assert!(expected.is_empty());
+    }
+    // Entries the person set keep their place ahead of the fallbacks.
+    if let Some(own) = std::env::var_os("PATH") {
+        let first = std::env::split_paths(&own).find(|p| !p.as_os_str().is_empty());
+        assert_eq!(dirs.first(), first.as_ref());
     }
 }
 
