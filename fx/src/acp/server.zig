@@ -2141,6 +2141,13 @@ fn startPrompt(state: *ServerState, alloc: Allocator, msg: *const jsonrpc.Messag
 
     session.cancel_flag.store(false, .seq_cst);
     session.steering.open(state.alloc);
+    if (comptime !host_target.is_wasm) {
+        if (!state.cfg.minimal_kernel) {
+            const home = try app_runtime_setup.resolveSkillsHome(state.alloc);
+            defer if (home) |value| state.alloc.free(value);
+            refreshSkillsForPrompt(state, home);
+        }
+    }
     if (comptime host_target.is_wasm) {
         promptWorkerMain(active);
         jsonrpc.freeMessage(active.alloc, &active.msg);
@@ -2148,6 +2155,25 @@ fn startPrompt(state: *ServerState, alloc: Allocator, msg: *const jsonrpc.Messag
     } else {
         active.thread = try std.Thread.spawn(.{}, promptWorkerMain, .{active});
         state.active_prompt = active;
+    }
+}
+
+/// Picks up skills written since the catalog last loaded, such as a project
+/// skill the model saved one turn earlier, before the prompt composes its
+/// skill list. A refresh that fails keeps the current catalog; it never
+/// blocks the turn.
+pub fn refreshSkillsForPrompt(state: *ServerState, home: ?[]const u8) void {
+    const completion = state.skills.refreshNow(
+        state.alloc,
+        state.workspace_root,
+        home,
+        builtin_skills.root_policy,
+    ) catch |err| {
+        debug_trace.logf("acp", "skill catalog refresh before prompt failed err={s}", .{@errorName(err)});
+        return;
+    };
+    if (completion == .adopted) {
+        skill_runtime.traceDiagnostics("acp_prompt_refresh", state.skills.diagnostics);
     }
 }
 
@@ -4394,6 +4420,52 @@ fn acpModelTestState(
         .total_input_tokens = 0,
         .total_output_tokens = 0,
     };
+}
+
+test "ACP prompts see a project skill saved after the session started" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx/skills");
+    try tmp.dir.createDirPath(io_mod.getIo(), "work");
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    const work = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "work");
+    defer alloc.free(work);
+    const managed = try std.fs.path.join(alloc, &.{ home, ".fx", "skills" });
+    defer alloc.free(managed);
+
+    var state: ServerState = undefined;
+    state.alloc = alloc;
+    state.workspace_root = work;
+    state.skills = .{};
+    defer state.skills.deinit(alloc);
+    const loaded = try skill_runtime.loadVisibleSkills(alloc, work, home, managed, builtin_skills.root_policy);
+    try state.skills.replaceLoaded(alloc, try alloc.dupe(u8, managed), loaded.skills, loaded.diagnostics);
+    try std.testing.expect(findSkillByName(state.skills.items, "file-count") == null);
+
+    refreshSkillsForPrompt(&state, home);
+    try std.testing.expect(findSkillByName(state.skills.items, "file-count") == null);
+
+    try tmp.dir.createDirPath(io_mod.getIo(), "work/.arbos/skills/file-count");
+    var file = try tmp.dir.createFile(std.testing.io, "work/.arbos/skills/file-count/SKILL.md", .{ .truncate = true });
+    try file.writeStreamingAll(io_mod.getIo(), "---\nname: file-count\ndescription: count the files in this project\n---\nbody\n");
+    file.close(io_mod.getIo());
+
+    refreshSkillsForPrompt(&state, home);
+    const saved = findSkillByName(state.skills.items, "file-count") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(skill_runtime.SkillSource.workspace_arbos, saved.source);
+    try std.testing.expectEqualStrings("count the files in this project", saved.description);
+
+    refreshSkillsForPrompt(&state, null);
+    try std.testing.expect(findSkillByName(state.skills.items, "file-count") != null);
+}
+
+fn findSkillByName(skills: []const skill_runtime.Skill, name: []const u8) ?skill_runtime.Skill {
+    for (skills) |skill| {
+        if (std.mem.eql(u8, skill.name, name)) return skill;
+    }
+    return null;
 }
 
 test "ACP ultrafast writes preserve v2 baselines across other preference changes" {

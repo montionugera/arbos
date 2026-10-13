@@ -2318,6 +2318,42 @@ pub const Runtime = struct {
         return completion;
     }
 
+    /// Refreshes the catalog on the calling thread and lands the result
+    /// before returning, so a prompt composed right after sees skills written
+    /// since the last refresh. Hands a refresh already in flight to
+    /// `pollRefresh` instead of racing it. `.none` means the new catalog is
+    /// parked behind leases on the two older generations; the caller then
+    /// keeps the current catalog.
+    pub fn refreshNow(
+        self: *Runtime,
+        alloc: Allocator,
+        workspace_root: []const u8,
+        home: ?[]const u8,
+        root_policy: skill_contract.RootPolicy,
+    ) !RefreshCompletion {
+        const configured_home = home orelse return .unchanged;
+        if (self.refresh_task != null or self.pending_catalog != null) {
+            return self.pollRefresh(alloc, workspace_root, root_policy);
+        }
+        const generation = self.nextGeneration();
+        var base_catalog = self.acquireCatalog();
+        var base_catalog_owned = true;
+        defer if (base_catalog_owned) base_catalog.deinit();
+        const task = try CatalogRefreshTask.create(
+            alloc,
+            workspace_root,
+            configured_home,
+            self.dir,
+            root_policy,
+            generation,
+            base_catalog,
+        );
+        base_catalog_owned = false;
+        task.run();
+        self.refresh_task = task;
+        return self.pollRefresh(alloc, workspace_root, root_policy);
+    }
+
     fn startPendingRefresh(
         self: *Runtime,
         alloc: Allocator,
@@ -3767,6 +3803,81 @@ test "skill refresh publishes one generation and coalesces one latest request" {
     }
     try std.testing.expectEqual(RefreshCompletion.adopted, terminal);
     try std.testing.expectEqual(@as(usize, 2), runtime.items.len);
+}
+
+test "refreshNow lands a workspace skill written after the catalog loaded" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx/skills");
+    try tmp.dir.createDirPath(io_mod.getIo(), "work");
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    const work = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "work");
+    defer alloc.free(work);
+    const managed = try std.fs.path.join(alloc, &.{ home, ".fx", "skills" });
+    defer alloc.free(managed);
+    const project_roots = [_]skill_contract.RootSpec{
+        .{ .source = .workspace_arbos, .path = ".arbos/skills" },
+    };
+    const policy: skill_contract.RootPolicy = .{
+        .workspace_roots = &project_roots,
+        .managed_root_source = .global_fx,
+    };
+
+    var runtime = Runtime{};
+    defer runtime.deinit(alloc);
+    const loaded = try loadVisibleSkills(alloc, work, home, managed, policy);
+    try runtime.replaceLoaded(alloc, try alloc.dupe(u8, managed), loaded.skills, loaded.diagnostics);
+    try std.testing.expectEqual(@as(usize, 0), runtime.items.len);
+
+    // A catalog installed with replaceLoaded carries no root fingerprints, so
+    // the first refresh records them even though nothing changed on disk.
+    try std.testing.expectEqual(
+        RefreshCompletion.adopted,
+        try runtime.refreshNow(alloc, work, home, policy),
+    );
+    try std.testing.expectEqual(@as(usize, 0), runtime.items.len);
+    try std.testing.expect(runtime.refresh_task == null);
+    try std.testing.expectEqual(
+        RefreshCompletion.unchanged,
+        try runtime.refreshNow(alloc, work, home, policy),
+    );
+
+    try writeTempFile(
+        &tmp,
+        "work/.arbos/skills/file-count/SKILL.md",
+        "---\nname: file-count\ndescription: saved by the model one turn earlier\n---\nbody\n",
+    );
+    try std.testing.expectEqual(
+        RefreshCompletion.adopted,
+        try runtime.refreshNow(alloc, work, home, policy),
+    );
+    try std.testing.expectEqual(@as(usize, 1), runtime.items.len);
+    try std.testing.expectEqualStrings("file-count", runtime.items[0].name);
+    try std.testing.expectEqual(skill_contract.SkillSource.workspace_arbos, runtime.items[0].source);
+    try std.testing.expectEqual(
+        RefreshCompletion.unchanged,
+        try runtime.refreshNow(alloc, work, home, policy),
+    );
+
+    var lease = runtime.acquireCatalog();
+    defer lease.deinit();
+    try writeTempFile(
+        &tmp,
+        "work/.arbos/skills/file-count/SKILL.md",
+        "---\nname: file-count\ndescription: edited while a turn holds the old catalog\n---\nbody\n",
+    );
+    try std.testing.expectEqual(
+        RefreshCompletion.adopted,
+        try runtime.refreshNow(alloc, work, home, policy),
+    );
+    try std.testing.expectEqualStrings("saved by the model one turn earlier", lease.items[0].description);
+    try std.testing.expectEqualStrings("edited while a turn holds the old catalog", runtime.items[0].description);
+    try std.testing.expectEqual(
+        RefreshCompletion.unchanged,
+        try runtime.refreshNow(alloc, work, null, policy),
+    );
 }
 
 test "an empty launch catalog fills from a refresh before its startup notice is due" {
