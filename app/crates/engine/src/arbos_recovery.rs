@@ -5,11 +5,11 @@
 //! word, holds a paused turn open for one automatic resume, and marks the
 //! worker `error` when a pause outlives [`PAUSE_LIMIT`].
 //!
-//! The [`SilentModelPulse`] covers the one failure fx cannot report today: a
-//! model request that settles with no content, no error, and no retry
-//! decision, so no frame ever reaches the engine.
+//! The [`SilentModelPulse`] covers the failure fx cannot report in time: a
+//! model request that sends nothing. fx waits for the first byte with no
+//! limit at all and gives a started stream ten minutes before it calls a
+//! stall, so a shorter stall produces no retry, no pause, and no frame.
 
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use zeron_proto::{AgentEvent, ModelRecoveryState};
@@ -177,7 +177,9 @@ impl RecoveryTracker {
     /// one schedules its one automatic resume and says when it goes out,
     /// the rest wait for the five-minute rule. A resumed turn that ends with
     /// no new pause is over, and so is any turn that ended clean; either
-    /// gives the next turn a fresh resume.
+    /// gives the next turn a fresh resume. A retry line or a failure the
+    /// `Done` outlives ends with the turn too: the next turn starts clear,
+    /// so its silent-model pulse can run.
     pub fn turn_ended(&mut self, now: Instant) -> TurnEnd {
         match &self.phase {
             Phase::Paused {
@@ -193,14 +195,13 @@ impl RecoveryTracker {
                 }
             }
             Phase::Paused { .. } if self.resumes == 0 => TurnEnd::Held { resume_at: None },
-            Phase::Paused { .. } | Phase::Clear => {
+            Phase::Paused { .. } | Phase::Clear | Phase::Active | Phase::Failed => {
                 self.phase = Phase::Clear;
                 self.resumes = 0;
                 self.resume_at = None;
                 self.last_step.clear();
                 TurnEnd::Over
             }
-            Phase::Active | Phase::Failed => TurnEnd::Over,
         }
     }
 
@@ -251,131 +252,85 @@ impl RecoveryTracker {
 }
 
 /// How long a live worker turn must produce no events at all before the
-/// silent-model pulse arms. Shorter silent stretches are normal work (a long
-/// tool call, redacted thinking, an agent waiting on an external process),
-/// so the pulse stays out of them.
+/// silent-model pulse speaks. Shorter silent stretches are normal work
+/// (redacted thinking, a slow first token), so the pulse stays out of them.
 pub const SILENT_MODEL_AFTER: Duration = Duration::from_secs(120);
-/// How often an armed pulse re-reads the usage ledger while the turn stays
-/// silent: one bounded tail read per window.
-pub const SILENT_MODEL_POLL: Duration = Duration::from_secs(15);
 /// The one line the pulse writes while it waits. PR 841's retry line opens
 /// with the same words, so a turn the pulse flags that goes on to report
 /// real recovery frames reads as one story.
 pub const SILENT_MODEL_STEP: &str = "Waiting on the model";
-/// The ledger tail the pulse reads: hundreds of entries, and always the
-/// newest one, which is all the pulse compares against.
-const LEDGER_TAIL: u64 = 64 * 1024;
 
-/// Watches for a worker's model settling requests silently. fx reports
+/// Watches a worker's turn for a model that sends nothing. fx reports
 /// retries and pauses as [`AgentEvent::ModelRecovery`] frames (PR 841), but
-/// a request that settles with no content, no error, and no retry decision
-/// leaves nothing on the stream — the 2026-10-12 arbos-updater window, where
-/// three settlements ~300 s apart kept a live worker's status on `working`
-/// for eleven minutes. The only trace is fx's usage ledger, which records
-/// one `incident` per settled request, so the pulse reads its tail: once the
-/// turn has been silent past [`SILENT_MODEL_AFTER`] it baselines the ledger,
-/// and one incident newer than that baseline means the model is still
-/// settling requests with nothing to show — `waiting`, through PR 841's
-/// writer, until any event at all comes back.
+/// it waits for a response head with no limit and gives a started stream ten
+/// minutes before it calls a stall, so a stall shorter than that puts no
+/// frame on the stream at all. The first pulse (PR 849) read fx's usage
+/// ledger instead and waited for an `incident` newer than the one it saw at
+/// 120 s of silence — but a stalled request settles nothing, so the ledger
+/// gives it nothing newer, and on the 2026-10-13 rig a ten-minute engy stall
+/// kept the worker on `working` throughout.
 ///
-/// The silence is the signal, not the incidents: a healthy worker logs
-/// dozens of incidents while it works (the control case measured 39 in
-/// eleven minutes), so the pulse never arms while events flow. Ledger
-/// timestamps are compared to each other only, never to the local clock —
-/// the ledger's `occurred_at_ms` is fx's notion of when a request settled.
+/// The silence is the signal. Once a live worker turn has produced no event
+/// for [`SILENT_MODEL_AFTER`] while nothing in its fold is still running (no
+/// open tool call, no question to the person), the worker reads `waiting`
+/// with [`SILENT_MODEL_STEP`] as its step, through PR 841's writer. The next
+/// event of any kind restores `working`.
 #[derive(Debug)]
 pub struct SilentModelPulse {
-    /// The worker's fx home; `None` watches nothing (this run is not a
-    /// worker turn inside a project).
-    home: Option<PathBuf>,
-    /// Silence threshold and re-check cadence. `ZERON_SILENT_MODEL_MS` and
-    /// `ZERON_SILENT_MODEL_POLL_MS` override both (tests); `0` on the
-    /// threshold disables the pulse outright.
+    /// `false` watches nothing: this run is not a worker turn inside a
+    /// project (Main's line comes from the frames; a side chat has no worker
+    /// status to hold).
+    worker: bool,
+    /// Silence threshold. `ZERON_SILENT_MODEL_MS` overrides it (tests); `0`
+    /// disables the pulse outright.
     after: Duration,
-    poll: Duration,
-    /// `false` when `ZERON_SILENT_MODEL_MS=0`: the pulse never arms.
+    /// `false` when `ZERON_SILENT_MODEL_MS=0`: the pulse never speaks.
     armed_by_default: bool,
-    /// When the next ledger sample is due; `None` until the turn has been
-    /// silent past `after` (that first sample takes the baseline).
-    due_at: Option<Instant>,
-    /// The newest incident the ledger held when the pulse armed. A later
-    /// one is the wait signal.
-    baseline_ms: Option<u64>,
     /// The pulse wrote `waiting`; the next event of any kind restores
     /// `working`.
     flipped: bool,
 }
 
 impl SilentModelPulse {
-    /// `home` is the worker's fx home (the ledger lives at
-    /// `<home>/.fx/usage.jsonl`); `None` makes the pulse inert.
-    pub fn new(home: Option<PathBuf>) -> Self {
+    /// `worker` is whether this run is a worker turn inside a project;
+    /// `false` makes the pulse inert.
+    pub fn new(worker: bool) -> Self {
         let threshold = env_ms("ZERON_SILENT_MODEL_MS");
-        let poll = env_ms("ZERON_SILENT_MODEL_POLL_MS");
         Self {
-            home,
+            worker,
             after: threshold
                 .filter(|ms| *ms > 0)
                 .map(Duration::from_millis)
                 .unwrap_or(SILENT_MODEL_AFTER),
-            poll: poll
-                .filter(|ms| *ms > 0)
-                .map(Duration::from_millis)
-                .unwrap_or(SILENT_MODEL_POLL),
             armed_by_default: threshold.is_none_or(|ms| ms > 0),
-            due_at: None,
-            baseline_ms: None,
             flipped: false,
         }
     }
 
-    /// The pulse has a ledger to watch and has not spoken yet.
+    /// The pulse has a worker to watch and has not spoken yet.
     pub fn watching(&self) -> bool {
-        self.armed_by_default && self.home.is_some() && !self.flipped
+        self.armed_by_default && self.worker && !self.flipped
     }
 
-    /// When the drive loop should next run [`Self::tick`]: the arming moment
-    /// while unarmed, the next sample once armed, and never once the pulse
-    /// has spoken or has nothing to watch.
+    /// When the drive loop should next run [`Self::tick`]: one silence
+    /// window past the last event, and never once the pulse has spoken or
+    /// has nothing to watch.
     pub fn next_due(&self, last_event_at: Instant) -> Option<Instant> {
-        if !self.watching() {
-            return None;
-        }
-        Some(self.due_at.unwrap_or(last_event_at + self.after))
+        self.watching().then(|| last_event_at + self.after)
     }
 
-    /// One drive-loop tick: past the silence threshold the pulse arms on the
-    /// ledger as it stands, and each poll after that compares a fresh read
-    /// against that baseline. The waiting effect comes back once, on the
-    /// first incident newer than the baseline.
+    /// One drive-loop tick: past the silence threshold the pulse speaks,
+    /// once. The caller holds the tick back while the turn has a tool call
+    /// or a question still open — that silence belongs to the tool, not the
+    /// model.
     pub fn tick(&mut self, now: Instant, last_event_at: Instant) -> Option<RecoveryEffect> {
-        let due = match self.due_at {
-            None => self.armed_by_default && now >= last_event_at + self.after,
-            Some(at) => now >= at,
-        };
-        if !due || !self.watching() {
+        if !self.watching() || now < last_event_at + self.after {
             return None;
         }
-        let home = self.home.clone()?;
-        let effect = if self.due_at.is_none() {
-            // Arming: whatever the ledger already holds is the baseline —
-            // incidents from before the silence are normal work.
-            self.baseline_ms = latest_incident_ms(&home);
-            None
-        } else {
-            let newer = latest_incident_ms(&home)
-                .is_some_and(|at| self.baseline_ms.is_none_or(|base| at > base));
-            if newer {
-                self.flipped = true;
-                Some(RecoveryEffect::Waiting {
-                    step: SILENT_MODEL_STEP.to_owned(),
-                })
-            } else {
-                None
-            }
-        };
-        self.due_at = Some(now + self.poll);
-        effect
+        self.flipped = true;
+        Some(RecoveryEffect::Waiting {
+            step: SILENT_MODEL_STEP.to_owned(),
+        })
     }
 
     /// An event of any kind arrived. The silence window restarts, and if the
@@ -384,66 +339,13 @@ impl SilentModelPulse {
     /// next rewrites the line with its own words). Returns whether the pulse
     /// had flipped, exactly once.
     pub fn event(&mut self) -> bool {
-        let flipped = self.flipped;
-        self.due_at = None;
-        self.baseline_ms = None;
-        self.flipped = false;
-        flipped
+        std::mem::take(&mut self.flipped)
     }
 }
 
 /// `ZERON_SILENT_MODEL_MS`-style knobs: whole milliseconds, `0` included.
 fn env_ms(name: &str) -> Option<u64> {
     std::env::var(name).ok()?.trim().parse().ok()
-}
-
-/// The newest `incident` fx's usage ledger holds, from the tail of
-/// `<fx_home>/.fx/usage.jsonl`. fx writes one `incident` per settled request
-/// (usage accounting, not a retry marker); `completeness == "incomplete"`
-/// marks the settlements it could not attribute, which is the shape a
-/// provider that never returns usage data leaves on every request. `None`
-/// when there is nothing to read yet.
-pub fn latest_incident_ms(fx_home: &Path) -> Option<u64> {
-    let tail = ledger_tail(fx_home)?;
-    let mut newest = None;
-    for line in tail.lines() {
-        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if entry.get("kind").and_then(|v| v.as_str()) != Some("incident") {
-            continue;
-        }
-        if entry.get("completeness").and_then(|v| v.as_str()) != Some("incomplete") {
-            continue;
-        }
-        let at = entry.get("occurred_at_ms").and_then(|v| v.as_u64());
-        if newest.is_none_or(|seen| at.is_some_and(|at| at > seen)) {
-            newest = at;
-        }
-    }
-    newest
-}
-
-/// The last [`LEDGER_TAIL`] bytes of the usage ledger, starting on a line
-/// boundary so a record cut in half is never parsed. `None` when the ledger
-/// does not exist yet.
-fn ledger_tail(fx_home: &Path) -> Option<String> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    let mut file = std::fs::File::open(fx_home.join(".fx").join("usage.jsonl")).ok()?;
-    let size = file.metadata().ok()?.len();
-    let start = size.saturating_sub(LEDGER_TAIL);
-    if start > 0 {
-        file.seek(SeekFrom::Start(start)).ok()?;
-    }
-    let mut bytes = Vec::with_capacity((size - start) as usize);
-    file.read_to_end(&mut bytes).ok()?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    if start == 0 {
-        return Some(text);
-    }
-    // The read began mid-record: everything before the first newline is a
-    // partial line, not an entry.
-    text.split_once('\n').map(|(_, rest)| rest.to_owned())
 }
 
 /// "Waiting on the model — try 3 of 8, next in 32 s", with the parts fx
@@ -762,207 +664,81 @@ mod tests {
         assert_eq!(reason_text(None, None), "no reason given");
     }
 
-    /// A scratch fx home with a usage ledger the test appends to, the way
-    /// fx appends one record per settled request.
-    fn ledger_home(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("arbos-pulse-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join(".fx")).unwrap();
-        root
-    }
-
-    /// One fx usage-ledger record, in the exact shape fx 0.0.13 writes.
-    fn incident(ms: u64) -> String {
-        format!(
-            "{{\"schema_version\":1,\"kind\":\"incident\",\"occurred_at_ms\":{ms},\
-             \"completeness\":\"incomplete\"}}\n"
-        )
-    }
-
-    fn append_record(home: &Path, record: &str) {
-        use std::io::Write as _;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(home.join(".fx").join("usage.jsonl"))
-            .unwrap();
-        file.write_all(record.as_bytes()).unwrap();
-    }
-
-    /// The pulse with test-sized windows (the fields are crate-visible).
-    fn quick_pulse(home: &Path) -> SilentModelPulse {
-        let mut pulse = SilentModelPulse::new(Some(home.to_path_buf()));
+    /// The pulse with a test-sized window (the fields are crate-visible).
+    fn quick_pulse() -> SilentModelPulse {
+        let mut pulse = SilentModelPulse::new(true);
         pulse.after = Duration::from_millis(20);
-        pulse.poll = Duration::from_millis(5);
         pulse
     }
 
-    /// The incident's own ledger: the coverage header fx opens the file
-    /// with, then the dense incident cadence of a healthy worker at work,
-    /// ending at 22:33:41 UTC — the moment the model went silent.
-    fn incident_prefix(home: &Path) {
-        append_record(
-            home,
-            "{\"schema_version\":1,\"kind\":\"coverage\",\"started_at_ms\":1791834492203}\n",
-        );
-        append_record(home, &incident(1791844307724));
-        append_record(home, &incident(1791844353713));
-        append_record(home, &incident(1791844421558));
-    }
-
+    /// The 2026-10-13 rig stall, as the pulse sees it: a live worker turn
+    /// stops producing events and nothing else happens — no frame, and
+    /// nothing a request could settle. One silence window later the pulse
+    /// speaks, once; any event at all restores `working`.
     #[test]
-    fn the_ledger_tail_yields_the_newest_incomplete_incident() {
-        let home = ledger_home("reader");
-        // No ledger yet: nothing to read.
-        assert_eq!(latest_incident_ms(&home), None);
-        incident_prefix(&home);
-        // Records that are not incomplete incidents never count, and a
-        // malformed line (a torn write) is skipped, not fatal.
-        append_record(
-            &home,
-            "{\"schema_version\":1,\"kind\":\"incident\",\"occurred_at_ms\":1791849900000,\
-             \"completeness\":\"complete\"}\n",
-        );
-        append_record(
-            &home,
-            "{\"schema_version\":1,\"kind\":\"generation\",\"occurred_at_ms\":1791849900001}\n",
-        );
-        append_record(&home, "not json at all\n");
-        assert_eq!(latest_incident_ms(&home), Some(1791844421558));
-        // The spaced window from the incident: 22:38:24, then 22:43:27 —
-        // the newest wins.
-        append_record(&home, &incident(1791844704063));
-        append_record(&home, &incident(1791845007214));
-        assert_eq!(latest_incident_ms(&home), Some(1791845007214));
-
-        // A ledger past the 64 KiB tail cap: only the tail is read, so an
-        // old incident that fell out of the window is not the answer, the
-        // newest one at the end still is, and a first line cut mid-record
-        // cannot be parsed into a bogus timestamp.
-        let big = ledger_home("reader-tail");
-        let mut text = String::new();
-        text.push_str(&incident(1791834492201));
-        let filler = incident(1791840000000);
-        for _ in 0..700 {
-            text.push_str(&filler);
-        }
-        text.push_str(&incident(1791845383634));
-        append_record(&big, &text);
-        assert!(
-            big.join(".fx")
-                .join("usage.jsonl")
-                .metadata()
-                .unwrap()
-                .len()
-                > LEDGER_TAIL
-        );
-        assert_eq!(latest_incident_ms(&big), Some(1791845383634));
-        let _ = fs::remove_dir_all(&home);
-        let _ = fs::remove_dir_all(&big);
-    }
-
-    /// The 2026-10-12 arbos-updater window, as the pulse sees it: a live
-    /// turn that stops producing events while requests keep settling ~300 s
-    /// apart. One fresh incident past the baseline waits, once; any event at
-    /// all restores `working`.
-    #[test]
-    fn a_silent_turn_with_spaced_incidents_waits_once_and_any_event_restores() {
-        let home = ledger_home("waits");
-        incident_prefix(&home);
-        let mut pulse = quick_pulse(&home);
+    fn a_silent_worker_turn_waits_on_the_model_once_the_window_passes() {
+        let mut pulse = quick_pulse();
         let start = Instant::now();
         let at = |ms| start + Duration::from_millis(ms);
 
         // The turn runs and speaks; the pulse has nothing to do while it
-        // does. Its first due moment is one silence window past the event.
+        // does. Its due moment is one silence window past the last event.
+        assert!(pulse.watching());
         assert_eq!(pulse.next_due(at(5)), Some(at(25)));
         assert_eq!(pulse.tick(at(10), at(5)), None);
+        assert_eq!(pulse.tick(at(24), at(5)), None);
 
-        // The stream goes quiet. One window past the last event the pulse
-        // arms on the ledger as it stands — 22:33:41 is normal work, not a
-        // wait signal.
-        assert_eq!(pulse.tick(at(25), at(5)), None);
-        assert_eq!(pulse.next_due(at(26)), Some(at(30)));
-        assert_eq!(pulse.tick(at(30), at(5)), None);
-
-        // 22:38:24 (1791844704063): the first spaced settlement lands. The
-        // next poll sees it and the pulse speaks, once.
-        append_record(&home, &incident(1791844704063));
+        // The window passes with nothing else at all: the pulse speaks.
         assert_eq!(
-            pulse.tick(at(35), at(5)),
+            pulse.tick(at(25), at(5)),
             Some(RecoveryEffect::Waiting {
                 step: SILENT_MODEL_STEP.to_owned()
             })
         );
+        // Once: it has spoken, and it is quiet until the model answers.
         assert!(!pulse.watching());
-        assert_eq!(pulse.next_due(at(36)), None);
-
-        // 22:43:27 (1791845007214): the second settlement changes nothing,
-        // and neither do further ticks.
-        append_record(&home, &incident(1791845007214));
+        assert_eq!(pulse.next_due(at(26)), None);
         assert_eq!(pulse.tick(at(40), at(5)), None);
-        assert_eq!(pulse.tick(at(60), at(5)), None);
+        assert_eq!(pulse.tick(at(600), at(5)), None);
 
-        // Any event at all — here the dense cadence resuming at 22:43:34 —
-        // is the model answering: restore `working`, exactly once.
+        // Any event is the model answering: restore `working`, exactly once,
+        // and the silence window starts over for whatever comes next.
         assert!(pulse.event());
         assert!(!pulse.event());
-        // The silence window starts over for whatever comes next.
+        assert!(pulse.watching());
         assert_eq!(pulse.next_due(at(65)), Some(at(85)));
         assert_eq!(pulse.tick(at(70), at(65)), None);
-        let _ = fs::remove_dir_all(&home);
+        assert_eq!(
+            pulse.tick(at(85), at(65)),
+            Some(RecoveryEffect::Waiting {
+                step: SILENT_MODEL_STEP.to_owned()
+            })
+        );
     }
 
-    /// The guard the design insists on: incidents are a per-request
-    /// accounting heartbeat (a healthy worker logged 39 in eleven minutes),
-    /// so they are a wait signal only under turn silence. While events
-    /// flow, ever-newer incidents must never wait.
+    /// While events flow the window never passes, so the pulse never speaks
+    /// — a healthy worker is silent only between its own events.
     #[test]
-    fn incidents_while_events_flow_never_wait() {
-        let home = ledger_home("guard");
-        incident_prefix(&home);
-        let mut pulse = quick_pulse(&home);
+    fn events_inside_the_window_keep_the_pulse_quiet() {
+        let mut pulse = quick_pulse();
         let start = Instant::now();
-
-        // Events keep arriving, and a fresh incident settles between each
-        // one: the silence window never passes, so the pulse never even
-        // takes a baseline.
-        let mut newest = 1791844421558;
         let mut last_event = start;
         for step in 0..20 {
-            newest += 1;
-            append_record(&home, &incident(newest));
             last_event = start + Duration::from_millis(5 * step);
             assert_eq!(
-                pulse.tick(last_event, last_event),
+                pulse.tick(last_event + Duration::from_millis(4), last_event),
                 None,
                 "step {step} must not wait"
             );
+            assert!(!pulse.event(), "step {step}: nothing was flipped");
         }
-        // Nothing was ever flipped, so no event has anything to restore.
-        assert!(!pulse.event());
-        assert_eq!(pulse.due_at, None);
-
-        // Only real silence arms the pulse — and it arms on the ledger as it
-        // stands, so the incidents that landed during the flow are the
-        // baseline, not the signal.
-        let quiet = last_event + pulse.after + Duration::from_millis(1);
-        assert_eq!(pulse.tick(quiet, last_event), None);
-        assert_eq!(pulse.baseline_ms, Some(newest));
-        append_record(&home, &incident(newest + 1));
-        assert_eq!(
-            pulse.tick(quiet + pulse.poll, last_event),
-            Some(RecoveryEffect::Waiting {
-                step: SILENT_MODEL_STEP.to_owned()
-            })
-        );
-        let _ = fs::remove_dir_all(&home);
+        assert_eq!(pulse.next_due(last_event), Some(last_event + pulse.after));
     }
 
     #[test]
     fn a_pulse_with_nothing_to_watch_stays_quiet() {
-        // Not a worker turn in a project: no ledger to read.
-        let mut pulse = SilentModelPulse::new(None);
+        // Not a worker turn in a project: nothing to hold `waiting`.
+        let mut pulse = SilentModelPulse::new(false);
         let now = Instant::now();
         assert_eq!(pulse.next_due(now), None);
         assert_eq!(
@@ -971,10 +747,38 @@ mod tests {
         );
         assert!(!pulse.event());
         // `ZERON_SILENT_MODEL_MS=0` disables the pulse the same way.
-        let mut off = quick_pulse(Path::new("/nowhere"));
+        let mut off = quick_pulse();
         off.armed_by_default = false;
         assert_eq!(off.next_due(now), None);
         assert_eq!(off.tick(now + Duration::from_secs(1), now), None);
+    }
+
+    /// The pulse runs only while the tracker is clear, and a parked worker
+    /// keeps one tracker across its turns. A retry line (or a failure) that
+    /// the turn's `Done` outlived used to stay in the tracker for ever, so
+    /// every later turn of that worker ran with the pulse switched off.
+    #[test]
+    fn a_retry_line_the_turn_outlives_does_not_silence_the_next_turn() {
+        let mut tracker = RecoveryTracker::default();
+        let now = Instant::now();
+        tracker.observe(&active(2, 8), now);
+        assert!(!tracker.is_clear());
+        // fx ended the turn without a `recovered` frame.
+        assert_eq!(tracker.turn_ended(now), TurnEnd::Over);
+        assert!(tracker.is_clear());
+        assert_eq!(tracker.last_step, "");
+
+        // A failure clears with the turn as well: the worker was marked
+        // `error` for that turn, and a restarted worker gets a live pulse.
+        tracker.observe(&failed(), now);
+        assert!(!tracker.is_clear());
+        assert_eq!(tracker.turn_ended(now), TurnEnd::Over);
+        assert!(tracker.is_clear());
+        // The next turn's own frames are taken again.
+        assert!(matches!(
+            tracker.observe(&active(1, 4), now),
+            Some(RecoveryEffect::Waiting { .. })
+        ));
     }
 
     fn scratch(name: &str) -> PathBuf {

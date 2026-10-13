@@ -1,16 +1,17 @@
-//! The silent-model pulse, mocked against the 2026-10-12 arbos-updater
-//! incident (22:33–22:44 UTC): a live worker turn produced no events for
-//! eleven minutes while its model kept settling requests silently — no
-//! content, no error, no `modelResponseRecovery` frame — so nothing mapped
-//! and the status stayed `working`. The only trace was fx's usage ledger,
-//! which recorded one `incident` per settled request ~300 s apart.
+//! The silent-model pulse, mocked against the 2026-10-13 rig stall: a live
+//! worker turn on engy produced no events for ten minutes while its model
+//! sent nothing — no content, no error, no `modelResponseRecovery` frame (fx
+//! waits on a response head without limit and calls a started stream
+//! stalled only after ten minutes) — and the worker's `agent.toml` stayed
+//! `working` throughout. The first pulse (PR 849) read fx's usage ledger and
+//! waited for an `incident` newer than its baseline; a stalled request
+//! settles nothing, so that never came.
 //!
-//! The pulse under test reads that ledger while a live worker turn is
-//! silent, and flips the worker to `waiting` through the same writer a
-//! reported retry uses (PR 841's `note_worker_recovery`; the tab strip and
-//! Main's agent list render the step unchanged). The ledger records below
-//! are verbatim from the incident, timestamps and all: 22:33:41 (the dense
-//! cadence's last settlement), 22:38:24 and 22:43:27 (the spaced ones).
+//! The pulse under test treats the silence itself as the signal: a live
+//! worker turn with no event for the window and nothing still running flips
+//! to `waiting` through the same writer a reported retry uses (PR 841's
+//! `note_worker_recovery`; the tab strip and Main's agent list render the
+//! step unchanged), and the next event of any kind restores `working`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
@@ -25,21 +26,15 @@ use zeron_engine::{EngineCore, HarnessRegistry, arbos_layout};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelRecoveryState, ReasoningLevel, RunRequest,
-    SandboxLevel, SessionStatus, SteeringMode,
+    SandboxLevel, SessionStatus, SteeringMode, ToolCall,
 };
 
 const CHAT: &str = "chat-pulse";
-/// Pulse windows for every test in this file (process-global env knobs, set
-/// once before any engine assembles).
+/// The pulse window for every test in this file (a process-global env knob,
+/// set once before any engine assembles).
 const SILENT_MS: u64 = 400;
-const POLL_MS: u64 = 100;
-
-/// 22:33:41 UTC — the dense cadence's last settlement; the model goes quiet.
-const SETTLED_2233: u64 = 1791844421558;
-/// 22:38:24 UTC — the first spaced settlement inside the silent window.
-const SETTLED_2238: u64 = 1791844704063;
-/// 22:43:27 UTC — the second spaced settlement.
-const SETTLED_2243: u64 = 1791845007214;
+/// Long enough past the window for the pulse's tick to have run.
+const PAST_WINDOW_MS: u64 = SILENT_MS + 300;
 
 fn init_env() {
     static ONCE: Once = Once::new();
@@ -48,7 +43,6 @@ fn init_env() {
         // exists in this test process; all tests share the one value.
         unsafe {
             std::env::set_var("ZERON_SILENT_MODEL_MS", SILENT_MS.to_string());
-            std::env::set_var("ZERON_SILENT_MODEL_POLL_MS", POLL_MS.to_string());
             // The turn under test is silent by design; the quiesce watchdog
             // must not park it first (fx's turns have an authoritative
             // prompt end, so the engine never quiesces them either).
@@ -98,6 +92,24 @@ fn done() -> AgentEvent {
     }
 }
 
+fn tool_call(id: &str, command: &str) -> AgentEvent {
+    AgentEvent::ToolCall {
+        id: id.into(),
+        call: ToolCall::Exec {
+            command: command.into(),
+        },
+    }
+}
+
+fn tool_result(id: &str) -> AgentEvent {
+    AgentEvent::ToolResult {
+        id: id.into(),
+        is_error: false,
+        output: Some("ok\n".into()),
+        diff: None,
+    }
+}
+
 /// Exactly what the harness normalizer produces for the frame fx 0.0.13
 /// emitted on the incident's retries (captured live from the installed
 /// binary; the fixture `fx_model_recovery_first_retry_of_the_incident_maps`
@@ -131,38 +143,6 @@ fn recovered_frame() -> AgentEvent {
         retry_deadline: None,
         diagnostic: None,
     }
-}
-
-/// One fx usage-ledger record, in the exact shape fx 0.0.13 writes.
-fn incident_record(ms: u64) -> String {
-    format!(
-        "{{\"schema_version\":1,\"kind\":\"incident\",\"occurred_at_ms\":{ms},\
-         \"completeness\":\"incomplete\"}}\n"
-    )
-}
-
-/// The worker's ledger as the incident left it at 22:33:41 UTC: fx's
-/// coverage header, then the dense incident cadence of a turn at work.
-fn write_window_ledger(path: &Path) {
-    let mut text = String::from(
-        "{\"schema_version\":1,\"kind\":\"coverage\",\"started_at_ms\":1791834492203}\n",
-    );
-    for ms in [1791844307724, 1791844353713, SETTLED_2233] {
-        text.push_str(&incident_record(ms));
-    }
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
-
-/// A request settles: fx appends one incident record, as it did at 22:38:24.
-fn settle(path: &Path, ms: u64) {
-    use std::io::Write as _;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .unwrap();
-    file.write_all(incident_record(ms).as_bytes()).unwrap();
 }
 
 /// Feed-by-hand harness standing in for fx (see turn_quiesce.rs): the test
@@ -255,7 +235,6 @@ struct Rig {
     core: EngineCore,
     feed: mpsc::UnboundedSender<AgentEvent>,
     project: PathBuf,
-    ledger: PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -269,14 +248,6 @@ fn assemble(main_prompt: &str) -> Rig {
     arbos_layout::reserve_worker(&project, "oak", "Keep the app current", "glm-5.3", None)
         .expect("worker reserves");
     arbos_layout::bind_worker_chat(&project, "oak", CHAT).unwrap();
-    let ledger = project
-        .join(".arbos")
-        .join("agents")
-        .join("oak")
-        .join("fx")
-        .join(".fx")
-        .join("usage.jsonl");
-    write_window_ledger(&ledger);
 
     let (feed, rx) = mpsc::unbounded_channel();
     let registry = HarnessRegistry::new();
@@ -290,7 +261,6 @@ fn assemble(main_prompt: &str) -> Rig {
         core,
         feed,
         project,
-        ledger,
         _dir: dir,
     }
 }
@@ -340,32 +310,23 @@ where
     }
 }
 
-/// The incident itself: a worker's turn speaks once, then goes silent while
-/// its model settles requests ~300 s apart. The pulse baselines the ledger
-/// at 22:33:41, the 22:38:24 settlement flips the worker to `waiting` with
-/// the step line in its file and its tab row, the 22:43:27 settlement
-/// changes nothing (the pulse speaks once), and the first event back — the
-/// dense cadence resuming at 22:43:34 — restores `working` with the step
-/// cleared. The turn can still end normally afterwards.
+/// The rig stall itself: a worker's turn speaks once, then its model sends
+/// nothing — no frame, nothing settled, nothing on the wire. One silence
+/// window later the worker reads `waiting` with the step line in its file
+/// and its tab row; more silence changes nothing (the pulse speaks once);
+/// the first event back restores `working` with the step cleared. The turn
+/// can still end normally afterwards.
 #[tokio::test]
-async fn a_silent_turn_with_spaced_incidents_waits_then_any_event_restores_working() {
+async fn a_silent_turn_waits_on_the_model_within_the_window_and_any_event_restores_working() {
     let rig = assemble("check for app updates");
     rig.drive("check for app updates").await;
 
     rig.feed.send(session_started()).unwrap();
     rig.feed.send(text("Reading the release feed.")).unwrap();
-    // The turn goes quiet past the pulse's silence window, so the ledger is
-    // baselined at 22:33:41 — normal work, not a wait signal.
-    tokio::time::sleep(Duration::from_millis(SILENT_MS + 300)).await;
-    assert_eq!(rig.worker().status, "working");
-
-    // 22:38:24: the first spaced settlement lands. Within one poll the
-    // worker reads `waiting`.
-    settle(&rig.ledger, SETTLED_2238);
     wait_for(
         &rig,
         |rig| rig.worker().status == "waiting",
-        "a silent turn with a fresh settlement waits on the model",
+        "a silent turn waits on the model",
     )
     .await;
 
@@ -391,18 +352,15 @@ async fn a_silent_turn_with_spaced_incidents_waits_then_any_event_restores_worki
         Some(SessionStatus::Working)
     );
 
-    // 22:43:27: the second spaced settlement changes nothing — the pulse
-    // has already spoken.
-    settle(&rig.ledger, SETTLED_2243);
-    tokio::time::sleep(Duration::from_millis(POLL_MS * 3)).await;
+    // Another window of nothing changes nothing — the pulse has spoken.
+    tokio::time::sleep(Duration::from_millis(PAST_WINDOW_MS)).await;
     let view = rig.worker();
     assert_eq!(
         (view.status.as_str(), view.step.as_str()),
         ("waiting", "Waiting on the model")
     );
 
-    // 22:43:34: the dense cadence resumes and content flows again — any
-    // event restores `working` with the step cleared.
+    // The model answers: any event restores `working` with the step cleared.
     rig.feed
         .send(text("Back online; writing the report."))
         .unwrap();
@@ -421,39 +379,124 @@ async fn a_silent_turn_with_spaced_incidents_waits_then_any_event_restores_worki
     rig.core.sessions.shutdown().await;
 }
 
-/// The guard the incident's control case demands: a healthy worker logs
-/// incidents constantly while it works (the measured control logged 39 in
-/// eleven minutes), so incidents are a wait signal only under silence. The
-/// same spaced window records arriving while events flow must leave the
-/// worker `working` throughout.
+/// A healthy worker is silent only between its own events: while they keep
+/// arriving inside the window the worker stays `working` throughout.
 #[tokio::test]
-async fn incidents_while_events_flow_keep_the_worker_working() {
+async fn events_inside_the_window_keep_the_worker_working() {
     let rig = assemble("check for app updates");
     rig.drive("check for app updates").await;
 
     rig.feed.send(session_started()).unwrap();
-    // Settements keep landing — including the window's own spaced records
-    // and the dense tail behind them — while the turn keeps producing
-    // events well inside the silence window.
-    let dense_tail = [1791845014057, 1791845021671, 1791845383634];
-    for round in 0..18usize {
-        settle(&rig.ledger, SETTLED_2238 + round as u64);
-        settle(
-            &rig.ledger,
-            dense_tail[round % dense_tail.len()] + round as u64,
-        );
+    for round in 0..12usize {
         rig.feed
             .send(text("Still working through the checklist."))
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
+        tokio::time::sleep(Duration::from_millis(SILENT_MS / 4)).await;
         let view = rig.worker();
         assert_eq!(
             (view.status.as_str(), view.step.as_str()),
             ("working", ""),
-            "round {round}: an incident while events flow is not a wait"
+            "round {round}: a turn that keeps speaking is not waiting"
         );
     }
 
+    rig.feed.send(done()).unwrap();
+    wait_for(&rig, |rig| rig.worker().status == "done", "the turn ends").await;
+    rig.core.sessions.shutdown().await;
+}
+
+/// A long tool call is silent too, and that silence is the command's, not
+/// the model's: the pulse holds while the call is open and runs from the
+/// result on.
+#[tokio::test]
+async fn an_open_tool_call_holds_the_pulse_until_its_result() {
+    let rig = assemble("check for app updates");
+    rig.drive("check for app updates").await;
+
+    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(tool_call("t1", "cargo test")).unwrap();
+    tokio::time::sleep(Duration::from_millis(PAST_WINDOW_MS)).await;
+    let view = rig.worker();
+    assert_eq!(
+        (view.status.as_str(), view.step.as_str()),
+        ("working", ""),
+        "a running command is not the model stalling"
+    );
+
+    // The command finishes and the model goes quiet on the result: now the
+    // silence is the model's.
+    rig.feed.send(tool_result("t1")).unwrap();
+    wait_for(
+        &rig,
+        |rig| rig.worker().status == "waiting",
+        "silence after the result waits on the model",
+    )
+    .await;
+    assert_eq!(rig.worker().step, "Waiting on the model");
+
+    rig.feed.send(text("Tests green.")).unwrap();
+    wait_for(
+        &rig,
+        |rig| rig.worker().status == "working",
+        "the model answering restores working",
+    )
+    .await;
+    rig.feed.send(done()).unwrap();
+    wait_for(&rig, |rig| rig.worker().status == "done", "the turn ends").await;
+    rig.core.sessions.shutdown().await;
+}
+
+/// A parked worker keeps one recovery tracker across its turns, and the
+/// pulse runs only while that tracker is clear. A retry line the first
+/// turn's `Done` outlived (fx sent `active`, never `recovered`) used to
+/// leave the tracker busy for ever, so the next turn's stall fell through
+/// with the pulse switched off.
+#[tokio::test]
+async fn a_retry_the_first_turn_outlived_does_not_silence_the_next_turns_pulse() {
+    let rig = assemble("check for app updates");
+    rig.drive("check for app updates").await;
+
+    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(first_retry_frame()).unwrap();
+    wait_for(
+        &rig,
+        |rig| rig.worker().status == "waiting",
+        "the reported retry waits",
+    )
+    .await;
+    // fx ends the turn without ever clearing the line.
+    rig.feed.send(done()).unwrap();
+    wait_for(&rig, |rig| rig.worker().status == "done", "the turn ends").await;
+    wait_for(
+        &rig,
+        |rig| rig.core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "the session parks",
+    )
+    .await;
+
+    // Main sends the worker its next brief: the worker is working again and
+    // the steered turn goes silent at once.
+    arbos_layout::restart_worker(&rig.project, "oak").unwrap();
+    rig.core
+        .sessions
+        .steer(CHAT, "now check the edge channel", None)
+        .await
+        .expect("steer accepted");
+    wait_for(
+        &rig,
+        |rig| rig.worker().status == "waiting",
+        "the next turn's stall still waits on the model",
+    )
+    .await;
+    assert_eq!(rig.worker().step, "Waiting on the model");
+
+    rig.feed.send(text("Edge is current.")).unwrap();
+    wait_for(
+        &rig,
+        |rig| rig.worker().status == "working",
+        "the model answering restores working",
+    )
+    .await;
     rig.feed.send(done()).unwrap();
     wait_for(&rig, |rig| rig.worker().status == "done", "the turn ends").await;
     rig.core.sessions.shutdown().await;
@@ -512,8 +555,6 @@ async fn a_recovery_frame_after_the_pulse_flip_takes_the_status_back_over() {
 
     rig.feed.send(session_started()).unwrap();
     rig.feed.send(text("Reading the release feed.")).unwrap();
-    tokio::time::sleep(Duration::from_millis(SILENT_MS + 300)).await;
-    settle(&rig.ledger, SETTLED_2238);
     wait_for(
         &rig,
         |rig| rig.worker().status == "waiting",
