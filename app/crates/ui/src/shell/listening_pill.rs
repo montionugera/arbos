@@ -44,7 +44,9 @@ pub(super) struct ListeningRow {
 
 /// The engine's rows as the pill shows them: live workers first, then
 /// each unexpired subscription in file order. `worker_since` gives the
-/// start time of a worker's chat, when the chat is known.
+/// start time of a worker's chat, when the chat is known. A worker whose
+/// turn has ended — `done`, `error`, `stopped` — is not a wait; neither is
+/// an expired subscription.
 pub(super) fn listening_rows(
     subscriptions: &[SubscriptionView],
     agents: &[AgentView],
@@ -94,6 +96,8 @@ pub(super) fn pill_shown(on_main_chat: bool, rows: &[ListeningRow]) -> bool {
     on_main_chat && !rows.is_empty()
 }
 
+/// The pill's label. The count is the number of rows the pill lists —
+/// the same set the open card renders, never a different one.
 pub(super) fn pill_text(count: usize) -> String {
     format!("Listening · {count}")
 }
@@ -476,5 +480,44 @@ mod tests {
         );
         let plain = listening_rows(&[], &[agent("fix-tests", "worker", "working")], &since);
         assert_eq!(plain[0].step, "");
+    }
+
+    #[test]
+    fn the_count_is_the_rows_listed_and_done_workers_are_not_rows() {
+        let subs = vec![
+            sub("pr-12", "github_pr", "unarbos/arbos#12", false),
+            sub("old", "timer", "Daily at 08:30", true),
+        ];
+        let mut waiting = agent("fix-tests", "worker", "waiting");
+        waiting.step = "Waiting on the model — try 3 of 8, next in 32 s".into();
+        let agents = vec![
+            agent("main", "coordinator", "working"),
+            agent("write-docs", "worker", "done"),
+            waiting,
+            agent("subs-add", "worker", "error"),
+            agent("live-link", "worker", "working"),
+            agent("quit-mid-run", "worker", "stopped"),
+        ];
+        let rows = listening_rows(&subs, &agents, &no_chat);
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Worker fix-tests",
+                "Worker live-link",
+                "Pull request unarbos/arbos#12",
+            ],
+            "a worker whose turn ended — done, error, stopped — is not a wait;\
+             an expired subscription is not either"
+        );
+        assert_eq!(
+            pill_text(rows.len()),
+            "Listening · 3",
+            "the count is exactly the rows the pill lists"
+        );
+        assert_eq!(
+            rows[0].step, "Waiting on the model — try 3 of 8, next in 32 s",
+            "a waiting worker keeps its row and its line"
+        );
     }
 }

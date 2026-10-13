@@ -1246,7 +1246,8 @@ impl SessionsEngine {
             // exist in the journal (the debounced workspace-row write may
             // never have landed) — remember it so the revived run resumes the
             // same harness conversation (zeron recoverDraft, sessions.ts:538).
-            if let Some((session_id, cwd)) = self.inner.journal_harness_session(&chat_id) {
+            let harness_session = self.inner.journal_harness_session(&chat_id);
+            if let Some((session_id, cwd)) = harness_session.clone() {
                 self.inner
                     .remember_harness_session(&chat_id, &session_id, &cwd);
             }
@@ -1303,6 +1304,14 @@ impl SessionsEngine {
             recovered += 1;
 
             if !will_resume {
+                // The turn is over and nothing picks it back up. A worker's
+                // layout row would otherwise stay `working`/`waiting` forever
+                // — the process that owed the turn's `Done` died — so the
+                // Listening pill, the tabs, and Main's agent list all keep
+                // listing a wait that already ended.
+                if let Some((_, cwd)) = harness_session {
+                    self.stop_crashed_worker(&chat_id, &cwd);
+                }
                 continue;
             }
             let attempt = self.inner.journal.note_resume_attempt(&chat_id);
@@ -1356,12 +1365,47 @@ impl SessionsEngine {
                         tracing::info!(chat = %chat_id, attempt, "auto-resumed crashed run")
                     }
                     Err(err) => {
-                        tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
+                        tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed");
+                        // The revival never started, so this worker's turn is
+                        // over too — close its layout row the same way.
+                        if let Some((_, cwd)) = sessions.inner.journal_harness_session(&chat_id) {
+                            sessions.stop_crashed_worker(&chat_id, &cwd);
+                        }
                     }
                 }
             });
         }
         Ok(recovered)
+    }
+
+    /// A crashed worker that will not be resumed keeps `working`/`waiting` in
+    /// its `agent.toml` forever — the process that owed the turn's `Done`
+    /// died — so every surface that reads the layout (the Listening pill, the
+    /// tabs, Main's agent list) lists a wait that is already over. Close the
+    /// turn with the word `wake_if_worker` uses for an interrupted one, so
+    /// the row leaves the pill at the next poll. Main is not woken: an
+    /// auto-run at boot is a bigger change than this fix. A worker on another
+    /// machine is left to the engine that owns its turn.
+    fn stop_crashed_worker(&self, chat_id: &str, cwd: &str) {
+        let project = std::path::Path::new(cwd);
+        let Some(agent) = crate::arbos_layout::agents(project)
+            .into_iter()
+            .find(|agent| agent.chat_id == chat_id)
+        else {
+            return;
+        };
+        if agent.role != "worker"
+            || !crate::arbos_layout::status_is_live(&agent.status)
+            || crate::arbos_remote::is_remote_machine(&agent.machine)
+        {
+            return;
+        }
+        let _ = crate::arbos_layout::finish_worker(
+            project,
+            chat_id,
+            "stopped",
+            "Stopped when Arbos quit.",
+        );
     }
 
     /// Graceful shutdown: interrupt every live run so streaming entries settle.
