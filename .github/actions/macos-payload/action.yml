@@ -62,8 +62,14 @@ outputs:
     description: "`developer-id`, `other`, or `ad-hoc`."
     value: ${{ steps.build.outputs.signing }}
   notarized:
-    description: "`true` when Apple has seen this payload and its ticket is stapled."
+    description: "`true` when Apple accepted this payload."
     value: ${{ steps.build.outputs.notarized }}
+  stapled:
+    description: "`true` when the notarization ticket is stapled to the bundle; `false` when Apple's ticket service stayed unreachable after notarization and the payload ships unstapled (Gatekeeper fetches the ticket online)."
+    value: ${{ steps.build.outputs.stapled }}
+  notary-logs:
+    description: Glob of the notarization logs kept beside an unstapled payload, relative to the workspace root; empty otherwise.
+    value: ${{ steps.build.outputs.notary-logs }}
 
 runs:
   using: composite
@@ -189,12 +195,25 @@ runs:
           echo "::error title=No single app tarball::expected one *-macos-*-app.tar.gz in app/target/package, found ${#tarballs[@]}: ${tarballs[*]:-none}"
           exit 1
         fi
+        # package-macos.sh leaves `stapled` only on the notarized path; an
+        # unstapled payload also leaves the notarization logs beside it.
+        stapled="$notarized"
+        if [ -f target/package/stapled ]; then
+          stapled="$(cat target/package/stapled)"
+        fi
+        logs=(target/package/notarization-*.log)
+        notary_logs=""
+        if [ "${#logs[@]}" -gt 0 ]; then
+          notary_logs="app/target/package/notarization-*.log"
+        fi
         {
           echo "signing=$kind"
           echo "notarized=$notarized"
+          echo "stapled=$stapled"
+          echo "notary-logs=$notary_logs"
           echo "path=app/${tarballs[0]}"
         } >> "$GITHUB_OUTPUT"
-        echo "built ${tarballs[0]} (signing: $kind, notarized: $notarized)"
+        echo "built ${tarballs[0]} (signing: $kind, notarized: $notarized, stapled: $stapled)"
 
     # Always. A runner is thrown away after the job, but a certificate that
     # outlives the step that needed it is a certificate some later step can

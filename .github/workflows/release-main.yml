@@ -148,6 +148,7 @@ jobs:
     outputs:
       signing: ${{ steps.payload.outputs.signing }}
       notarized: ${{ steps.payload.outputs.notarized }}
+      stapled: ${{ steps.payload.outputs.stapled }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -186,19 +187,29 @@ jobs:
           PAYLOAD: ${{ steps.payload.outputs.path }}
           SIGNING: ${{ steps.payload.outputs.signing }}
           NOTARIZED: ${{ steps.payload.outputs.notarized }}
+          STAPLED: ${{ steps.payload.outputs.stapled }}
+          NOTARY_LOGS: ${{ steps.payload.outputs.notary-logs }}
         run: |
           set -euo pipefail
           mkdir -p dist
           cp "$PAYLOAD" dist/
+          # An unstapled payload travels with its notarization logs, so the
+          # release page shows Apple's verdict on the exact build.
+          if [ -n "$NOTARY_LOGS" ]; then
+            cp $NOTARY_LOGS dist/
+          fi
           ls -la dist
-          echo "macOS payload \`$(basename "$PAYLOAD")\` — Apple signature \`$SIGNING\`, notarized \`$NOTARIZED\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "macOS payload \`$(basename "$PAYLOAD")\` — Apple signature \`$SIGNING\`, notarized \`$NOTARIZED\`, stapled \`$STAPLED\`." >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: payload-macos
-          # Only the tarball. Nothing secret is ever in the workspace — the
-          # certificate is decoded into $RUNNER_TEMP and deleted — but the
-          # glob is narrow anyway.
-          path: dist/*.tar.gz
+          # Only the tarball and, for an unstapled build, the notarization
+          # logs. Nothing secret is ever in the workspace — the certificate
+          # is decoded into $RUNNER_TEMP and deleted — but the globs are
+          # narrow anyway.
+          path: |
+            dist/*.tar.gz
+            dist/notarization-*.log
           retention-days: 7
           if-no-files-found: error
 
@@ -253,6 +264,7 @@ jobs:
       SHORT: ${{ needs.plan.outputs.short }}
       SIGNING: ${{ needs.macos.outputs.signing }}
       NOTARIZED: ${{ needs.macos.outputs.notarized }}
+      STAPLED: ${{ needs.macos.outputs.stapled }}
       REPO: ${{ github.repository }}
       # Where the new release is assembled before it becomes `edge`. A draft
       # never creates a tag and is invisible to anyone without write access,
@@ -359,6 +371,12 @@ jobs:
             -F prerelease=true \
             --jq '"draft " + (.id | tostring) + " created"'
           gh release upload "$STAGING" ./*.tar.gz manifest.json latest.txt
+          # The notarization logs of an unstapled build go up beside it.
+          shopt -s nullglob
+          logs=(notarization-*.log)
+          if [ "${#logs[@]}" -gt 0 ]; then
+            gh release upload "$STAGING" "${logs[@]}"
+          fi
           # The same asset names the old release had: the two documents the
           # app reads and the two payloads the manifest names and signs.
           gh release view "$STAGING" --json assets -q '.assets[].name' | sort
@@ -381,6 +399,9 @@ jobs:
             printf '%s\n\n' "$NOTES"
             printf 'Every green commit on `main`, published for the Arbos app'"'"'s own updater. The release is rebuilt on each publish and the tag moves to the commit that was built; the download URLs do not change.\n\n'
             printf 'macOS signature: `%s`. Notarized: `%s`.\n\n' "${SIGNING:-unknown}" "${NOTARIZED:-false}"
+            if [ "${NOTARIZED:-false}" = "true" ] && [ "${STAPLED:-true}" != "true" ]; then
+              printf 'Not stapled: Apple accepted this build but its ticket service was unreachable when the ticket was fetched, so the ticket is not inside the bundle. Gatekeeper fetches it online on first launch; the notarization log is attached below.\n\n'
+            fi
             printf 'Manifest: <%s>\n' "$manifest_url"
           } > release-notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -412,6 +433,7 @@ jobs:
             echo "| --- | --- |"
             echo "| macOS signature | \`${SIGNING:-unknown}\` |"
             echo "| Notarized | \`${NOTARIZED:-false}\` |"
+            echo "| Stapled | \`${STAPLED:-${NOTARIZED:-false}}\` |"
             echo "| Manifest | <$manifest_url> |"
             if [ "${NOTARIZED:-false}" != "true" ]; then
               echo

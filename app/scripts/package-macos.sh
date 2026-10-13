@@ -102,28 +102,57 @@ else
   codesign --deep --force --entitlements "$ROOT/dist/macos/voice.entitlements" --sign - "$APP"
 fi
 
-# notarize <path>: submit to Apple and wait for the verdict. A rejection may
-# still exit 0 depending on the notarytool version — the `stapler staple` that
-# follows each call has no ticket to attach then, and fails the build for us.
+# notarize <path>: submit to Apple and wait for the verdict. The verdict is
+# read from notarytool's JSON, because a rejection may still exit 0 depending
+# on the notarytool version; anything but Accepted fails the build here. The
+# submission id stays in NOTARY_SUBMISSION_ID for the log.
+NOTARY_SUBMISSION_ID=""
 notarize() {
-  xcrun notarytool submit "$1" \
+  local result status
+  result="$(xcrun notarytool submit "$1" \
     --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" \
-    --issuer "$NOTARY_ISSUER_ID" --wait
+    --issuer "$NOTARY_ISSUER_ID" --wait --output-format json)"
+  printf '%s\n' "$result" >&2
+  NOTARY_SUBMISSION_ID="$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))')"
+  status="$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))')"
+  if [[ "$status" != "Accepted" ]]; then
+    echo "notarization of $(basename "$1") ended with status '${status:-unknown}'" >&2
+    return 1
+  fi
 }
 # staple <path>: fetch the ticket from Apple and attach it. The fetch goes to
 # api.apple-cloudkit.com and now and then the connection drops mid-request
 # (stapler exit 68, "The network connection was lost"), which is not a verdict
-# on the build; a missing ticket after the retries still fails the build.
+# on the build — Apple already accepted it in notarize. Eight attempts over
+# about five minutes; when the ticket service stays down after that, the
+# build ships unstapled with the notarization log beside it (Gatekeeper
+# fetches the ticket online), and STAPLED says so for the release notes.
+STAPLED=true
 staple() {
-  local attempt
-  for attempt in 1 2 3 4; do
+  local attempt pause
+  for attempt in 1 2 3 4 5 6 7 8; do
     if xcrun stapler staple "$1"; then
       return 0
     fi
-    echo "stapler attempt $attempt failed; retrying in $((attempt * 15))s" >&2
-    sleep $((attempt * 15))
+    [[ $attempt -lt 8 ]] || break
+    case $attempt in
+      1) pause=10 ;;
+      2) pause=20 ;;
+      3) pause=40 ;;
+      *) pause=60 ;;
+    esac
+    echo "stapler attempt $attempt failed; retrying in ${pause}s" >&2
+    sleep "$pause"
   done
-  xcrun stapler staple "$1"
+  echo "::warning title=Not stapled::Apple accepted $(basename "$1") (submission ${NOTARY_SUBMISSION_ID:-unknown}) but its ticket could not be fetched after 8 attempts. Shipping unstapled; Gatekeeper fetches the ticket online." >&2
+  STAPLED=false
+  if [[ -n "$NOTARY_SUBMISSION_ID" ]]; then
+    xcrun notarytool log "$NOTARY_SUBMISSION_ID" \
+      --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" \
+      --issuer "$NOTARY_ISSUER_ID" \
+      "$OUT_DIR/notarization-$(basename "$1").log" || echo "notarization log not fetched" >&2
+  fi
+  return 0
 }
 NOTARIZE=false
 [[ -n "${NOTARY_KEY_PATH:-}" && -n "${NOTARY_KEY_ID:-}" && -n "${NOTARY_ISSUER_ID:-}" ]] && NOTARIZE=true
@@ -189,5 +218,7 @@ rm -f "$BG_TIFF"
 if $NOTARIZE; then
   notarize "$DMG"
   staple "$DMG"
+  # Read by the macos-payload action for the release notes.
+  echo "$STAPLED" > "$OUT_DIR/stapled"
 fi
 echo "packaged: $DMG"
