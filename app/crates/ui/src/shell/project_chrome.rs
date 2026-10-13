@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Entity, Focusable,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Task, Window,
+    div, prelude::*, px, Animation, AnimationExt, AnyElement, ClickEvent, Context, Entity,
+    Focusable, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Task, Window,
 };
 
 use crate::composer::ComposerInput;
@@ -17,7 +17,7 @@ use crate::theme::Theme;
 use zeron_engine::arbos_layout::status_is_live;
 
 use super::listening_pill::{listening_rows, ListeningRow};
-use super::Shell;
+use super::{ChatRenameSurface, Shell};
 
 pub(super) const RAIL_WIDTH: f32 = 88.0;
 /// The project file list beside Main. A new chat hides it, so that chat
@@ -27,7 +27,13 @@ pub(super) const PROJECT_FILES_WIDTH: f32 = 252.0;
 const SIDE_FILE_EDITOR_HEIGHT: f32 = 300.0;
 #[allow(dead_code)]
 pub(super) const TAB_HEIGHT: f32 = 36.0;
-const EXTRA_VISIBLE: usize = 2;
+/// A chat tab at rest. Tabs shrink evenly from this width as the strip
+/// fills, truncating their labels, down to [`TAB_MIN_WIDTH`]; only past
+/// that does the strip scroll.
+pub(super) const TAB_MAX_WIDTH: f32 = 160.0;
+pub(super) const TAB_MIN_WIDTH: f32 = 56.0;
+/// The project's artwork on the Main tab, the same art the rail wears.
+const TAB_ICON_SIZE: f32 = 16.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Surface {
@@ -71,6 +77,11 @@ pub(super) struct ProjectChrome {
     watch: Option<Task<()>>,
     icons: HashMap<String, MediaImage>,
     icon_loading: HashSet<String>,
+    /// The tab strip's horizontal scroll, for when the tabs cannot all fit.
+    pub(super) tab_scroll: ScrollHandle,
+    /// The chat whose tab was last scrolled into view, so a selection change
+    /// scrolls once and the person can then scroll freely.
+    tab_revealed: Option<String>,
 }
 
 impl Default for ProjectChrome {
@@ -100,12 +111,14 @@ impl Default for ProjectChrome {
             watch: None,
             icons: HashMap::new(),
             icon_loading: HashSet::new(),
+            tab_scroll: ScrollHandle::new(),
+            tab_revealed: None,
         }
     }
 }
 
 pub(super) struct ProjectRow {
-    id: String,
+    pub(super) id: String,
     pub(super) path: String,
     name: String,
     home: String,
@@ -206,11 +219,43 @@ impl Shell {
             .unwrap_or_default();
         let selected = self.state.read(cx).selected_chat.clone();
         let surface = self.project.surface;
-        let (main, extras): (Option<ChatTab>, Vec<ChatTab>) =
-            tabs.into_iter().partition(|tab| tab.main).let_one();
-        let shown_ix = visible_extra_indexes(&extras, selected.as_deref());
-        let hidden = extras.len().saturating_sub(shown_ix.len());
-        let mut strip = div()
+        let tabs = pin_main_first(tabs);
+        // Main wears the project's own artwork, the same art as its rail
+        // button, so the first tab reads as "this project".
+        let mut main_icon = space
+            .as_ref()
+            .filter(|_| tabs.first().is_some_and(|tab| tab.main))
+            .map(|project| self.project_icon(project, TAB_ICON_SIZE, cx));
+        // A newly selected tab scrolls into view once; after that the strip
+        // is the person's to scroll.
+        if let Some(chat_id) = selected.as_deref()
+            && self.project.tab_revealed.as_deref() != Some(chat_id)
+        {
+            if let Some(index) = tabs.iter().position(|tab| tab.id == chat_id) {
+                self.project.tab_scroll.scroll_to_item(index);
+            }
+            self.project.tab_revealed = Some(chat_id.to_owned());
+        }
+        // The scroller sizes to its tabs and shrinks with them: tabs give up
+        // width evenly down to TAB_MIN_WIDTH, and only then does the row
+        // scroll. Scrolling only the x axis, a plain wheel scrolls it too.
+        let mut scroller = div()
+            .id("project-tab-scroller")
+            .debug_selector(|| "project-tab-scroller".into())
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .overflow_x_scroll()
+            .track_scroll(&self.project.tab_scroll);
+        for tab in &tabs {
+            let icon = if tab.main { main_icon.take() } else { None };
+            scroller =
+                scroller.child(self.chat_tab(tab, icon, selected.as_deref(), surface, &theme, cx));
+        }
+        div()
             .min_w_0()
             .flex_1()
             .h_full()
@@ -220,25 +265,9 @@ impl Shell {
             .gap(px(4.0))
             .pl(px(12.0))
             .overflow_hidden()
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
-        if let Some(tab) = main {
-            strip = strip.child(self.chat_tab(&tab, selected.as_deref(), surface, &theme, cx));
-            strip = strip.child(div().w(px(1.0)).h(px(16.0)).bg(theme.border).mx(px(4.0)));
-        }
-        for index in &shown_ix {
-            let tab = &extras[*index];
-            strip = strip.child(self.chat_tab(tab, selected.as_deref(), surface, &theme, cx));
-        }
-        if hidden > 0 {
-            let next = extras
-                .iter()
-                .enumerate()
-                .find(|(index, _)| !shown_ix.contains(index))
-                .map(|(_, tab)| tab.id.clone());
-            strip = strip.child(self.overflow_tab(hidden, next, &theme, cx));
-        }
-        strip = strip.child(self.new_chat_tab(&theme, cx));
-        strip
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(scroller)
+            .child(self.new_chat_tab(&theme, cx))
             .child(div().flex_1())
             .child(self.context_tab(surface, &theme, cx))
             .into_any_element()
@@ -1320,23 +1349,33 @@ impl Shell {
     }
 
     fn rail_icon(&mut self, row: &ProjectRow, cx: &mut Context<Self>) -> AnyElement {
+        self.project_icon(row, 22.0, cx)
+    }
+
+    /// The project's icon at `size` px: its emoji, its image (the repo's
+    /// own or a chosen file) once loaded, else the first letter of its name.
+    /// The rail and the Main tab share this, so both show the same art.
+    fn project_icon(&mut self, row: &ProjectRow, size: f32, cx: &mut Context<Self>) -> AnyElement {
         let icon = zeron_engine::arbos_layout::icon_of(Path::new(&row.path));
         if let Some(emoji) = icon.strip_prefix("emoji:") {
             return div()
-                .text_size(px(16.0))
+                .text_size(px(size * 16.0 / 22.0))
                 .child(emoji.to_owned())
                 .into_any_element();
         }
         let key = format!("{}|{icon}", row.path);
         if let Some(media) = self.project.icons.get(&key) {
             return gpui::img(media.image.clone())
-                .size(px(22.0))
+                .size(px(size))
                 .object_fit(gpui::ObjectFit::Contain)
                 .into_any_element();
         }
         self.request_icon(key, row.path.clone(), icon, cx);
         let letter = row.name.chars().next().unwrap_or('?').to_string();
-        div().text_size(px(12.0)).child(letter).into_any_element()
+        div()
+            .text_size(px((size * 12.0 / 22.0).max(10.0)))
+            .child(letter)
+            .into_any_element()
     }
 
     fn request_icon(&mut self, key: String, project: String, icon: String, cx: &mut Context<Self>) {
@@ -1383,6 +1422,7 @@ impl Shell {
     fn chat_tab(
         &self,
         tab: &ChatTab,
+        project_icon: Option<AnyElement>,
         selected: Option<&str>,
         surface: Surface,
         theme: &Theme,
@@ -1390,13 +1430,36 @@ impl Shell {
     ) -> AnyElement {
         let active = surface == Surface::Chat && selected == Some(tab.id.as_str());
         let chat_id = tab.id.clone();
-        let mut label = div().flex().flex_row().items_center().gap(px(4.0));
-        if tab.main {
-            label = label.child("●");
+        let rename = self.rename_input_for(&tab.id, ChatRenameSurface::Tab);
+        let renaming = rename.is_some();
+        let mut label = div()
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0));
+        if let Some(icon) = project_icon {
+            label = label.child(div().flex_none().size(px(TAB_ICON_SIZE)).child(icon));
+        } else if tab.main {
+            label = label.child(div().flex_none().child("●"));
         } else if tab.worker {
-            label = label.child("⚙");
+            label = label.child(div().flex_none().child("⚙"));
         }
-        label = label.child(tab.title.clone());
+        label = label.child(match rename {
+            Some(input) => crate::shell::chat_title_editor(
+                SharedString::from(format!("project-tab-editor-{}", tab.id)),
+                input,
+                theme,
+            ),
+            None => div()
+                .debug_selector(|| format!("project-tab-title-{}", tab.id))
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .child(tab.title.clone())
+                .into_any_element(),
+        });
         if tab.worker && status_is_live(&tab.status) {
             // The same pulse while the worker goes; amber while it waits on
             // its model.
@@ -1417,12 +1480,19 @@ impl Shell {
         } else if tab.worker && tab.status == "error" {
             label = label.child("✕");
         } else if tab.worker && (tab.status == "done" || tab.status == "stopped") {
-            label = label.child("✓");
+            label = label.child(div().flex_none().child("✓"));
         }
         div()
             .id(SharedString::from(format!("project-tab-{}", tab.id)))
+            .debug_selector(|| format!("project-tab-{}", tab.id))
             .h(px(26.0))
             .px(px(10.0))
+            // Rest width, giving way evenly down to the floor as tabs are
+            // added. A tab being renamed holds its full width for the field.
+            .w(px(TAB_MAX_WIDTH))
+            .min_w(px(TAB_MIN_WIDTH))
+            .when(renaming, |tab| tab.flex_shrink_0())
+            .overflow_hidden()
             .flex()
             .items_center()
             .rounded(px(6.0))
@@ -1435,43 +1505,42 @@ impl Shell {
                 gpui::transparent_black()
             })
             .child(label)
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                // The tab's own clicks: the titlebar strip beneath would
+                // zoom the window on a double-click.
+                cx.stop_propagation();
+                if event.click_count() == 2 {
+                    this.open_rename_chat_tab(chat_id.clone(), cx);
+                    return;
+                }
                 this.project.surface = Surface::Chat;
                 this.open_chat(chat_id.clone(), cx);
             }))
             .into_any_element()
     }
 
-    fn overflow_tab(
-        &self,
-        hidden: usize,
-        next: Option<String>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .id("project-tab-overflow")
-            .h(px(26.0))
-            .px(px(8.0))
-            .flex()
-            .items_center()
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .text_size(px(12.0))
-            .text_color(theme.text_muted)
-            .child(format!("+{hidden}"))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(chat_id) = next.clone() {
-                    this.project.surface = Surface::Chat;
-                    this.open_chat(chat_id, cx);
-                }
-            }))
-            .into_any_element()
+    /// Double-click on a tab: edit its title where it sits. Enter or blur
+    /// saves the new name with the chat (it is the chat's title, so it
+    /// survives a restart); Escape drops the edit.
+    pub(super) fn open_rename_chat_tab(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        let Some(current) = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .map(|chat| chat.title.clone().unwrap_or_default())
+        else {
+            return;
+        };
+        self.start_chat_rename(chat_id, current, ChatRenameSurface::Tab, cx);
     }
 
     fn new_chat_tab(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("project-tab-new")
+            .debug_selector(|| "project-tab-new".into())
+            .flex_none()
             .size(px(26.0))
             .flex()
             .items_center()
@@ -1490,6 +1559,8 @@ impl Shell {
         let active = surface == Surface::Context;
         div()
             .id("project-tab-context")
+            .debug_selector(|| "project-tab-context".into())
+            .flex_none()
             .h(px(26.0))
             .px(px(10.0))
             .flex()
@@ -1669,15 +1740,12 @@ fn render_status_page(text: &str, theme: &Theme) -> AnyElement {
     page.into_any_element()
 }
 
-trait SplitMain {
-    fn let_one(self) -> (Option<ChatTab>, Vec<ChatTab>);
-}
-
-impl SplitMain for (Vec<ChatTab>, Vec<ChatTab>) {
-    fn let_one(self) -> (Option<ChatTab>, Vec<ChatTab>) {
-        let (mut main, extras) = self;
-        (main.pop(), extras)
-    }
+/// The project's Main chat leads the strip; the other tabs keep their order.
+fn pin_main_first(tabs: Vec<ChatTab>) -> Vec<ChatTab> {
+    let (mut main, rest): (Vec<ChatTab>, Vec<ChatTab>) =
+        tabs.into_iter().partition(|tab| tab.main);
+    main.extend(rest);
+    main
 }
 
 fn format_goal_clock(seconds: u64) -> String {
@@ -1711,21 +1779,6 @@ fn menu_label(text: &str, theme: &Theme) -> AnyElement {
         .text_color(theme.text)
         .child(text.to_owned())
         .into_any_element()
-}
-
-fn visible_extra_indexes(extras: &[ChatTab], selected: Option<&str>) -> Vec<usize> {
-    let mut shown: Vec<usize> = (0..extras.len().min(EXTRA_VISIBLE)).collect();
-    let Some(selected) = selected else {
-        return shown;
-    };
-    let Some(pos) = extras.iter().position(|tab| tab.id == selected) else {
-        return shown;
-    };
-    if pos >= EXTRA_VISIBLE && !shown.is_empty() {
-        shown.pop();
-        shown.push(pos);
-    }
-    shown
 }
 
 fn worker_context_file(project: &Path, chat_id: &str) -> Option<(String, String)> {
