@@ -4,7 +4,9 @@
 //! and one Worked wake: the same mark a finished worker uses, so the
 //! transcript shows a system line and fx receives `_meta.fx.wake`. No user
 //! bubble is written. Firings close together share one wake. Fire times live
-//! in `.arbos/runtime/`, which git ignores.
+//! in `.arbos/runtime/`, which git ignores. A `github_pr` subscription whose
+//! pull request merged or closed retires itself on the next tick: its file
+//! and fire times go, its inbox lines stay.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -292,6 +294,24 @@ fn tick_project(
         };
         if is_expired(expires_at(&sub.created, &path), now) {
             tracing::debug!(file = name, "subscription is past its cap");
+            continue;
+        }
+        if sub.kind == "github_pr" && state.get(name).is_some_and(|slot| pr_finished(slot)) {
+            // Its merge or close already woke Main on an earlier tick, and
+            // a finished pull request has nothing left to fire.
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    state.remove(name);
+                    changed = true;
+                    tracing::info!(
+                        file = name,
+                        "subscription retired: its pull request finished"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(file = name, error = %err, "subscription was not retired")
+                }
+            }
             continue;
         }
         let slot = state.entry(name.to_owned()).or_default();
@@ -783,6 +803,12 @@ fn timer_body(sub: &Subscription, state: &mut WakeState) -> Result<bool, String>
     }
     state.last_key = today;
     Ok(true)
+}
+
+/// A `github_pr` slot whose last firing was the pull request merging or
+/// closing. Nothing follows that, so the subscription is done.
+fn pr_finished(slot: &WakeState) -> bool {
+    matches!(slot.last_key.as_str(), "pr:merged" | "pr:closed")
 }
 
 fn github_pr_body(
