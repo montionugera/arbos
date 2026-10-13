@@ -103,11 +103,11 @@ struct HarnessPrefsFile {
     show_all: bool,
 }
 
-/// fx is the harness this build shows. Mock stays listed so the hidden test
-/// slot still resolves. Every other harness needs `show_all`.
+/// fx is the harness this build shows. Mock stays registered so the hidden
+/// test slot still resolves, but `ListHarnesses` never reports it.
 fn harness_shown(id: HarnessId, _show_all: bool) -> bool {
     // This build has one agent. show_all cannot bring the others back.
-    matches!(id, HarnessId::Fx)
+    id.is_shipped()
 }
 
 /// Per-device automatic session title preferences.

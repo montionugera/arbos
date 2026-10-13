@@ -145,18 +145,17 @@ const CODEX_ULTRA: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"]
 const CODEX_MAX: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const CODEX_XHIGH: &[&str] = &["low", "medium", "high", "xhigh"];
 
-/// Static fallback = the engine's `default_enabled()` pair. ACP agents
-/// appear only through a device's live catalog (opt-in per device).
+/// Static fallback = the one agent this build ships, mirroring the engine's
+/// `ListHarnesses` (which lists fx alone). Other agents' rows below stay for
+/// catalogs and sessions written by other builds.
 pub fn fallback_harnesses() -> Vec<HarnessInfo> {
-    vec![
-        HarnessInfo::fallback("claude-code", "Claude Code"),
-        HarnessInfo::fallback("codex", "Codex"),
-    ]
+    vec![HarnessInfo::fallback("arbos-fx", "fx")]
 }
 
 /// Display name for any harness id the fleet can produce.
 pub fn harness_label(id: &str) -> String {
     match id {
+        "arbos-fx" => "fx",
         "claude-code" => "Claude Code",
         "codex" => "Codex",
         "devin" => "Devin",
@@ -183,6 +182,8 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
         )]
     };
     match harness {
+        // The same static row the engine's fx harness falls back to.
+        "arbos-fx" => vec![model("glm-5.3", "glm-5.3", "engy default", &[], vec![])],
         "grok" => vec![model(
             "grok-4.5",
             "Grok 4.5",
@@ -651,6 +652,18 @@ mod tests {
         assert_eq!(model_label("codex", "gpt-5.6-terra"), "GPT-5.6-Terra");
         assert_eq!(model_label("codex", "some-new-model"), "some-new-model");
         assert_eq!(harness_label("opencode"), "OpenCode");
+        assert_eq!(harness_label("arbos-fx"), "fx");
+    }
+
+    /// The offline fallback offers what the engine does: fx alone.
+    #[test]
+    fn fallback_catalog_offers_fx_only() {
+        let harnesses = fallback_harnesses();
+        assert_eq!(
+            harnesses.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["arbos-fx"]
+        );
+        assert_eq!(fallback_models("arbos-fx")[0].id, "glm-5.3");
     }
 
     #[test]
@@ -695,7 +708,7 @@ mod tests {
         assert!(cache.harnesses("dev/mac").is_none());
         cache.put_harnesses("dev/mac", &fallback_harnesses());
         cache.put_models("dev/mac", "codex", &fallback_models("codex"));
-        assert_eq!(cache.harnesses("dev/mac").unwrap().len(), 2);
+        assert_eq!(cache.harnesses("dev/mac").unwrap().len(), 1);
         assert_eq!(
             cache.models("dev/mac", "codex").unwrap()[0].id,
             "gpt-6-astra"

@@ -31,6 +31,19 @@ pub enum HarnessId {
     Mock,
 }
 
+impl HarnessId {
+    /// The one agent this build offers. Every picker, chip and settings page
+    /// shows this harness and no other; the rest of the enum stays for wire
+    /// compatibility with sessions and catalogs written by other builds.
+    pub const SHIPPED: HarnessId = HarnessId::Fx;
+
+    /// Whether this build offers `self` in its UI. The mock is not offered:
+    /// the dev rig opts it in separately (`ZERON_HARNESS=mock`).
+    pub fn is_shipped(self) -> bool {
+        self == Self::SHIPPED
+    }
+}
+
 /// Durable user preference for one agent's independently-installed CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

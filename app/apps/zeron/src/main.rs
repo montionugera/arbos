@@ -435,20 +435,12 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
 
 /// `ZERON_HARNESS` picks the default harness for chats without a config row.
 /// `mock` powers the e2e smoke. The default is fx.
+/// The engine's default harness. This build ships one agent, so the only
+/// override is the dev rig's mock; any other value falls back to fx.
 fn harness_from_env() -> zeron_engine::HarnessId {
     match std::env::var("ZERON_HARNESS").as_deref().map(str::trim) {
         Ok("mock") => zeron_engine::HarnessId::Mock,
-        Ok("codex") => zeron_engine::HarnessId::Codex,
-        Ok("cursor") => zeron_engine::HarnessId::Cursor,
-        Ok("devin") => zeron_engine::HarnessId::Devin,
-        Ok("grok") => zeron_engine::HarnessId::Grok,
-        Ok("hermes") => zeron_engine::HarnessId::Hermes,
-        Ok("pi") => zeron_engine::HarnessId::Pi,
-        Ok("opencode") => zeron_engine::HarnessId::Opencode,
-        Ok("antigravity") => zeron_engine::HarnessId::Antigravity,
-        Ok("claude-code") => zeron_engine::HarnessId::ClaudeCode,
-        Ok("fx") | Ok("arbos-fx") => zeron_engine::HarnessId::Fx,
-        _ => zeron_engine::HarnessId::Fx,
+        _ => zeron_engine::HarnessId::SHIPPED,
     }
 }
 

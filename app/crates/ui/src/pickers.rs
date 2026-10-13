@@ -1204,12 +1204,7 @@ impl Pickers {
                     .and_then(|list| self.offered(list).first().map(|d| d.id))
             });
         }
-        if let Some(config) = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .and_then(|c| c.config.as_ref())
-        {
+        if let Some(config) = self.runnable_chat_config(cx) {
             return Some(config.harness);
         }
         // New-chat canvas: the remembered last-used harness (sticky defaults),
@@ -1247,11 +1242,28 @@ impl Pickers {
         if let Some(id) = self.config.model.as_deref() {
             return Some(id);
         }
-        if let Some(chat) = self.state.read(cx).selected_chat_row() {
-            return chat.config.as_ref().and_then(|c| c.model.as_deref());
+        if self.state.read(cx).selected_chat_row().is_some() {
+            return self
+                .runnable_chat_config(cx)
+                .and_then(|c| c.model.as_deref());
         }
         let harness = self.effective_harness(cx)?;
         self.defaults.model_for(harness).map(|m| m.id.as_str())
+    }
+
+    /// The selected chat's config, when the catalog device can still run its
+    /// harness. A chat made by a build that offered several agents can name
+    /// one this catalog does not list at all; the composer then treats the
+    /// chat as unconfigured and resolves to the offered agent, for the chip
+    /// and for the next send alike, instead of wearing a mark the engine
+    /// cannot run. Before the catalog lands the row is trusted as-is.
+    fn runnable_chat_config<'a>(&'a self, cx: &'a App) -> Option<&'a ChatConfig> {
+        let config = self.state.read(cx).selected_chat_row()?.config.as_ref()?;
+        let fresh = self.harnesses.ready().filter(|_| !self.harnesses_stale);
+        match fresh {
+            Some(list) if !list.iter().any(|d| d.id == config.harness) => None,
+            _ => Some(config),
+        }
     }
 
     /// Effective reasoning — always concrete once the model is known: the
@@ -1262,7 +1274,7 @@ impl Pickers {
     fn explicit_reasoning(&self, cx: &App) -> Option<ReasoningLevel> {
         self.config.reasoning.or_else(|| {
             match self.state.read(cx).selected_chat_row() {
-                Some(chat) => chat.config.as_ref().and_then(|c| c.reasoning),
+                Some(_) => self.runnable_chat_config(cx).and_then(|c| c.reasoning),
                 // New chat: the level last used with this model, else the
                 // last-used level overall.
                 None => self
@@ -1348,10 +1360,9 @@ impl Pickers {
     /// selections for existing chats, the remembered picks for the model the
     /// new-chat canvas resolves to (same id [`Self::resolved`] sends).
     fn explicit_options(&self, cx: &App) -> serde_json::Map<String, serde_json::Value> {
-        if let Some(chat) = self.state.read(cx).selected_chat_row() {
-            return chat
-                .config
-                .as_ref()
+        if self.state.read(cx).selected_chat_row().is_some() {
+            return self
+                .runnable_chat_config(cx)
                 .map(|c| c.model_options.clone())
                 .unwrap_or_default();
         }
@@ -1694,7 +1705,7 @@ impl Pickers {
                 pickers.catalog_rev += 1;
                 pickers.harnesses = match result {
                     Ok(value) => match serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
-                        Ok(list) => Loadable::Ready(list),
+                        Ok(list) => Loadable::Ready(shipped_harnesses(list)),
                         Err(err) => Loadable::Error(err.to_string()),
                     },
                     Err(err) => Loadable::Error(err.to_string()),
@@ -6056,6 +6067,24 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
     }
 }
 
+/// The catalog rows this build can show: the shipped agent, plus the mock
+/// when the dev rig opted it in. The local engine already lists fx alone;
+/// a catalog from another device's older engine can still name agents this
+/// build has no UI for, and those must reach neither the rail, the chip,
+/// nor a send.
+pub fn shipped_harnesses(list: Vec<HarnessDescriptor>) -> Vec<HarnessDescriptor> {
+    shipped_harnesses_impl(list, mock_harness_enabled())
+}
+
+fn shipped_harnesses_impl(
+    list: Vec<HarnessDescriptor>,
+    allow_mock: bool,
+) -> Vec<HarnessDescriptor> {
+    list.into_iter()
+        .filter(|d| d.id.is_shipped() || (allow_mock && d.id == HarnessId::Mock))
+        .collect()
+}
+
 /// `ZERON_HARNESS=mock` (the e2e/dev rig) opts the mock harness into the UI;
 /// production launches never set it, so the mock never surfaces there.
 fn mock_harness_enabled() -> bool {
@@ -6368,10 +6397,9 @@ impl Render for Pickers {
             Some(harness) => harness_brand_icon(harness),
             None if self.title.is_some() => (crate::icons::CHAT_ROUND_LINE, Some(theme.text_muted)),
             None if no_agents => (crate::icons::TERMINAL, Some(theme.text_muted)),
-            None => (
-                crate::icons::CLAUDE_MARK,
-                Some(crate::icons::claude_brand()),
-            ),
+            // Harness unknown and nothing loading (the catalog failed): the
+            // shipped agent's own mark, never a third party's.
+            None => harness_brand_icon(HarnessId::SHIPPED),
         };
         // The chip names the model and its effort only; the other options
         // (context, fast mode, ...) live in the popover. The effort always
@@ -8595,6 +8623,137 @@ mod tests {
             supports_steering: false,
         }
     }
+
+    /// An fx catalog row as the live session reports it: the connection
+    /// that owns the session on `description`, no effort ladder.
+    fn fx_model(id: &str) -> Model {
+        Model {
+            description: Some("engy".into()),
+            ..bare_model(id, id)
+        }
+    }
+
+    /// This build ships one agent. A catalog that still lists the others
+    /// (another device's older engine) and a memory file from a build that
+    /// offered them both lose: the picker lists fx alone, the chip resolves
+    /// to fx's model with no third-party effort, and a send carries fx.
+    #[gpui::test]
+    fn picker_lists_exactly_the_shipped_fx_provider(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local")]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            // The memory file as the previous build left it: Codex last, a
+            // GPT model and a High effort remembered for it.
+            let mut stale = ComposerDefaults::default();
+            stale.remember_model(HarnessId::Codex, "gpt-6.1-sol".into(), "GPT-6.1-Sol".into());
+            stale.remember_reasoning(HarnessId::Codex, Some("gpt-6.1-sol"), ReasoningLevel::High);
+            assert!(stale.forget_unshipped());
+            pickers.defaults = stale;
+            // Nothing names GPT before the catalog lands either.
+            assert_ne!(
+                pickers.model_name(cx),
+                ModelName::Named("GPT-6.1-Sol".into())
+            );
+            assert_eq!(pickers.effective_reasoning(cx), None);
+
+            // The engine's catalog lands through the same filter as a live load.
+            let landed = shipped_harnesses_impl(
+                vec![
+                    descriptor(HarnessId::Mock, "Mock"),
+                    descriptor(HarnessId::ClaudeCode, "Claude Code"),
+                    descriptor(HarnessId::Codex, "Codex"),
+                    descriptor(HarnessId::Fx, "fx"),
+                    descriptor(HarnessId::Grok, "Grok"),
+                ],
+                false,
+            );
+            assert_eq!(
+                landed.iter().map(|d| d.id).collect::<Vec<_>>(),
+                vec![HarnessId::Fx]
+            );
+            pickers.harnesses = Loadable::Ready(landed);
+            pickers.apply_model_catalog(
+                HarnessId::Fx,
+                Loadable::Ready(vec![fx_model("glm-5.3"), fx_model("glm-5.2")]),
+                cx,
+            );
+
+            assert_eq!(
+                pickers
+                    .rail_descriptors(cx)
+                    .iter()
+                    .map(|d| d.id)
+                    .collect::<Vec<_>>(),
+                vec![HarnessId::Fx]
+            );
+            assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Fx));
+            assert_eq!(pickers.model_name(cx), ModelName::Named("glm-5.3".into()));
+            assert_eq!(
+                fx_composer_chip(pickers.selected_model(cx).unwrap()),
+                ("engy".to_string(), Some("glm-5.3".to_string()))
+            );
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::Fx));
+            assert_eq!(resolved.model.as_deref(), Some("glm-5.3"));
+            assert_eq!(resolved.reasoning, None);
+            // Every row the picker can show belongs to fx.
+            assert!(
+                pickers
+                    .model_rows(cx)
+                    .iter()
+                    .all(|row| row.harness == HarnessId::Fx)
+            );
+        });
+    }
+
+    /// A chat created by a build that offered Codex still carries that
+    /// harness in its row. Once this device's catalog is in and does not
+    /// list it, the composer resolves the chat to fx — chip and send alike —
+    /// instead of wearing an OpenAI mark for an agent the engine cannot run.
+    #[gpui::test]
+    fn a_chat_from_an_unshipped_agent_resolves_to_fx(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.chats.push(serde_json::from_value(serde_json::json!({
+                "id":"old-chat", "deviceId":"device", "archived":false, "createdAt":"2026-09-01T00:00:00Z",
+                "config":{"harness":"codex", "model":"gpt-6.1-sol", "reasoning":"high", "sandbox":"workspace-write", "modelOptions":{"serviceTier":"fast"}}
+            })).unwrap());
+            state.selected_chat = Some("old-chat".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults = ComposerDefaults::default();
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Fx, "fx")]);
+            pickers.apply_model_catalog(
+                HarnessId::Fx,
+                Loadable::Ready(vec![fx_model("glm-5.3")]),
+                cx,
+            );
+            assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Fx));
+            assert_eq!(
+                pickers
+                    .rail_descriptors(cx)
+                    .iter()
+                    .map(|d| d.id)
+                    .collect::<Vec<_>>(),
+                vec![HarnessId::Fx]
+            );
+            assert_eq!(pickers.model_name(cx), ModelName::Named("glm-5.3".into()));
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::Fx));
+            assert_eq!(resolved.model.as_deref(), Some("glm-5.3"));
+            assert_eq!(resolved.reasoning, None);
+            assert!(resolved.model_options.is_empty());
+        });
+    }
+
     #[gpui::test]
     fn model_name_never_reads_select_model_while_anything_can_still_name_it(
         cx: &mut gpui::TestAppContext,
