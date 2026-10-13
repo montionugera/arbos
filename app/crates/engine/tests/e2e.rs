@@ -1281,6 +1281,121 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
     );
 }
 
+#[tokio::test]
+async fn recover_stale_closes_a_crashed_local_worker_in_the_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let device_id = "dev-host-fixed";
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(dir.path().join("device-id"), device_id).unwrap();
+
+    // A real project layout: one local worker mid-turn, one on another machine.
+    let project = dir.path().join("oak-project");
+    let local_chat = "chat-crashed-local";
+    let remote_chat = "chat-crashed-remote";
+    std::fs::create_dir_all(&project).unwrap();
+    zeron_engine::arbos_layout::ensure(&project, Some("Oak")).unwrap();
+    zeron_engine::arbos_layout::claim_main(&project, "main-chat").unwrap();
+    zeron_engine::arbos_layout::reserve_worker(&project, "oak", "Fix the tests", "glm-5.3", None)
+        .unwrap();
+    zeron_engine::arbos_layout::bind_worker_chat(&project, "oak", local_chat).unwrap();
+    zeron_engine::arbos_layout::reserve_worker(
+        &project,
+        "pine",
+        "Watch the release",
+        "glm-5.3",
+        Some("far-away-machine"),
+    )
+    .unwrap();
+    zeron_engine::arbos_layout::bind_worker_chat(&project, "pine", remote_chat).unwrap();
+
+    // The crash state per chat: a journal that never got its Done, a harness
+    // session pointing at the project, and a doc entry frozen mid-stream with
+    // ancient timestamps (so the run is not fresh enough to revive).
+    {
+        let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
+        let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
+        for chat_id in [local_chat, remote_chat] {
+            journal
+                .append(
+                    chat_id,
+                    &AgentEvent::SessionStarted {
+                        harness: HarnessId::Mock,
+                        model: "mock-1".into(),
+                        tools: vec![],
+                        cwd: project.display().to_string(),
+                        session_id: format!("hs-{chat_id}"),
+                        assistant_message_id: format!("a-{chat_id}"),
+                    },
+                )
+                .unwrap();
+            journal
+                .append(
+                    chat_id,
+                    &AgentEvent::TextDelta {
+                        text: "doomed".into(),
+                    },
+                )
+                .unwrap();
+
+            let doc = SessionDoc::init(chat_id).unwrap();
+            doc.push_message(&SessionMessageEntry {
+                id: "m-user".into(),
+                role: MessageRole::User,
+                parts: vec![MessagePart::Text {
+                    id: "t0".into(),
+                    text: "hi".into(),
+                }],
+                created_at: 1,
+                device_id: device_id.into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })
+            .unwrap();
+            let mut writer = SegmentWriter::begin(&doc, "m-assist", device_id, 2).unwrap();
+            writer
+                .sync(&[MessagePart::Text {
+                    id: "t0".into(),
+                    text: "doomed".into(),
+                }])
+                .unwrap();
+            store
+                .save_snapshot(chat_id, &doc.export_snapshot().unwrap())
+                .unwrap();
+        }
+    }
+
+    // Boot: EngineCore::assemble runs recover_stale.
+    assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+
+    // The local worker's turn is closed in the layout, so no surface keeps
+    // listing it as a live wait; the remote worker is left to its machine.
+    let oak = zeron_engine::arbos_layout::worker_result(&project, "oak").unwrap();
+    assert_eq!(oak.status, "stopped");
+    assert_eq!(oak.result, "Stopped when Arbos quit.");
+    assert_eq!(oak.step, "");
+    let pine = zeron_engine::arbos_layout::worker_result(&project, "pine").unwrap();
+    assert_eq!(pine.status, "working");
+
+    // A second boot changes nothing: the journals are closed, and the
+    // already-stopped worker is not a live wait anymore.
+    assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let oak = zeron_engine::arbos_layout::worker_result(&project, "oak").unwrap();
+    assert_eq!(oak.status, "stopped");
+    let pine = zeron_engine::arbos_layout::worker_result(&project, "pine").unwrap();
+    assert_eq!(pine.status, "working");
+}
+
 fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
     MessagePart::Tool {
         id: id.into(),
