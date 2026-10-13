@@ -766,6 +766,179 @@ async fn a_crash_before_the_reply_reached_disk_still_auto_resumes() {
     core.shutdown().await;
 }
 
+/// Holds its first turn open — `SessionStarted`, one word, then nothing
+/// until the engine interrupts it — the way a worker mid-task looks when
+/// Arbos quits for an update. Every later turn completes at once.
+struct HoldsUntilInterrupted {
+    requests: RequestLog,
+    held: Arc<Mutex<bool>>,
+}
+
+#[async_trait]
+impl Harness for HoldsUntilInterrupted {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Holding"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[ReasoningLevel::Medium]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.requests
+            .lock()
+            .expect("request log")
+            .push(request.clone());
+        let hold = std::mem::take(&mut *self.held.lock().expect("hold flag"));
+        let started = AgentEvent::SessionStarted {
+            harness: HarnessId::Mock,
+            model: "mock-1".into(),
+            tools: vec![],
+            cwd: request.cwd.clone(),
+            session_id: "hs-held".into(),
+            assistant_message_id: "a-1".into(),
+        };
+        if hold {
+            let head = futures::stream::iter(vec![
+                Ok(started),
+                Ok(AgentEvent::TextDelta {
+                    text: "working…".into(),
+                }),
+            ]);
+            let interrupt = controls.interrupt.clone();
+            // Nothing more arrives; the stream ends only once interrupted,
+            // which the engine settles as `Done{interrupted}`.
+            let tail = futures::stream::once(async move {
+                interrupt.cancelled().await;
+            })
+            .filter_map(|()| async { None });
+            return Ok(head.chain(tail).boxed());
+        }
+        Ok(futures::stream::iter(vec![
+            Ok(started),
+            Ok(AgentEvent::TextDelta {
+                text: format!("ack: {}", request.prompt),
+            }),
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: Some("hs-held".into()),
+            }),
+        ])
+        .boxed())
+    }
+}
+
+/// Quit — or the in-app update, which quits and relaunches — while a turn
+/// is in flight. The shutdown is graceful, so the journal closes in `Done`
+/// and the crash scan has nothing to find; the next launch must still pick
+/// the turn back up, in the same harness conversation, and only once.
+#[tokio::test]
+async fn a_turn_interrupted_by_quit_resumes_on_the_next_launch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("device-id"), "dev-quit").unwrap();
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let harness = |held: bool| HoldsUntilInterrupted {
+        requests: requests.clone(),
+        held: Arc::new(Mutex::new(held)),
+    };
+
+    // Launch one: the turn starts and holds; Arbos quits under it.
+    {
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(harness(true)));
+        let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
+            .expect("engine core assembles");
+        pre_title(&core);
+        queue_run(&core, "finish the pull request", "/tmp", "msg-user-1");
+        wait_for(
+            || {
+                entries_now(&core)
+                    .iter()
+                    .any(|e| e.status == Some(MessageStatus::Streaming))
+            },
+            "the held turn to start streaming",
+        )
+        .await;
+        core.shutdown().await;
+        drop(core);
+    }
+    let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+    assert!(
+        journal.stale_sessions().unwrap().is_empty(),
+        "a graceful quit closes the journal; this is not a crash"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    // Launch two: the interrupted turn is picked back up by itself.
+    {
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(harness(false)));
+        let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
+            .expect("engine core assembles");
+        wait_for(
+            || complete_assistant_count(&core) == 1,
+            "the interrupted turn to complete after relaunch",
+        )
+        .await;
+        let entries = entries_now(&core);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.role == MessageRole::User)
+                .count(),
+            1,
+            "the re-dispatch reuses the original message id"
+        );
+        let recorded = requests.lock().unwrap().clone();
+        let revived = recorded
+            .iter()
+            .skip(1)
+            .find(|r| r.prompt == "finish the pull request")
+            .expect("the relaunch re-dispatched the interrupted prompt");
+        assert_eq!(
+            revived.resume.as_deref(),
+            Some("hs-held"),
+            "the revived turn continues the same harness conversation"
+        );
+        core.shutdown().await;
+        drop(core);
+    }
+    let after_relaunch = requests.lock().unwrap().len();
+
+    // Launch three: the turn completed, so nothing is resumed again.
+    {
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(harness(false)));
+        let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
+            .expect("engine core assembles");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            after_relaunch,
+            "a completed turn is not revived by a later launch"
+        );
+        core.shutdown().await;
+    }
+}
+
 /// The agent reports where it runs with symlinks resolved; the chat names
 /// its folder through the symlink. A crash mid-turn leaves the resolved
 /// spelling stored (only a turn's Done restores the request's), and the
