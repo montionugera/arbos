@@ -844,6 +844,23 @@ fn handleRestoreSession(
         return state.writer.writeError(alloc, msg.id, .{ .code = ErrorCode.invalid_params, .message = "Missing sessionId" });
     };
 
+    // A `session/load` may carry the client's current system prompt. The
+    // host's instructions change between launches (an update, an edited
+    // prompt), and a restored session must follow the instructions it is
+    // loaded with, not the text it was created with. Validated before any
+    // side effect; a load without one keeps the persisted prompt.
+    const replacement_client_prompt: ?[]u8 = switch (kind) {
+        .load => client_instructions.parse(alloc, msg.params_raw) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return state.writer.writeError(alloc, msg.id, .{
+                .code = ErrorCode.invalid_params,
+                .message = client_instructions.parseErrorMessage(err),
+            }),
+        },
+        .reconnect => null,
+    };
+    defer if (replacement_client_prompt) |text| alloc.free(text);
+
     var workspace = workspace_binding.prepare(state, alloc, msg.params_raw) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return state.writer.writeError(alloc, msg.id, .{
@@ -915,6 +932,19 @@ fn handleRestoreSession(
     if (state.active_session) |*active| {
         if (sameSessionId(active.session_id, session_id)) {
             server.cancelAndReapActivePrompt(state);
+            if (replacement_client_prompt) |text| {
+                const files: ?SavedFiles = if (active.v2) |v2| .{ .v2 = v2 } else if (active.writable) |*writable| .{ .v1 = writable } else null;
+                if (files) |saved| persistClientSystemPrompt(alloc, saved, text) catch |err| {
+                    debug_trace.logf("acp", "failed to replace client system prompt session={s} err={s}", .{ session_id, @errorName(err) });
+                    return state.writer.writeError(alloc, msg.id, .{
+                        .code = ErrorCode.internal_error,
+                        .message = "Failed to save the client system prompt",
+                    });
+                };
+                const copy = try state.alloc.dupe(u8, text);
+                if (active.client_system_prompt.len > 0) state.alloc.free(active.client_system_prompt);
+                active.client_system_prompt = copy;
+            }
             server.disableSubagentHost(state);
             state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
             const previous_mcp = active.mcp;
@@ -1067,7 +1097,16 @@ fn handleRestoreSession(
     // fails this restore without replacing a different active session. A
     // same-session `cwd` rebind has already released it above.
     const saved_files: SavedFiles = if (v2) |value| .{ .v2 = value } else .{ .v1 = &writable.? };
-    var client_system_prompt: ?[]u8 = restoredClientSystemPrompt(state.alloc, saved_files) catch |err| switch (err) {
+    var client_system_prompt: ?[]u8 = if (replacement_client_prompt) |text| blk: {
+        persistClientSystemPrompt(alloc, saved_files, text) catch |err| {
+            debug_trace.logf("acp", "failed to replace client system prompt session={s} err={s}", .{ session_id, @errorName(err) });
+            return state.writer.writeError(alloc, msg.id, .{
+                .code = ErrorCode.internal_error,
+                .message = "Failed to save the client system prompt",
+            });
+        };
+        break :blk try state.alloc.dupe(u8, text);
+    } else restoredClientSystemPrompt(state.alloc, saved_files) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ClientSystemPromptUnreadable => return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.internal_error,
@@ -3219,6 +3258,87 @@ test "ACP ultrafast new load and resume preserve configured baselines on both ba
                 }
             }
         }
+    }
+}
+
+test "ACP load replaces the persisted client system prompt when the client sends one" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
+    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
+    const home_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home_path);
+    const workspace_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
+    defer alloc.free(workspace_path);
+    const env = try AcpSessionTestHome.install(alloc, home_path);
+    defer env.deinit();
+    var capture = try tmp.dir.createFile(io_mod.getIo(), "client-prompt.jsonl", .{ .read = true });
+    defer capture.close(io_mod.getIo());
+    for ([_]bool{ false, true }) |v2_backend| {
+        var arena_state = std.heap.ArenaAllocator.init(alloc);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var state = try initAcpSessionTestState(arena, workspace_path, capture);
+        defer state.deinit();
+        state.cfg.auth_mode = .host_managed;
+        state.credential_source = .host_managed;
+        state.cfg.minimal_kernel = true;
+        state.cfg.allow_acp_mcp = false;
+        state.cfg.home_override = home_path;
+        if (v2_backend) {
+            state.sessions_v2_requested = true;
+            state.sessions_v2 = try session_adapter.Store.open(arena, home_path);
+        }
+        var msg = jsonrpc.Message{
+            .id = .{ .integer = 1 },
+            .method = "session/new",
+            .params_raw = "{\"mcpServers\":[],\"systemPrompt\":[{\"type\":\"text\",\"text\":\"first instructions\"}],\"systemPromptMode\":\"append\"}",
+        };
+        try handleNewSession(&state, arena, &msg);
+        try std.testing.expectEqualStrings("first instructions", state.active_session.?.client_system_prompt);
+        const id = try arena.dupe(u8, state.active_session.?.session_id);
+        // A v2 session is loadable once it holds a turn.
+        if (state.active_session.?.v2) |v2| try v2.commitTurn(.{ .assistant = .{
+            .user = .{ .text = @constCast("saved request") },
+            .assistant = @constCast("saved answer"),
+        } }, types.ConversationLanguage.default());
+
+        // A load after a relaunch carries the host's current instructions.
+        try server.releaseActiveSession(&state);
+        msg.method = "session/load";
+        msg.params_raw = try std.fmt.allocPrint(
+            arena,
+            "{{\"sessionId\":\"{s}\",\"mcpServers\":[],\"systemPrompt\":[{{\"type\":\"text\",\"text\":\"second instructions\"}}],\"systemPromptMode\":\"append\"}}",
+            .{id},
+        );
+        try handleLoadSession(&state, arena, &msg);
+        try std.testing.expectEqualStrings("second instructions", state.active_session.?.client_system_prompt);
+
+        // A load without a prompt keeps what was last persisted.
+        try server.releaseActiveSession(&state);
+        msg.params_raw = try std.fmt.allocPrint(arena, "{{\"sessionId\":\"{s}\",\"mcpServers\":[]}}", .{id});
+        try handleLoadSession(&state, arena, &msg);
+        try std.testing.expectEqualStrings("second instructions", state.active_session.?.client_system_prompt);
+
+        // Loading the already active session swaps the prompt in place.
+        msg.params_raw = try std.fmt.allocPrint(
+            arena,
+            "{{\"sessionId\":\"{s}\",\"mcpServers\":[],\"systemPrompt\":[{{\"type\":\"text\",\"text\":\"third instructions\"}}]}}",
+            .{id},
+        );
+        try handleLoadSession(&state, arena, &msg);
+        try std.testing.expectEqualStrings("third instructions", state.active_session.?.client_system_prompt);
+        try server.releaseActiveSession(&state);
+        msg.params_raw = try std.fmt.allocPrint(arena, "{{\"sessionId\":\"{s}\",\"mcpServers\":[]}}", .{id});
+        try handleLoadSession(&state, arena, &msg);
+        try std.testing.expectEqualStrings("third instructions", state.active_session.?.client_system_prompt);
+
+        // An invalid prompt is refused before the session changes.
+        try server.releaseActiveSession(&state);
+        msg.params_raw = try std.fmt.allocPrint(arena, "{{\"sessionId\":\"{s}\",\"mcpServers\":[],\"systemPrompt\":\"text\"}}", .{id});
+        try handleLoadSession(&state, arena, &msg);
+        try std.testing.expect(state.active_session == null);
     }
 }
 
