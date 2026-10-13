@@ -86,6 +86,21 @@ notarize() {
     --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" \
     --issuer "$NOTARY_ISSUER_ID" --wait
 }
+# staple <path>: fetch the ticket from Apple and attach it. The fetch goes to
+# api.apple-cloudkit.com and now and then the connection drops mid-request
+# (stapler exit 68, "The network connection was lost"), which is not a verdict
+# on the build; a missing ticket after the retries still fails the build.
+staple() {
+  local attempt
+  for attempt in 1 2 3 4; do
+    if xcrun stapler staple "$1"; then
+      return 0
+    fi
+    echo "stapler attempt $attempt failed; retrying in $((attempt * 15))s" >&2
+    sleep $((attempt * 15))
+  done
+  xcrun stapler staple "$1"
+}
 NOTARIZE=false
 [[ -n "${NOTARY_KEY_PATH:-}" && -n "${NOTARY_KEY_ID:-}" && -n "${NOTARY_ISSUER_ID:-}" ]] && NOTARIZE=true
 
@@ -97,7 +112,7 @@ if $NOTARIZE; then
   ditto -c -k --keepParent "$APP" "$ZIP"
   notarize "$ZIP"
   rm -f "$ZIP"
-  xcrun stapler staple "$APP"
+  staple "$APP"
 fi
 
 # The auto-updater artifact.
@@ -149,6 +164,6 @@ PY
 rm -f "$BG_TIFF"
 if $NOTARIZE; then
   notarize "$DMG"
-  xcrun stapler staple "$DMG"
+  staple "$DMG"
 fi
 echo "packaged: $DMG"
