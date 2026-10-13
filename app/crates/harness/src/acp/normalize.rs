@@ -785,6 +785,47 @@ mod tests {
         );
     }
 
+    /// The first retry frame of the 2026-10-12 incident's provider failures,
+    /// captured verbatim from the installed fx 0.0.13 driving the app's own
+    /// ACP handshake: attempt 1 of 10, retrying after 2 s. The engine half of
+    /// this contract — the same event writing `waiting` with the
+    /// "Waiting on the model — try 1 of 10, next in 2 s" line — is pinned by
+    /// `a_reported_retry_frame_waits_with_its_own_line_and_recovers` in
+    /// `app/crates/engine/tests/silent_model_pulse.rs`.
+    #[test]
+    fn fx_model_recovery_first_retry_of_the_incident_maps() {
+        let update = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": { "fx": { "modelResponseRecovery": {
+                "state": "active",
+                "kind": "auto_retry",
+                "cause": "provider_unavailable",
+                "action": "retrying_request",
+                "attempt": 1,
+                "attemptLimit": 10,
+                "delaySeconds": 2,
+                "durable": true,
+                "message": "⚠ Provider unavailable · HTTP 503 · server_error: provider unavailable · retrying request in 2s",
+            } } },
+        });
+        assert_eq!(
+            map_update(&update),
+            vec![AgentEvent::ModelRecovery {
+                state: ModelRecoveryState::Active,
+                cause: Some("provider_unavailable".into()),
+                action: Some("retrying_request".into()),
+                required_action: None,
+                failed_attempt: Some(1),
+                attempt_limit: Some(10),
+                delay_seconds: Some(2),
+                retry_deadline: None,
+                diagnostic: Some(
+                    "⚠ Provider unavailable · HTTP 503 · server_error: provider unavailable · retrying request in 2s".into()
+                ),
+            }]
+        );
+    }
+
     #[test]
     fn fx_model_recovery_paused_carries_continue_later() {
         let update = json!({
