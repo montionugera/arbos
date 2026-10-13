@@ -41,6 +41,7 @@ Its first lines are `---`, `name: <name>`, `description: <one sentence on when t
 Write it with write_file. You and every worker of this project find it there; do not install it anywhere else unless the person asks. \
 Skills under `~/.fx/skills` are the home root, shared by every project; one there is not a precedent for where a project skill goes. \
 A new project skill goes to `.arbos/skills/<name>/SKILL.md` even when that folder does not exist yet and older skills sit elsewhere. \
+Before you say a skill already exists, read its file from disk; a skill you remember writing earlier in this conversation is not proof it is there now. \
 The checklist is only the active goal's steps. Do not add a step from an older goal. \
 When you tick one step, leave the other steps of this goal in place. \
 A `/goal` line already includes the workers to spawn. Send them at once. Do not wait for `/skill`. \
@@ -2661,6 +2662,7 @@ mod tests {
         // A home-root skill is not where a project skill goes.
         assert!(COORDINATOR_PROMPT.contains("Skills under `~/.fx/skills` are the home root"));
         assert!(COORDINATOR_PROMPT.contains("even when that folder does not exist yet"));
+        assert!(COORDINATOR_PROMPT.contains("read its file from disk"));
     }
 
     #[test]
