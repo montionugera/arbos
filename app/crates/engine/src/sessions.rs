@@ -2626,12 +2626,16 @@ async fn drive_run(
     let mut main_turn = false;
     // `coordinator`, `worker`, or `chat`: where a model-recovery line goes.
     let mut agent_role: Option<String> = None;
+    // The agent's fx home, kept for the silent-model pulse (the worker's
+    // usage ledger lives at `<fx_home>/.fx/usage.jsonl`).
+    let mut fx_home: Option<std::path::PathBuf> = None;
     if harness_id == HarnessId::Fx
         && let Some(prep) =
             crate::arbos_layout::prepare_turn(std::path::Path::new(&request.cwd), &chat_id)
     {
         main_turn = prep.role == "coordinator";
         agent_role = Some(prep.role.clone());
+        fx_home = Some(std::path::PathBuf::from(&prep.fx_home));
         request.model_options.insert(
             "_arbosFxHome".into(),
             serde_json::Value::String(prep.fx_home),
@@ -2919,6 +2923,21 @@ async fn drive_run(
     // fx's model-response recovery for this run: the live line, the worker's
     // `waiting` status, the one automatic resume, and the five-minute rule.
     let mut recovery = RecoveryTracker::default();
+    // The silent-model pulse covers what fx cannot report: a worker's model
+    // settling requests with no content, no error, and no recovery frame.
+    // It reads the worker's own usage ledger (Main's line comes from the
+    // frames; a side chat has no worker status to hold), so only a worker
+    // turn inside a project gets one.
+    let mut pulse = crate::arbos_recovery::SilentModelPulse::new(
+        match (agent_role.as_deref(), fx_home.as_deref()) {
+            (Some("worker"), Some(home)) => Some(home.to_path_buf()),
+            _ => None,
+        },
+    );
+    // The newest event on this run's stream, whatever it was. The live
+    // heartbeat above proves the loop runs, not that the model is answering;
+    // the pulse measures turn silence from here.
+    let mut last_event_at = std::time::Instant::now();
     // Spawn chips that have SETTLED (tagged Done seen). Content events for a
     // settled chip with no live sink are dropped — a straggler frame after
     // the freeze must not mint a new doc entry or wedge the transcript back
@@ -2988,6 +3007,42 @@ async fn drive_run(
                             &run_cwd,
                             agent_role.as_deref(),
                             &previous_step,
+                            &effect,
+                        );
+                    }
+                    continue;
+                }
+                // SILENT-MODEL PULSE: a worker's model can settle requests
+                // with no content, no error, and no recovery frame — fx has
+                // no signal for that today, so nothing on the stream says
+                // the person is waiting (2026-10-12: three settlements ~300 s
+                // apart held a live worker on `working` for eleven minutes).
+                // While the turn is live, fx's recovery tracker is quiet,
+                // and the stream has said nothing for
+                // `SILENT_MODEL_AFTER`, the pulse baselines the worker's
+                // usage ledger and re-reads it every `SILENT_MODEL_POLL`: one
+                // newer `incident` (a request settled) flips the worker to
+                // `waiting` through the same writer a reported retry uses.
+                // The silence is the guard, not the incidents — a healthy
+                // worker logs dozens per turn — so this branch never fires
+                // while events flow, and never touches a turn fx is already
+                // reporting or holding open.
+                _ = tokio::time::sleep_until(
+                    pulse
+                        .next_due(last_event_at)
+                        .map(tokio::time::Instant::from_std)
+                        .unwrap_or_else(tokio::time::Instant::now)
+                ), if pulse.next_due(last_event_at).is_some()
+                    && idle_since.is_none()
+                    && !interrupted
+                    && recovery.is_clear() => {
+                    if let Some(effect) = pulse.tick(std::time::Instant::now(), last_event_at) {
+                        apply_recovery(
+                            &inner,
+                            &chat_id,
+                            &run_cwd,
+                            agent_role.as_deref(),
+                            "",
                             &effect,
                         );
                     }
@@ -3205,6 +3260,22 @@ async fn drive_run(
         };
 
         // ── subagent routing ───────────────────────────────────────────
+        // Any event at all — content, a tool, a recovery frame, even a
+        // subagent's traffic — is the model answering. The silent-model
+        // pulse restarts its silence window here, and if it had flipped the
+        // worker to `waiting`, this event restores `working` (a recovery
+        // frame handled just below then writes its own, better line).
+        if pulse.event() {
+            apply_recovery(
+                &inner,
+                &chat_id,
+                &run_cwd,
+                agent_role.as_deref(),
+                crate::arbos_recovery::SILENT_MODEL_STEP,
+                &RecoveryEffect::Working,
+            );
+        }
+        last_event_at = std::time::Instant::now();
         // Tagged events NEVER fold into the parent transcript: they stream
         // into the subagent's own doc, and the parent keeps only the spawn
         // chip (ref + status + one-line tail) — refreshed through the live
