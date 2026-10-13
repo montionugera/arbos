@@ -605,6 +605,33 @@ pub async fn capture_active_window() -> Result<CapturedAppshot, CaptureError> {
     result
 }
 
+/// The `screenshot.capture` hook: the app's own frontmost project window as a
+/// PNG. The headed app registers this with the engine it embeds, so the op
+/// runs in the process that owns the window.
+#[cfg(target_os = "macos")]
+pub fn capture_project_window() -> Result<zeron_engine::arbos_capture::CapturedWindow, String> {
+    let (window_title, png) = macos::capture_own_window().map_err(capture_unavailable)?;
+    Ok(zeron_engine::arbos_capture::CapturedWindow { png, window_title })
+}
+
+/// Why the app's own window could not be captured, in plain words.
+#[cfg(target_os = "macos")]
+fn capture_unavailable(error: CaptureError) -> String {
+    match error {
+        CaptureError::NoEligibleWindow => {
+            "No Arbos window is on screen to capture. Open the project window and try again."
+                .into()
+        }
+        CaptureError::PermissionRequired => {
+            "Arbos asked macOS for Screen Recording permission to capture its fullscreen window. Allow it and try again; macOS may ask to restart Arbos.".into()
+        }
+        CaptureError::CaptureFailed(message) => message,
+        CaptureError::Cancelled | CaptureError::SelfCapture | CaptureError::ShortcutUnavailable => {
+            error.to_string()
+        }
+    }
+}
+
 /// Ask the running headed Zeron process to capture an Appshot. Linux desktop
 /// environments that do not implement the Global Shortcuts portal can bind
 /// `zeron appshot` in their native Keyboard Shortcuts settings.
@@ -925,6 +952,26 @@ pub(crate) mod tests {
     use super::*;
     use gpui::{Image, ImageFormat};
     use std::sync::Arc;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn own_window_capture_errors_are_plain_words_that_name_arbos() {
+        assert_eq!(
+            capture_unavailable(CaptureError::NoEligibleWindow),
+            "No Arbos window is on screen to capture. Open the project window and try again."
+        );
+        let permission = capture_unavailable(CaptureError::PermissionRequired);
+        assert!(
+            permission.starts_with("Arbos asked macOS for Screen Recording permission"),
+            "{permission}"
+        );
+        assert_eq!(
+            capture_unavailable(CaptureError::CaptureFailed(
+                "The application window could not be captured.".into()
+            )),
+            "The application window could not be captured."
+        );
+    }
 
     pub(crate) fn shot() -> CapturedAppshot {
         CapturedAppshot {
