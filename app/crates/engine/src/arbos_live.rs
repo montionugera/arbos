@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -251,25 +252,37 @@ pub fn mark_seen(project: &Path) -> Result<(), String> {
 /// True when `text` contains a sentence Main will actually draw.
 ///
 /// The transcript drops a short acknowledgement ("Done."), a line that names
-/// a file, and a sentence longer than eighty characters. Those turns send no
-/// message, so they must not light the project. The checks match the
-/// transcript's sentence filter.
+/// a file, and a sentence longer than the cap. A sentence that carries the
+/// person's link is drawn whole: the slashes in a PR or URL are not a file
+/// path, the words after the last link that name a branch or a file are
+/// dropped, and the link's length does not count against the cap. A turn
+/// that draws nothing sends no message, so it must not light the project.
+/// These checks mirror the transcript's sentence filter
+/// (`first_clean_sentence` in `app/crates/ui/src/transcript.rs`); keep the
+/// twins in step.
 pub fn shows_the_person(text: &str) -> bool {
     for raw in text.split('\n') {
         let line = raw
             .trim()
             .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | '>' | '#'))
             .trim();
-        if line.len() < 12 || mentions_file_name(line) {
+        if line.len() < 12 {
             continue;
         }
-        let sentence = line.split(". ").next().unwrap_or(line).trim();
-        if sentence.len() < 12 || mentions_file_name(sentence) || sentence.chars().count() > 160
-        {
+        let sentence = if has_link(line) {
+            link_sentence(line)
+        } else {
+            if mentions_file_name(line) {
+                continue;
+            }
+            line.split(". ").next().unwrap_or(line).trim().to_owned()
+        };
+        if sentence.len() < 12 || mentions_file_name(&sentence) || sentence_too_long(&sentence) {
             continue;
         }
-        let mut shown = sentence.to_owned();
-        if !shown.ends_with('.') && !shown.ends_with('!') && !shown.ends_with('?') {
+        let mut shown = sentence;
+        let only_a_link = without_links(&shown).trim().is_empty();
+        if !only_a_link && !shown.ends_with('.') && !shown.ends_with('!') && !shown.ends_with('?') {
             shown.push('.');
         }
         if person_can_read(&shown) {
@@ -279,14 +292,95 @@ pub fn shows_the_person(text: &str) -> bool {
     false
 }
 
+/// The person's links in `text`: byte ranges of every `https://` or `http://`
+/// link, without the punctuation or bold markers that close it. Twin of
+/// `link_spans` in `app/crates/ui/src/transcript.rs`; keep the two in step.
+fn link_spans(text: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(found) = text[from..].find("http") {
+        let start = from + found;
+        let rest = &text[start..];
+        let Some(scheme) = ["https://", "http://"]
+            .into_iter()
+            .find(|scheme| rest.starts_with(scheme))
+        else {
+            from = start + "http".len();
+            continue;
+        };
+        let body = &rest[scheme.len()..];
+        let body_end = body.find(char::is_whitespace).unwrap_or(body.len());
+        let trimmed = body[..body_end].trim_end_matches(|c: char| {
+            matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | '*' | '_')
+        });
+        let end = start + scheme.len() + trimmed.len();
+        if trimmed.is_empty() {
+            from = end;
+            continue;
+        }
+        spans.push(start..end);
+        from = end;
+    }
+    spans
+}
+
+fn has_link(text: &str) -> bool {
+    !link_spans(text).is_empty()
+}
+
+/// `text` with the person's links taken out. The slashes inside a link are
+/// not a file path, and a link's length does not count against the cap.
+/// Twin of `without_links` in `app/crates/ui/src/transcript.rs`.
+fn without_links(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    for span in link_spans(text) {
+        out.push_str(&text[from..span.start]);
+        from = span.end;
+    }
+    out.push_str(&text[from..]);
+    out
+}
+
+/// A line that names a file. The links are taken out first, so the slashes
+/// in a PR or URL are not a file path.
 fn mentions_file_name(text: &str) -> bool {
+    let text = without_links(text);
     let lower = text.to_ascii_lowercase();
     lower.contains(".md") || lower.contains(".arbos") || text.contains('/')
 }
 
+/// The sentence of `line` that carries the person's link, whole. The words
+/// after the last link that name a branch or a file are dropped; the bold
+/// markers around the link go with them. Twin of `link_sentence` in
+/// `app/crates/ui/src/transcript.rs`.
+fn link_sentence(line: &str) -> String {
+    let sentence = line
+        .split(". ")
+        .find(|s| has_link(s))
+        .unwrap_or(line)
+        .trim();
+    let end = link_spans(sentence)
+        .last()
+        .map_or(sentence.len(), |span| span.end);
+    let kept = if mentions_file_name(&sentence[end..]) {
+        &sentence[..end]
+    } else {
+        sentence
+    };
+    kept.replace("**", "").trim().to_owned()
+}
+
+/// The cap is on the words; a link the person asked for is not counted.
+fn sentence_too_long(sentence: &str) -> bool {
+    without_links(sentence).chars().count() > 160
+}
+
+/// A plan sentence a person can read. A wake about files, ticks, or a
+/// checklist is not that sentence. A sentence carrying the person's link is.
 fn person_can_read(sentence: &str) -> bool {
     let lower = sentence.to_ascii_lowercase();
-    if lower.contains("on this goal") {
+    if lower.contains("on this goal") || has_link(sentence) {
         return true;
     }
     if sentence.chars().count() > 80 {
@@ -678,5 +772,39 @@ mod tests {
         assert!(!image_header_ok(b"\xFF\xD8\xFF\xE0 cut off jpeg"));
         assert!(image_header_ok(b"\xFF\xD8\xFF\xE0 whole jpeg \xFF\xD9"));
         assert!(!image_header_ok(b"short"));
+    }
+
+    #[test]
+    fn a_sentence_with_the_persons_link_lights_the_project() {
+        assert!(shows_the_person(
+            "PR is up: https://github.com/unarbos/arbos/pull/849 — two commits, tests green."
+        ));
+        assert!(shows_the_person(
+            "PR is up: [pull 849](https://github.com/unarbos/arbos/pull/849) — tests green."
+        ));
+        // The words after the link that name a branch or a file are dropped,
+        // so the reply the pane draws still lights the project.
+        let reply = "The PR is up: **https://github.com/unarbos/arbos/pull/849** — branch \
+                     `feat/live-link-mask` fully pushed (`app/crates/engine/src/arbos_live.rs`), \
+                     and the suite is green: 12 passed, 0 failed.";
+        assert!(shows_the_person(reply));
+        // A link's length does not count against the cap.
+        assert!(shows_the_person(&format!(
+            "Opened https://example.com/{}.",
+            "a".repeat(200)
+        )));
+    }
+
+    #[test]
+    fn paths_and_long_sentences_still_light_nothing() {
+        assert!(!shows_the_person("Done."));
+        assert!(!shows_the_person("see docs/status.md"));
+        assert!(!shows_the_person(
+            "The notes live in .arbos/context/internal."
+        ));
+        assert!(!shows_the_person("The branch `feat/x` is pushed."));
+        // The link is masked, but `feat/x` after it still names a file.
+        assert!(!shows_the_person("see `feat/x` at https://a.io/b"));
+        assert!(!shows_the_person(&format!("{}.", "w".repeat(161))));
     }
 }
