@@ -174,12 +174,24 @@ fn monorepo_fx_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fx/zig-out/bin/fx")
 }
 
-/// PATH wins. The monorepo build is used only when PATH has no `fx`.
+/// The `fx` a release ships beside the Arbos executable
+/// (`Arbos.app/Contents/MacOS/fx`, written by `scripts/package-macos.sh`).
+fn bundled_fx_binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let path = exe.parent()?.join("fx");
+    path.is_file().then_some(path)
+}
+
+/// The bundled fx wins: an installed Arbos must run the fx it was released
+/// with, so an update to the app updates the agent. PATH is next, for a
+/// developer's own install, and the monorepo build is used only when
+/// neither exists.
 pub(crate) fn pick_fx_binary(
+    bundled: Option<PathBuf>,
     on_path: Option<PathBuf>,
     monorepo: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    on_path.or(monorepo)
+    bundled.or(on_path).or(monorepo)
 }
 
 fn find_fx_binary() -> Option<PathBuf> {
@@ -188,7 +200,7 @@ fn find_fx_binary() -> Option<PathBuf> {
         let path = monorepo_fx_binary();
         path.is_file().then_some(path)
     };
-    pick_fx_binary(on_path, monorepo)
+    pick_fx_binary(bundled_fx_binary(), on_path, monorepo)
 }
 
 /// Child env for `fx acp`. The key is copied only when it is non-empty.
@@ -321,8 +333,8 @@ fn fx_spec() -> AcpAgentSpec {
         extra_paths: fx_install_paths,
         cli_executable: "fx",
         cli_extra_paths: fx_install_paths,
-        install_hint: "fx (searched PATH, then fx/zig-out/bin/fx in this repo; \
-             set FX_EXECUTABLE to override)",
+        install_hint: "fx (searched beside the Arbos executable, then PATH, then \
+             fx/zig-out/bin/fx in this repo; set FX_EXECUTABLE to override)",
         models: fx_static_models,
         // Mid-turn steers go out as session/prompt with `_meta.fx.steer`.
         steering_mode: SteeringMode::StepBoundary,
@@ -6067,15 +6079,27 @@ mod tests {
     }
 
     #[test]
-    fn pick_fx_binary_prefers_path_over_the_monorepo() {
+    fn pick_fx_binary_prefers_the_bundled_fx_then_path_then_the_monorepo() {
+        let bundled = PathBuf::from("/Applications/Arbos.app/Contents/MacOS/fx");
         let on_path = PathBuf::from("/usr/bin/fx");
         let monorepo = PathBuf::from("/repo/fx/zig-out/bin/fx");
         assert_eq!(
-            pick_fx_binary(Some(on_path.clone()), Some(monorepo.clone())),
+            pick_fx_binary(
+                Some(bundled.clone()),
+                Some(on_path.clone()),
+                Some(monorepo.clone())
+            ),
+            Some(bundled)
+        );
+        assert_eq!(
+            pick_fx_binary(None, Some(on_path.clone()), Some(monorepo.clone())),
             Some(on_path)
         );
-        assert_eq!(pick_fx_binary(None, Some(monorepo.clone())), Some(monorepo));
-        assert_eq!(pick_fx_binary(None, None), None);
+        assert_eq!(
+            pick_fx_binary(None, None, Some(monorepo.clone())),
+            Some(monorepo)
+        );
+        assert_eq!(pick_fx_binary(None, None, None), None);
     }
 
     #[test]
