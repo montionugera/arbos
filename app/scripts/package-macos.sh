@@ -13,6 +13,8 @@
 #        (the binary, the bundle, and the file names all carry it); CI passes
 #        the commit count, making the version 0.2.112.<n> — the full build
 #        version the updater orders on.
+#        ARBOS_FX_BINARY=<path> bundles that fx instead of building ../fx with
+#        zig. Without it zig must be on PATH: the bundle always carries fx.
 #        CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
 #        NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID — App Store Connect
 #          API key (.p8) for notarization; all three set → notarize + staple the
@@ -42,11 +44,30 @@ APP_TARBALL="$OUT_DIR/arbos-$VERSION-macos-$ARCH-app.tar.gz"
 cd "$ROOT"
 cargo build --release -p zeron
 
+# The agent ships inside the app. The harness runs Contents/MacOS/fx before
+# any fx on PATH, so an installed Arbos always runs the fx it was released
+# with, and an update to the app is an update to the agent too.
+if [[ -n "${ARBOS_FX_BINARY:-}" ]]; then
+  FX_BIN="$ARBOS_FX_BINARY"
+else
+  if ! command -v zig >/dev/null 2>&1; then
+    echo "zig is not on PATH: it builds ../fx for the bundle (or set ARBOS_FX_BINARY to a prebuilt fx)" >&2
+    exit 1
+  fi
+  (cd "$ROOT/../fx" && zig build -Doptimize=ReleaseSafe)
+  FX_BIN="$ROOT/../fx/zig-out/bin/fx"
+fi
+if [[ ! -x "$FX_BIN" ]]; then
+  echo "fx binary not found at $FX_BIN" >&2
+  exit 1
+fi
+
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # The cargo binary is `zeron`; the bundle presents as Arbos, and the updater
 # stages exactly this name (Arbos.app/Contents/MacOS/Arbos).
 install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/Arbos"
+install -m 755 "$FX_BIN" "$APP/Contents/MacOS/fx"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
@@ -70,11 +91,14 @@ rm -rf "$ICONSET"
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
-  # (No --deep: Apple deprecated it; the bundle is a single Mach-O anyway.)
+  # No --deep (Apple deprecated it): the nested fx executable is signed
+  # first, on its own, then the bundle.
+  codesign --force --identifier sh.zeron.app.fx --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/fx"
   codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
   # requires right-click → Open on first launch without notarization).
+  codesign --force --identifier sh.zeron.app.fx --sign - "$APP/Contents/MacOS/fx"
   codesign --deep --force --entitlements "$ROOT/dist/macos/voice.entitlements" --sign - "$APP"
 fi
 

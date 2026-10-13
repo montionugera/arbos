@@ -167,6 +167,11 @@ jobs:
           workspaces: app
           key: release-main-macos
           cache-on-failure: true
+      # The bundle carries fx (scripts/package-macos.sh builds ../fx with
+      # this toolchain), so one update brings the app and the agent together.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
       - id: payload
         uses: ./.github/actions/macos-payload
         with:
