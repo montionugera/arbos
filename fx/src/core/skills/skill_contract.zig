@@ -109,6 +109,7 @@ pub const Locations = struct {
 
 pub const SkillSource = enum {
     workspace_fx,
+    workspace_arbos,
     workspace_shared,
     workspace_opencode,
     workspace_codex,

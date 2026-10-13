@@ -11,10 +11,13 @@ const Allocator = std.mem.Allocator;
 const RootSpec = skill_contract.RootSpec;
 
 /// Roots scanned at the workspace root and each ancestor directory below
-/// home, in precedence order. `.fx/skills` and `skills/` belong to the product;
-/// the rest are compatibility roots for other agent installs.
+/// home, in precedence order. `.fx/skills`, `.arbos/skills` and `skills/`
+/// belong to the product (`.arbos/skills` is where the Arbos desktop app and
+/// its `/skill` command keep project skills); the rest are compatibility
+/// roots for other agent installs.
 const workspace_roots = [_]RootSpec{
     .{ .source = .workspace_fx, .path = ".fx/skills" },
+    .{ .source = .workspace_arbos, .path = ".arbos/skills" },
     .{ .source = .workspace_shared, .path = "skills" },
     .{ .source = .workspace_opencode, .path = ".opencode/skills" },
     .{ .source = .workspace_codex, .path = ".codex/skills" },
@@ -1173,6 +1176,7 @@ test "copySkillDir preserves the installed skill across allocation failures" {
 test "workspace skill roots scan the product root before compatibility roots" {
     const expected = [_]RootSpec{
         .{ .source = .workspace_fx, .path = ".fx/skills" },
+        .{ .source = .workspace_arbos, .path = ".arbos/skills" },
         .{ .source = .workspace_shared, .path = "skills" },
         .{ .source = .workspace_opencode, .path = ".opencode/skills" },
         .{ .source = .workspace_codex, .path = ".codex/skills" },
@@ -1190,6 +1194,37 @@ test "workspace skill roots scan the product root before compatibility roots" {
     for (workspace_roots) |spec| {
         try std.testing.expect(spec.source != .global_fx);
     }
+}
+
+test "product policy discovers Arbos project skills under .arbos/skills" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeTempFile(&tmp, "home/project/.arbos/skills/release-check/SKILL.md", "---\nname: release-check\ndescription: Check that edge carries the newest main commit\n---\nbody\n");
+    try writeTempFile(&tmp, "home/project/.arbos/skills/split/SKILL.md", "name: split\nwrite: research/skill-split.md\nline: Skill split ran.\nworker: oak research/oak.md Oak is ready.\n---\nSplit the goal.\n");
+
+    const workspace_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home/project");
+    defer alloc.free(workspace_root);
+    const home_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home_root);
+    const managed_root = try std.fs.path.join(alloc, &.{ home_root, ".fx", "skills" });
+    defer alloc.free(managed_root);
+
+    var discovery = try skill_runtime.loadVisibleSkills(alloc, workspace_root, home_root, managed_root, root_policy);
+    defer discovery.deinit(alloc);
+
+    const release_check = skill_runtime.findSkillByName(discovery.skills, "release-check") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(skill_contract.SkillSource.workspace_arbos, release_check.source);
+    try std.testing.expectEqualStrings("Check that edge carries the newest main commit", release_check.description);
+    try std.testing.expect(std.mem.endsWith(u8, release_check.path, "/.arbos/skills/release-check"));
+
+    // Arbos's own `/skill` files carry no front matter; they still list by
+    // directory name instead of raising a diagnostic.
+    const split = skill_runtime.findSkillByName(discovery.skills, "split") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(skill_contract.SkillSource.workspace_arbos, split.source);
+    try std.testing.expectEqualStrings("", split.description);
+    try std.testing.expectEqual(@as(usize, 0), discovery.diagnostics.len);
 }
 
 test "global skill roots cover compatibility installs only" {

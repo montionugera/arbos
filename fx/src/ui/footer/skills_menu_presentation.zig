@@ -438,6 +438,7 @@ fn skillSourceScopeLabel(source: skill_runtime.SkillSource) []const u8 {
     return switch (source) {
         .global_fx => "fx · Global",
         .workspace_fx => "fx · Workspace",
+        .workspace_arbos => "Arbos · Workspace",
         .workspace_shared => "fx · Workspace",
         .workspace_opencode => "OpenCode · Workspace",
         .global_opencode => "OpenCode · Global",

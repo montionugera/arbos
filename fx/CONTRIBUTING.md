@@ -154,13 +154,13 @@ Subagent children are internal ordinary sessions with their own `~/.fx/sessions/
 
 There are two distinct skill categories in `fx`:
 
-* `fx` roots that belong to the product itself: `.fx/skills`, `skills/`, `~/.fx/skills`
+* `fx` roots that belong to the product itself: `.fx/skills`, `.arbos/skills` (the Arbos desktop app's project skills), `skills/`, `~/.fx/skills`
 
 * compatibility roots discovered for other agent installs: `.opencode/skills`, `.codex/skills`, `.claude/skills`, `.agents/skills`, `.claw/skills`, plus their global equivalents
 
 `/skills list` should make that distinction visible to the user.
 
-`/skills add` and `/skills install` install full skill directories into the profile-owned `~/.fx/skills` managed root, not just `SKILL.md`. Workspace `.fx/skills` and `skills/` remain discoverable project-local instructions, not managed install targets.
+`/skills add` and `/skills install` install full skill directories into the profile-owned `~/.fx/skills` managed root, not just `SKILL.md`. Workspace `.fx/skills`, `.arbos/skills` and `skills/` remain discoverable project-local instructions, not managed install targets.
 
 The interactive agent can also install skills via the `install_skill` tool when the user asks to install one in conversation, including pasted `npx skills add ...` syntax.
 
