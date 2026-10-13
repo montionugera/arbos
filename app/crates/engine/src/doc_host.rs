@@ -873,20 +873,27 @@ impl ChatDocHandle {
 
     /// The conversation Main can summarize: what the person typed, what Main
     /// replied, the plan sentence, and the Worked lines. Tool traces and the
-    /// engine's own notices stay out of the summary.
+    /// engine's own notices stay out of the summary. One of Main's entries
+    /// holds every text part of the turn: the step lines before each tool
+    /// call ("Gathering the tag data first.") and the answer last. Only the
+    /// answer is Main's reply.
     pub fn conversation_lines(&self) -> Result<Vec<SummaryLine>, DocError> {
         let entries = self.doc.read_entries()?;
         let mut lines = Vec::new();
         for entry in entries {
-            let text = entry
+            let texts = entry
                 .parts
                 .iter()
                 .filter_map(|part| match part {
                     MessagePart::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>();
+            let text = match entry.role {
+                MessageRole::Assistant => texts.last().copied().unwrap_or("").to_owned(),
+                MessageRole::User | MessageRole::System => texts.join("\n"),
+            };
             if text.trim().is_empty() {
                 continue;
             }
@@ -6203,6 +6210,42 @@ mod transfer_progress_tests {
             1,
             "offline reopen rebuilds from local content"
         );
+    }
+
+    #[tokio::test]
+    async fn conversation_lines_keep_the_answer_of_a_turn_with_step_lines() {
+        let (_dir, host) = host();
+        let handle = host.open("main").unwrap();
+        handle
+            .write_user_message("u1", "How many tags does this repo have?", 1)
+            .unwrap();
+        let text = |id: &str, text: &str| zeron_doc::MessagePart::Text {
+            id: id.into(),
+            text: text.into(),
+        };
+        handle
+            .doc
+            .push_message(&zeron_doc::SessionMessageEntry {
+                id: "a1".into(),
+                role: zeron_doc::MessageRole::Assistant,
+                parts: vec![
+                    text("t0", "Gathering the tag data first."),
+                    text("t1", ""),
+                    text("t2", "There are 54 tags. The newest is v0.2.112."),
+                ],
+                created_at: 2,
+                device_id: "dev-test".into(),
+                status: Some(zeron_doc::MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })
+            .unwrap();
+
+        let lines = handle.conversation_lines().unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].role, super::SummaryRole::Person);
+        assert_eq!(lines[1].role, super::SummaryRole::Main);
+        assert_eq!(lines[1].text, "There are 54 tags. The newest is v0.2.112.");
     }
 
     #[test]
