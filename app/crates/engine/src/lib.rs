@@ -796,7 +796,14 @@ impl Engine {
             Arc::new(move || !sessions.any_active() && !terminals.any_open())
         };
         zeron_harness::secrets::install_process_env();
-        arbos_wakes::spawn(core.doc_host.clone(), core.workspace.clone(), core.sessions.clone());
+        // The login-shell PATH snapshot, warm before the subscription poller
+        // needs it to find `gh`.
+        zeron_harness::shell_env::prewarm();
+        arbos_wakes::spawn(
+            core.doc_host.clone(),
+            core.workspace.clone(),
+            core.sessions.clone(),
+        );
         arbos_remote::spawn(
             core.doc_host.clone(),
             core.workspace.clone(),
