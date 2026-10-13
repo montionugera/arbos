@@ -1913,12 +1913,19 @@ pub(crate) fn latest_events_log(fx_home: &Path) -> Option<PathBuf> {
         .max_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
 }
 
+/// Longest failure reason kept beside a tool name in a transcript turn.
+const TRANSCRIPT_REASON_BYTES: usize = 160;
+
 /// Group fx conversation frames into turns. A turn opens on `user` and
 /// closes on `turn_completed` or `interrupted`. Lines that do not parse are
-/// skipped; fx guards its own log.
+/// skipped; fx guards its own log. A `tool_result` with `status: failure`
+/// marks its call `name (failed: reason)` so a reader can tell which tool
+/// failed without the whole log.
 fn parse_transcript(text: &str) -> Vec<TranscriptTurn> {
     let mut turns: Vec<TranscriptTurn> = Vec::new();
     let mut open: Option<TranscriptTurn> = None;
+    // call_id → index into the open turn's `tools`.
+    let mut calls: Vec<(String, usize)> = Vec::new();
     for line in text.lines() {
         let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -1941,6 +1948,7 @@ fn parse_transcript(text: &str) -> Vec<TranscriptTurn> {
                 if let Some(turn) = open.take() {
                     turns.push(close_turn(turn, "open"));
                 }
+                calls.clear();
                 open = Some(TranscriptTurn {
                     index: turns.len() + 1,
                     user: clip_text(&string("text")),
@@ -1964,8 +1972,31 @@ fn parse_transcript(text: &str) -> Vec<TranscriptTurn> {
                 if let Some(turn) = open.as_mut() {
                     let name = string("tool_name");
                     if !name.is_empty() {
+                        calls.push((string("call_id"), turn.tools.len()));
                         turn.tools.push(name);
                     }
+                }
+            }
+            "tool_result" => {
+                if string("status") != "failure" {
+                    continue;
+                }
+                let Some(turn) = open.as_mut() else {
+                    continue;
+                };
+                let call_id = string("call_id");
+                let Some(index) = calls
+                    .iter()
+                    .find(|(id, _)| !id.is_empty() && *id == call_id)
+                    .map(|(_, index)| *index)
+                else {
+                    continue;
+                };
+                if let Some(tool) = turn.tools.get_mut(index) {
+                    *tool = match failure_reason(&string("preview")) {
+                        Some(reason) => format!("{tool} (failed: {reason})"),
+                        None => format!("{tool} (failed)"),
+                    };
                 }
             }
             "turn_completed" => {
@@ -1991,6 +2022,36 @@ fn close_turn(mut turn: TranscriptTurn, ended: &str) -> TranscriptTurn {
     turn.reply = clip_text(&turn.reply);
     turn.ended = ended.to_owned();
     turn
+}
+
+/// The reason in a failed `tool_result`'s `preview`. fx writes a refusal as
+/// `{"error":{"message":…}}`; anything else keeps its first line. Clipped
+/// to [`TRANSCRIPT_REASON_BYTES`]; `None` when the preview says nothing.
+fn failure_reason(preview: &str) -> Option<String> {
+    let message = serde_json::from_str::<serde_json::Value>(preview.trim())
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")?
+                .get("message")?
+                .as_str()
+                .map(str::to_owned)
+        });
+    let line = match &message {
+        Some(message) => message.trim(),
+        None => preview.lines().map(str::trim).find(|l| !l.is_empty())?,
+    };
+    if line.is_empty() {
+        return None;
+    }
+    if line.len() <= TRANSCRIPT_REASON_BYTES {
+        return Some(line.to_owned());
+    }
+    let mut end = TRANSCRIPT_REASON_BYTES;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(format!("{}…", &line[..end]))
 }
 
 fn clip_text(text: &str) -> String {
@@ -2785,6 +2846,110 @@ mod tests {
         let clipped = parse_transcript(&frame(1, "user", serde_json::json!({ "text": long })));
         assert_eq!(clipped[0].user.chars().count(), TRANSCRIPT_TEXT_BYTES + 1);
         assert!(clipped[0].user.ends_with('…'));
+    }
+
+    /// A call fx refused (invalid JSON arguments) is listed under its tool
+    /// name with the reason, so a reader knows which tool failed and why.
+    /// A `tool_result` without a matching call, or outside a turn, changes
+    /// nothing.
+    #[test]
+    fn transcript_marks_failed_tool_calls_with_their_reason() {
+        let refusal = serde_json::json!({
+            "error": {
+                "type": "tool_execution_failed",
+                "tool_name": "read_tool_result",
+                "message": "Tool arguments were not valid JSON.",
+                "suggestion": "Reissue the tool call with complete valid JSON arguments matching the tool schema.",
+            }
+        })
+        .to_string();
+        let log = [
+            frame(1, "user", serde_json::json!({ "text": "go" })),
+            frame(
+                2,
+                "tool_call",
+                serde_json::json!({
+                    "call_id": "c1", "tool_name": "read_tool_result", "arguments_json": "{}",
+                    "argument_integrity": "malformed_json",
+                }),
+            ),
+            frame(
+                3,
+                "tool_result",
+                serde_json::json!({
+                    "call_id": "c1", "tool_name": "read_tool_result", "status": "failure",
+                    "artifact_ref": "c1.txt", "stored_bytes": 0, "completeness": "complete",
+                    "preview": refusal,
+                }),
+            ),
+            frame(
+                4,
+                "tool_call",
+                serde_json::json!({
+                    "call_id": "c2", "tool_name": "capability_search", "arguments_json": "{}",
+                }),
+            ),
+            frame(
+                5,
+                "tool_result",
+                serde_json::json!({
+                    "call_id": "c2", "tool_name": "capability_search", "status": "failure",
+                    "artifact_ref": "c2.txt", "stored_bytes": 0, "completeness": "complete",
+                    "preview": "no catalog loaded\nsecond line",
+                }),
+            ),
+            frame(
+                6,
+                "tool_call",
+                serde_json::json!({
+                    "call_id": "c3", "tool_name": "read_file", "arguments_json": "{}",
+                }),
+            ),
+            frame(
+                7,
+                "tool_result",
+                serde_json::json!({
+                    "call_id": "c3", "tool_name": "read_file", "status": "success",
+                    "artifact_ref": "c3.txt", "stored_bytes": 10, "completeness": "complete",
+                }),
+            ),
+            frame(
+                8,
+                "tool_result",
+                serde_json::json!({
+                    "call_id": "c9", "tool_name": "shell", "status": "failure",
+                }),
+            ),
+            frame(9, "turn_completed", serde_json::json!({ "files": [] })),
+            frame(
+                10,
+                "tool_result",
+                serde_json::json!({
+                    "call_id": "c3", "tool_name": "read_file", "status": "failure",
+                }),
+            ),
+        ]
+        .join("\n");
+        let turns = parse_transcript(&log);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].tools,
+            vec![
+                "read_tool_result (failed: Tool arguments were not valid JSON.)".to_owned(),
+                "capability_search (failed: no catalog loaded)".to_owned(),
+                "read_file".to_owned(),
+            ]
+        );
+
+        let long = "x".repeat(TRANSCRIPT_REASON_BYTES + 20);
+        let reason = failure_reason(&long).unwrap();
+        assert_eq!(reason.chars().count(), TRANSCRIPT_REASON_BYTES + 1);
+        assert!(reason.ends_with('…'));
+        assert_eq!(failure_reason("  \n"), None);
+        assert_eq!(
+            failure_reason("{\"error\":{}}"),
+            Some("{\"error\":{}}".into())
+        );
     }
 
     #[test]
