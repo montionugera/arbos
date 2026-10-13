@@ -1436,17 +1436,23 @@ fn summary_body(lines: &[SummaryLine], date: chrono::NaiveDate) -> Result<String
     let mut person: Vec<&str> = Vec::new();
     let mut replies: Vec<String> = Vec::new();
     let mut worked: Vec<String> = Vec::new();
+    // Main writes several entries in one turn: step lines first ("Reading
+    // the context…"), the answer last. The summary keeps the answer.
+    let mut turn_reply: Option<String> = None;
     for line in lines {
         let trimmed = line.text.trim();
         if trimmed.is_empty() || trimmed == SUMMARY_NOTICE || is_summarize_command(trimmed) {
             continue;
         }
         match line.role {
-            SummaryRole::Person => person.push(line.text.as_str()),
+            SummaryRole::Person => {
+                replies.extend(turn_reply.take());
+                person.push(line.text.as_str());
+            }
             SummaryRole::Main => {
                 let sentence = first_sentence(trimmed, SUMMARY_REPLY_CHARS);
                 if !sentence.is_empty() {
-                    replies.push(sentence);
+                    turn_reply = Some(sentence);
                 }
             }
             SummaryRole::Worked => {
@@ -1458,6 +1464,7 @@ fn summary_body(lines: &[SummaryLine], date: chrono::NaiveDate) -> Result<String
             }
         }
     }
+    replies.extend(turn_reply.take());
     if person.is_empty() && replies.is_empty() && worked.is_empty() {
         return Err("nothing to summarize".into());
     }
@@ -1487,24 +1494,56 @@ fn summary_body(lines: &[SummaryLine], date: chrono::NaiveDate) -> Result<String
 }
 
 /// One short paragraph: how many times Main replied, what it said, and
-/// which workers and wakes reported.
+/// which workers and wakes reported. Over budget, the oldest replies and
+/// reports go first: what happened last is what the next turn needs.
 fn summary_paragraph(replies: &[String], worked: &[String]) -> String {
+    let mut kept_replies = replies.len();
+    let mut kept_worked = worked.len();
+    loop {
+        let text = summary_paragraph_text(replies, kept_replies, worked, kept_worked);
+        if text.chars().count() <= SUMMARY_PARAGRAPH_CHARS
+            || (kept_replies <= 1 && kept_worked <= 1)
+        {
+            return clip_chars(&text, SUMMARY_PARAGRAPH_CHARS);
+        }
+        if kept_worked > kept_replies {
+            kept_worked -= 1;
+        } else {
+            kept_replies -= 1;
+        }
+    }
+}
+
+fn summary_paragraph_text(
+    replies: &[String],
+    kept_replies: usize,
+    worked: &[String],
+    kept_worked: usize,
+) -> String {
     let mut text = String::new();
+    let recent_replies = &replies[replies.len() - kept_replies..];
     match replies.len() {
         0 => text.push_str("Main did not reply yet."),
         1 => text.push_str("Main replied once: "),
-        n => text.push_str(&format!("Main replied {n} times. In order: ")),
+        n if kept_replies == n => text.push_str(&format!("Main replied {n} times. In order: ")),
+        n => text.push_str(&format!(
+            "Main replied {n} times. The last {kept_replies}, in order: "
+        )),
     }
-    if !replies.is_empty() {
-        text.push_str(&replies.join(" "));
-    }
+    text.push_str(&recent_replies.join(" "));
+    let recent_worked = &worked[worked.len() - kept_worked..];
     match worked.len() {
         0 => text.push_str(" Nothing reported back."),
         1 => text.push_str(&format!(" One report came back: {}.", worked[0])),
-        n => text.push_str(&format!(" {n} reports came back: {}.", worked.join("; "))),
+        n if kept_worked == n => {
+            text.push_str(&format!(" {n} reports came back: {}.", worked.join("; ")));
+        }
+        n => text.push_str(&format!(
+            " {n} reports came back; the last {kept_worked}: {}.",
+            recent_worked.join("; ")
+        )),
     }
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    clip_chars(&text, SUMMARY_PARAGRAPH_CHARS)
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The first sentence of a reply, clipped. Markdown bullets and headings
@@ -2284,9 +2323,9 @@ fn git_clean(root: &Path) -> bool {
 #[cfg(test)]
 mod summary_failure_tests {
     use super::{
-        SUMMARY_PATHS, SummaryLine, SummaryRole, auto_compact_percent, ensure, main_chat_id,
-        parse_auto_compact_percent, prompt_after_summary, summary_body, tombstone_after_summary,
-        write_conversation_summary,
+        SUMMARY_PARAGRAPH_CHARS, SUMMARY_PATHS, SummaryLine, SummaryRole, auto_compact_percent,
+        ensure, main_chat_id, parse_auto_compact_percent, prompt_after_summary, summary_body,
+        tombstone_after_summary, write_conversation_summary,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -2363,12 +2402,61 @@ mod summary_failure_tests {
         assert!(!body.contains("/summarize"));
         assert!(!body.contains("Oak wrote research/oak.md"));
 
+        // Several entries in one turn: the step lines go, the answer stays.
+        let one_turn = vec![
+            person("Which Zig version do we pin?"),
+            line(SummaryRole::Main, "Reading the workflows first."),
+            line(SummaryRole::Main, "Checking the fx build job too."),
+            line(
+                SummaryRole::Main,
+                "We pin Zig 0.16.0 in fx-binary-size.yml. That is current.",
+            ),
+            person("Thanks."),
+        ];
+        let answer_only = summary_body(&one_turn, date).unwrap();
+        assert!(
+            answer_only.contains("Main replied once: We pin Zig 0.16.0 in fx-binary-size.yml.")
+        );
+        assert!(!answer_only.contains("Reading the workflows"));
+        assert!(!answer_only.contains("Checking the fx build"));
+
         let long = "x".repeat(400);
         let clipped = summary_body(&[person(&long), person("ok")], date).unwrap();
         assert!(clipped.contains(&format!("- {}…\n", "x".repeat(240))));
         assert!(summary_body(&[], date).is_err());
         let only_long = summary_body(&[person(&long)], date).unwrap();
         assert!(only_long.contains(&format!("Last message, word for word:\n{long}\n")));
+    }
+
+    #[test]
+    fn a_long_summary_keeps_the_latest_replies_and_reports() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 13).unwrap();
+        let mut lines = Vec::new();
+        for n in 1..=40 {
+            lines.push(person(&format!("Request {n}.")));
+            lines.push(line(
+                SummaryRole::Main,
+                &format!("Reply {n}: the PR for request {n} is open and its checks are green."),
+            ));
+            lines.push(line(
+                SummaryRole::Worked,
+                &format!("Worked · Worker {n} done.\nDetails for {n}."),
+            ));
+        }
+        lines.push(person("What is left?"));
+        let body = summary_body(&lines, date).unwrap();
+        let paragraph = body
+            .lines()
+            .find(|l| l.starts_with("Summary, 2026-10-13: "))
+            .unwrap();
+        assert!(paragraph.chars().count() <= SUMMARY_PARAGRAPH_CHARS);
+        assert!(paragraph.contains("Main replied 40 times. The last "));
+        assert!(paragraph.contains("Reply 40: the PR for request 40 is open"));
+        assert!(!paragraph.contains("Reply 1: "));
+        assert!(paragraph.contains("40 reports came back; the last "));
+        assert!(paragraph.contains("Worker 40 done"));
+        assert!(!paragraph.contains("Worker 1 done"));
+        assert!(!paragraph.ends_with('…'), "nothing was cut mid-sentence");
     }
 
     #[test]
