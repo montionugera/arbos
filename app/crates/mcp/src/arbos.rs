@@ -1,6 +1,6 @@
 //! The `arbos` tool catalog. Main sees `agents.*`, `status.step`, and
-//! `context.*`. A worker sees `context.*` only, so a worker cannot spawn
-//! another worker.
+//! `context.*`. A worker sees `context.*` and `screenshot.capture`, so a
+//! worker cannot spawn another worker.
 
 use serde_json::{Value, json};
 
@@ -17,6 +17,7 @@ goal.show, goal.schedule, goal.pause, goal.resume, goal.complete, and goal.clear
 preferences.write appends one dated line to the person's preferences, shared by every project. \
 status.step sets the live step the person sees: six words at most, starting with a verb. \
 subscriptions.add subscribes Main to a GitHub pull request, a CI branch, or a timer; the Listening pill shows the new row. \
+screenshot.capture saves a picture of the Arbos project window under the project context and returns the saved path. \
 context.usage reports how full the context window is. \
 context.read and context.write use paths under the project context directory, \
 such as internal/note.md or docs/report.md. status.md is read-only; the engine rewrites it after every turn. \
@@ -202,6 +203,11 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
                 "required": ["path", "text"]
             }),
         ),
+        tool(
+            "screenshot.capture",
+            "Capture the frontmost Arbos project window as a PNG saved under the project context, and return the saved path. The capture runs in the Arbos app, which owns the window, so it needs no Screen Recording permission. Use it to prove a UI change with a picture, then tell the person the path so they can open it.",
+            no_args(),
+        ),
     ]);
     tools
 }
@@ -269,6 +275,7 @@ fn op_for(name: &str) -> &'static str {
         "preferences.write" => "preferences_write",
         "status.step" => "step",
         "subscriptions.add" => "subscriptions_add",
+        "screenshot.capture" => "screenshot_capture",
         "context.usage" => "context_usage",
         "context.read" => "read",
         "context.write" => "write",
@@ -313,12 +320,16 @@ mod tests {
             "context.usage",
             "context.read",
             "context.write",
+            "screenshot.capture",
         ] {
             assert!(main.contains(&name), "{name} is missing from Main's catalog");
             assert!(!op_for(name).is_empty(), "{name} has no op");
         }
         let worker: Vec<&str> = catalog("worker").iter().map(|tool| tool.name).collect();
-        assert_eq!(worker, vec!["context.read", "context.write"]);
+        assert_eq!(
+            worker,
+            vec!["context.read", "context.write", "screenshot.capture"]
+        );
         for name in &main {
             assert_eq!(
                 main_only(name),
@@ -397,6 +408,21 @@ mod tests {
         assert!(
             main_only("subscriptions.add"),
             "a worker cannot subscribe for Main"
+        );
+    }
+
+    #[test]
+    fn screenshot_capture_takes_no_fields_and_is_ready_for_a_worker() {
+        let capture = catalog("worker")
+            .into_iter()
+            .find(|tool| tool.name == "screenshot.capture")
+            .unwrap();
+        assert_eq!(capture.input_schema["properties"], json!({}));
+        assert!(capture.input_schema.get("required").is_none());
+        assert_eq!(op_for("screenshot.capture"), "screenshot_capture");
+        assert!(
+            !main_only("screenshot.capture"),
+            "a worker can capture the project window to prove its change"
         );
     }
 }

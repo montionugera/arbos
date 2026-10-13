@@ -518,6 +518,53 @@ unsafe fn nsdata_bytes(data: *mut Object) -> Option<Vec<u8>> {
     Some(unsafe { std::slice::from_raw_parts(bytes, len) }.to_vec())
 }
 
+/// One row of the front-to-back CGWindowList, kept as data so the window
+/// choice is testable without a window server.
+#[derive(Debug, Clone)]
+struct CaptureWindowCandidate {
+    id: CGWindowID,
+    title: Option<String>,
+    owner_pid: Option<i32>,
+    layer: Option<i32>,
+    onscreen: bool,
+    alpha: f64,
+    bounds: Option<CGRect>,
+}
+
+/// The first window in front-to-back order that can be captured: the owner's
+/// layer-zero window, on screen, opaque enough, and not a tiny helper. When
+/// the accessibility focus rectangle is known it must match, so a hidden
+/// helper window is never chosen over the real document.
+fn select_capture_window(
+    candidates: &[CaptureWindowCandidate],
+    pid: i32,
+    focused_bounds: Option<CGRect>,
+) -> Option<FrontmostWindow> {
+    candidates.iter().find_map(|candidate| {
+        if candidate.owner_pid != Some(pid) || candidate.layer != Some(0) {
+            return None;
+        }
+        if !visible_capture_window(candidate.onscreen, candidate.alpha, candidate.bounds) {
+            return None;
+        }
+        let bounds = candidate.bounds?;
+        if focused_bounds.is_some_and(|focused| !same_window_bounds(bounds, focused)) {
+            return None;
+        }
+        tracing::debug!(
+            window_id = candidate.id,
+            width = bounds.size.width,
+            height = bounds.size.height,
+            matched_focus = focused_bounds.is_some(),
+            "Appshot capture target selected"
+        );
+        Some(FrontmostWindow {
+            id: candidate.id,
+            title: candidate.title.clone(),
+        })
+    })
+}
+
 fn frontmost_window(pid: i32) -> Result<FrontmostWindow, CaptureError> {
     let list = copy_window_info(
         kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements,
@@ -531,48 +578,63 @@ fn frontmost_window(pid: i32) -> Result<FrontmostWindow, CaptureError> {
     // all-Spaces enumeration for ScreenCaptureKit, but exclude offscreen and
     // transparent windows before binding the capture to a stable window ID.
     // Choosing by area could select an unrelated background document.
+    let mut candidates = Vec::new();
     for item in list.iter() {
         let cf = unsafe { CFType::wrap_under_get_rule(*item as CFTypeRef) };
         let Some(dict) = cf.downcast::<CFDictionary>() else {
             continue;
         };
-        let owner = dictionary_number(&dict, unsafe { kCGWindowOwnerPID }).and_then(|n| n.to_i32());
-        let layer = dictionary_number(&dict, unsafe { kCGWindowLayer }).and_then(|n| n.to_i32());
-        if owner != Some(pid) || layer != Some(0) {
-            continue;
-        }
-        let id = dictionary_number(&dict, unsafe { kCGWindowNumber })
+        let Some(id) = dictionary_number(&dict, unsafe { kCGWindowNumber })
             .and_then(|n| n.to_i64())
             .and_then(|n| u32::try_from(n).ok())
-            .ok_or(CaptureError::NoEligibleWindow)?;
-        let bounds = dictionary_rect(&dict, unsafe { kCGWindowBounds });
-        let onscreen = dictionary_value(&dict, unsafe { kCGWindowIsOnscreen })
-            .and_then(|value| value.downcast::<CFBoolean>())
-            .is_some_and(|value| value == CFBoolean::true_value());
-        let alpha = dictionary_number(&dict, unsafe { kCGWindowAlpha })
-            .and_then(|value| value.to_f64())
-            .unwrap_or(0.0);
-        if !visible_capture_window(onscreen, alpha, bounds) {
+        else {
             continue;
-        }
-        let Some(bounds) = bounds else { continue };
-        if focused_bounds.is_some_and(|focused| !same_window_bounds(bounds, focused)) {
-            continue;
-        }
-        tracing::debug!(
-            window_id = id,
-            width = bounds.size.width,
-            height = bounds.size.height,
-            matched_focus = focused_bounds.is_some(),
-            "Appshot capture target selected"
-        );
-        let candidate = FrontmostWindow {
+        };
+        candidates.push(CaptureWindowCandidate {
             id,
             title: dictionary_string(&dict, unsafe { kCGWindowName }),
-        };
-        return Ok(candidate);
+            owner_pid: dictionary_number(&dict, unsafe { kCGWindowOwnerPID })
+                .and_then(|n| n.to_i32()),
+            layer: dictionary_number(&dict, unsafe { kCGWindowLayer }).and_then(|n| n.to_i32()),
+            onscreen: dictionary_value(&dict, unsafe { kCGWindowIsOnscreen })
+                .and_then(|value| value.downcast::<CFBoolean>())
+                .is_some_and(|value| value == CFBoolean::true_value()),
+            alpha: dictionary_number(&dict, unsafe { kCGWindowAlpha })
+                .and_then(|value| value.to_f64())
+                .unwrap_or(0.0),
+            bounds: dictionary_rect(&dict, unsafe { kCGWindowBounds }),
+        });
     }
-    Err(CaptureError::NoEligibleWindow)
+    select_capture_window(&candidates, pid, focused_bounds).ok_or(CaptureError::NoEligibleWindow)
+}
+
+/// The app's own frontmost project window as a PNG — the capture behind
+/// `screenshot.capture`. The window belongs to this process, so the
+/// CoreGraphics path needs no Screen Recording permission. A fullscreen
+/// window lives in its own Space, which only ScreenCaptureKit reaches, and
+/// macOS gates that behind Screen Recording consent: ask for it once, the
+/// way the Appshot shortcut path does.
+pub(super) fn capture_own_window() -> Result<(Option<String>, Vec<u8>), CaptureError> {
+    autoreleasepool(|| {
+        let pid = std::process::id() as i32;
+        let window = frontmost_window(pid)?;
+        match capture_png(window.id) {
+            Ok(png) => Ok((window.title, png)),
+            Err(error @ CaptureError::CaptureFailed(_)) => {
+                if ScreenCaptureAccess.preflight() {
+                    if let Ok(Some((window, png))) = capture_with_screen_capture_kit(pid, window.id)
+                    {
+                        return Ok((window.title, png));
+                    }
+                } else {
+                    request_screen_recording_permission();
+                    return Err(CaptureError::PermissionRequired);
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    })
 }
 
 fn visible_capture_window(onscreen: bool, alpha: f64, bounds: Option<CGRect>) -> bool {
@@ -1255,5 +1317,92 @@ mod tests {
         ));
         assert!(is_secure_ax_element("AXSecureTextField", None));
         assert!(!is_secure_ax_element("AXTextField", Some("AXSearchField")));
+    }
+
+    fn candidate(
+        id: u32,
+        pid: i32,
+        layer: i32,
+        onscreen: bool,
+        alpha: f64,
+        bounds: CGRect,
+    ) -> super::CaptureWindowCandidate {
+        super::CaptureWindowCandidate {
+            id,
+            title: Some(format!("Window {id}")),
+            owner_pid: Some(pid),
+            layer: Some(layer),
+            onscreen,
+            alpha,
+            bounds: Some(bounds),
+        }
+    }
+
+    fn rect(w: f64, h: f64) -> CGRect {
+        CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(w, h))
+    }
+
+    const OWN_PID: i32 = 4242;
+
+    #[test]
+    fn the_first_eligible_own_window_in_front_to_back_order_wins() {
+        let front = candidate(7, OWN_PID, 0, true, 1.0, rect(1200.0, 800.0));
+        let behind = candidate(8, OWN_PID, 0, true, 1.0, rect(900.0, 600.0));
+        let foreign = candidate(9, OWN_PID + 1, 0, true, 1.0, rect(1200.0, 800.0));
+        let palette = candidate(10, OWN_PID, 3, true, 1.0, rect(300.0, 200.0));
+        // CGWindowList is front-to-back, so the picker keeps that order.
+        let picked =
+            super::select_capture_window(&[foreign, palette, front.clone(), behind], OWN_PID, None)
+                .unwrap();
+        assert_eq!(picked.id, front.id);
+        assert_eq!(picked.title.as_deref(), Some("Window 7"));
+    }
+
+    #[test]
+    fn hidden_helpers_and_foreign_windows_are_not_capture_targets() {
+        let hidden = || {
+            vec![
+                candidate(11, OWN_PID, 0, false, 1.0, rect(1200.0, 800.0)),
+                candidate(12, OWN_PID, 0, true, 0.0, rect(1200.0, 800.0)),
+                candidate(13, OWN_PID, 0, true, 1.0, rect(16.0, 16.0)),
+            ]
+        };
+        let real = candidate(14, OWN_PID, 0, true, 1.0, rect(1200.0, 800.0));
+        let mut list = hidden();
+        list.push(real.clone());
+        let picked = super::select_capture_window(&list, OWN_PID, None).unwrap();
+        assert_eq!(picked.id, real.id);
+        assert!(
+            super::select_capture_window(&hidden(), OWN_PID, None).is_none(),
+            "an app with only hidden helper windows has nothing to capture"
+        );
+    }
+
+    #[test]
+    fn a_known_focus_rectangle_pins_the_choice_to_the_focused_document() {
+        let unfocused = candidate(15, OWN_PID, 0, true, 1.0, rect(1200.0, 800.0));
+        let focused_bounds = CGRect::new(&CGPoint::new(40.0, 30.0), &CGSize::new(1000.0, 700.0));
+        let focused = candidate(16, OWN_PID, 0, true, 1.0, focused_bounds);
+        // Front-to-back offers the background document first; the focus
+        // rectangle must steer the pick to the real document, within the
+        // WindowServer/AX rounding tolerance.
+        let picked = super::select_capture_window(
+            &[unfocused.clone(), focused.clone()],
+            OWN_PID,
+            Some(CGRect::new(
+                &CGPoint::new(40.5, 30.5),
+                &CGSize::new(1001.0, 699.0),
+            )),
+        )
+        .unwrap();
+        assert_eq!(picked.id, focused.id);
+        // Without accessibility the same list still captures the front window.
+        let frontmost = unfocused.id;
+        assert_eq!(
+            super::select_capture_window(&[unfocused, focused], OWN_PID, None)
+                .unwrap()
+                .id,
+            frontmost
+        );
     }
 }
