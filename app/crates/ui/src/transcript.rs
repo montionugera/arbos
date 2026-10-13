@@ -1550,6 +1550,15 @@ fn final_reply_ids(entries: &[SessionMessageEntry], working: bool) -> HashSet<&s
     ids
 }
 
+/// Whether the selected chat is a Main chat that is still working. Part of
+/// the sync key: the final reply appears the moment this turns false.
+fn main_chat_working(state: &AppState, chat_id: Option<&str>) -> bool {
+    chat_id.is_some_and(|id| {
+        id.ends_with("-main")
+            && state.indicator_for(id, chrono::Utc::now()) == zeron_proto::view::Indicator::Working
+    })
+}
+
 fn goal_turn_start(entries: &[SessionMessageEntry]) -> usize {
     entries
         .iter()
@@ -3427,7 +3436,7 @@ pub struct Transcript {
     state: Entity<AppState>,
     list: ListState,
     rows: Vec<Row>,
-    last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
+    last_source: Option<(Option<String>, TranscriptReplayState, u64, bool)>,
     chat_id: Option<String>,
     /// The shell may retain this already-laid-out view briefly for its exit.
     /// Cleared as soon as the exit is invisible; never used for another chat.
@@ -4985,10 +4994,15 @@ impl Transcript {
             }
         };
 
+        // Main's final reply is drawn only once Main has stopped working, so
+        // that flip must rebuild the rows even though the transcript itself
+        // did not change; otherwise the answer waits for the next edit.
+        let main_working = main_chat_working(self.state.read(cx), selected.as_deref());
         let source = (
             selected.clone(),
             replay,
             self.state.read(cx).transcript_revision,
+            main_working,
         );
         if self.last_source.as_ref() == Some(&source) {
             return;
@@ -5116,11 +5130,7 @@ impl Transcript {
             // open turn's last entry counts only once Main has stopped working,
             // so a progress line is not mistaken for the answer.
             let final_replies = if main_chat {
-                let working = self.chat_id.as_deref().is_some_and(|id| {
-                    state.indicator_for(id, chrono::Utc::now())
-                        == zeron_proto::view::Indicator::Working
-                });
-                final_reply_ids(entries, working)
+                final_reply_ids(entries, main_working)
             } else {
                 HashSet::new()
             };
@@ -10760,6 +10770,62 @@ mod tests {
                 assert!(transcript.chat_id.is_none());
                 assert!(!transcript.route_exit_pending(cx));
             });
+        });
+    }
+
+    /// On the rig Main's answer ("Yes, we're behind: the newest stable Zig
+    /// is 0.17.0 …") stayed hidden after the turn ended, and appeared only
+    /// after switching projects away and back. The last rows were built
+    /// while Main was still working, when the open turn's reply is held
+    /// back, and the stop did not change the transcript, so `sync` kept its
+    /// gate shut. Main stopping is part of the key: the rows rebuild and the
+    /// answer shows with no edit to the transcript.
+    #[gpui::test]
+    fn main_draws_the_final_reply_the_moment_it_stops_working(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            let now = chrono::Utc::now();
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("space-main".into());
+                state.transcript_replayed = true;
+                let mut question = assistant(
+                    "q",
+                    MessageStatus::Complete,
+                    vec![text_part("u", "Are we behind on Zig?")],
+                );
+                question.role = MessageRole::User;
+                state.transcript = vec![
+                    question,
+                    assistant(
+                        "turn",
+                        MessageStatus::Complete,
+                        vec![text_part("t", SCREENSHOT_REPLY)],
+                    ),
+                ];
+                state.transcript_revision += 1;
+                state.begin_pending_send("space-main", "m1", now);
+            });
+            let markdown_rows = |transcript: &Entity<Transcript>, cx: &mut gpui::App| {
+                transcript
+                    .read(cx)
+                    .rows
+                    .iter()
+                    .filter(|row| matches!(row.kind, RowKind::Markdown { .. }))
+                    .count()
+            };
+            transcript.update(cx, |this, cx| this.sync(cx));
+            assert_eq!(markdown_rows(&transcript, cx), 0, "held back while working");
+            state.update(cx, |state, _| state.end_pending_send("space-main", "m1"));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            assert!(
+                markdown_rows(&transcript, cx) > 0,
+                "the answer is drawn once Main stops working"
+            );
         });
     }
     use zeron_doc::MessagePart;
