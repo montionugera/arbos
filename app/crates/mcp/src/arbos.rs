@@ -79,7 +79,7 @@ pub fn catalog(profile: &str) -> Vec<ToolDef> {
             ),
             tool(
                 "agents.transcript",
-                "Return the last few turns of a worker's conversation: what it was asked, what it replied, which tools it called, and whether the turn ended. Bounded to tail turns, at most 50.",
+                "Return the last few turns of a worker's conversation: what it was asked, what it replied, which tools it called (a failed call reads `name (failed: reason)`), and whether the turn ended. Bounded to tail turns, at most 50.",
                 json!({
                     "type": "object",
                     "properties": {
