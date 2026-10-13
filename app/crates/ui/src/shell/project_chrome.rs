@@ -222,7 +222,7 @@ impl Shell {
         let tabs = pin_main_first(tabs);
         // Main wears the project's own artwork, the same art as its rail
         // button, so the first tab reads as "this project".
-        let main_icon = space
+        let mut main_icon = space
             .as_ref()
             .filter(|_| tabs.first().is_some_and(|tab| tab.main))
             .map(|project| self.project_icon(project, TAB_ICON_SIZE, cx));
@@ -250,17 +250,10 @@ impl Shell {
             .gap(px(4.0))
             .overflow_x_scroll()
             .track_scroll(&self.project.tab_scroll);
-        let mut main_icon = main_icon;
         for tab in &tabs {
             let icon = if tab.main { main_icon.take() } else { None };
-            scroller = scroller.child(self.chat_tab(
-                tab,
-                icon,
-                selected.as_deref(),
-                surface,
-                &theme,
-                cx,
-            ));
+            scroller =
+                scroller.child(self.chat_tab(tab, icon, selected.as_deref(), surface, &theme, cx));
         }
         div()
             .min_w_0()

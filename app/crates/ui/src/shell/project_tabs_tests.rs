@@ -77,11 +77,13 @@ fn setup(cx: &mut TestAppContext, count: usize) -> (Entity<Shell>, &mut VisualTe
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
-                state.spaces = vec![serde_json::from_value(serde_json::json!({
-                    "id": "space", "deviceId": "local", "path": project.to_string_lossy(),
-                    "name": "Arbos", "createdAt": Utc::now(),
-                }))
-                .unwrap()];
+                state.spaces = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "space", "deviceId": "local", "path": project.to_string_lossy(),
+                        "name": "Arbos", "createdAt": Utc::now(),
+                    }))
+                    .unwrap(),
+                ];
                 state.selected_space = Some("space".into());
                 let mut ids = vec!["space-main".to_owned()];
                 ids.extend((1..count).map(|ix| format!("chat-{ix:02}")));
@@ -177,7 +179,10 @@ fn every_tab_shows_main_first_and_each_opens_on_click(cx: &mut TestAppContext) {
     for ix in (1..19).rev() {
         let id = format!("chat-{ix:02}");
         let this = tab(cx, &id).unwrap_or_else(|| panic!("{id} has a tab"));
-        assert!(this.left() >= previous.right(), "{id} follows its neighbour");
+        assert!(
+            this.left() >= previous.right(),
+            "{id} follows its neighbour"
+        );
         assert!(
             this.size.width >= px(TAB_MIN_WIDTH) && this.size.width <= px(TAB_MAX_WIDTH),
             "{id} is {:?} wide",
