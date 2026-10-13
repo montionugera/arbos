@@ -4111,7 +4111,13 @@ async fn run_session(session: Session) {
         });
         let mut fresh_session = request.resume.is_none();
         let (session_id, session_response) = if let Some(resume) = &request.resume {
-            let mut load = session_params.clone();
+            // The prompt rides on the load too: fx replaces the one it
+            // persisted, so Main follows the instructions of the build that
+            // is running, not of the build that first opened the session.
+            let mut load = with_system_prompt(
+                session_params.clone(),
+                fx_system_prompt(&request).as_deref(),
+            );
             load["sessionId"] = Value::String(resume.clone());
             match request_draining(&client, &mut incoming, "session/load", load).await {
                 Ok(resp) => (resume.clone(), resp),
