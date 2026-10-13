@@ -387,8 +387,7 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         // The canvas titles as NOTHING (user request — a "New session"
         // header over the empty canvas was noise); the bar keeps its height,
-        // drag region, and buttons. Where a session runs, and its side-chat
-        // and project actions, live in the session card.
+        // drag region, and buttons.
         let on_canvas = self.state.read(cx).selected_chat_row().is_none();
         // The window title is the product name. While Main is working, the
         // title is the live step (set by Main, or derived from the turn). On
@@ -422,13 +421,6 @@ impl Shell {
             content_width,
         } = self.titlebar_trailing_layout(on_canvas, cx);
 
-        let running_subagents = {
-            let state = self.state.read(cx);
-            state
-                .selected_chat
-                .as_deref()
-                .map_or(0, |chat| state.running_subagents_for(chat, Utc::now()))
-        };
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -546,15 +538,6 @@ impl Shell {
                                 .aria_label(files_panel_label)
                                 .when(self.files_panel_open(cx) && fit.files, |button| {
                                     button.bg(crate::theme::wash(0.09))
-                                })
-                                // Running subagents live in this panel: mark the
-                                // button so they are findable while it is closed.
-                                .when(running_subagents > 0, |button| {
-                                    crate::running_pill::mark_files_button(
-                                        button,
-                                        running_subagents,
-                                        &theme,
-                                    )
                                 }),
                             )
                             .child(header_icon_button_with(
@@ -578,28 +561,6 @@ impl Shell {
             )
         };
 
-        // The session card's toggle belongs to the transcript: it ends the
-        // transcript's stretch of the titlebar, left of the side pane's tabs
-        // when one is open, else just left of the explorer toggle.
-        let session_info_toggle = (!takeover && !on_canvas).then(|| {
-            let label = if self.session_info_open() {
-                "Hide session details"
-            } else {
-                "Show session details"
-            };
-            header_icon_button_with(
-                "toggle-session-info",
-                icons::corner_card_glyph(16.0, theme.text_muted),
-                label,
-                cx.listener(|this, _, _, cx| this.toggle_session_info(cx)),
-            )
-            .role(gpui::Role::Button)
-            .aria_label(label)
-            .flex_none()
-            .when(self.session_info_open(), |button| {
-                button.bg(crate::theme::wash(0.09))
-            })
-        });
         let inner = div()
             .size_full()
             .flex()
@@ -647,7 +608,6 @@ impl Shell {
                 )
             })
             .child(self.render_project_tabs(cx))
-            .children(session_info_toggle)
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE
@@ -706,6 +666,66 @@ mod panel_titlebar_tests {
                 assert_eq!(controls_left, sidebar.max(row_left + 8.0));
             }
         }
+    }
+
+    /// Over a chat, the titlebar's right-hand controls are the files-panel
+    /// and side-pane toggles; the session-details toggle is gone with the
+    /// session card.
+    #[gpui::test]
+    fn chat_titlebar_has_no_session_details_toggle(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (shell, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.connection = zeron_proto::view::ConnectionStatus::Ready;
+                state.chats = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "chat", "title": "Plan", "deviceId": "local",
+                        "archived": false, "createdAt": Utc::now(),
+                    }))
+                    .unwrap(),
+                ];
+                state.selected_chat = Some("chat".into());
+                state
+            });
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.active_chat = "chat".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("right-titlebar-controls").is_some());
+        assert!(cx.debug_bounds("toggle-files-panel").is_some());
+        assert!(cx.debug_bounds("toggle-changes").is_some());
+        assert!(cx.debug_bounds("toggle-session-info").is_none());
     }
 
     #[test]

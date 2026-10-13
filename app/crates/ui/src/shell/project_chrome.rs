@@ -124,9 +124,9 @@ pub(super) struct ProjectRow {
     home: String,
 }
 
-struct ChatTab {
+pub(super) struct ChatTab {
     id: String,
-    title: String,
+    pub(super) title: String,
     main: bool,
     worker: bool,
     /// `working`, `waiting`, `done`, `error`, `stopped`, or empty.
@@ -269,7 +269,6 @@ impl Shell {
             .child(scroller)
             .child(self.new_chat_tab(&theme, cx))
             .child(div().flex_1())
-            .child(self.context_tab(surface, &theme, cx))
             .into_any_element()
     }
 
@@ -1207,7 +1206,7 @@ impl Shell {
         })
     }
 
-    fn chat_tabs(&self, space_id: &str, cx: &gpui::App) -> Vec<ChatTab> {
+    pub(super) fn chat_tabs(&self, space_id: &str, cx: &gpui::App) -> Vec<ChatTab> {
         let state = self.state.read(cx);
         let path = state
             .spaces
@@ -1555,29 +1554,6 @@ impl Shell {
             .into_any_element()
     }
 
-    fn context_tab(&self, surface: Surface, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let active = surface == Surface::Context;
-        div()
-            .id("project-tab-context")
-            .debug_selector(|| "project-tab-context".into())
-            .flex_none()
-            .h(px(26.0))
-            .px(px(10.0))
-            .flex()
-            .items_center()
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .text_size(px(12.0))
-            .text_color(if active { theme.text } else { theme.text_muted })
-            .bg(if active {
-                theme.element_hover
-            } else {
-                gpui::transparent_black()
-            })
-            .child("Context")
-            .on_click(cx.listener(|this, _, _, cx| this.show_project_context(cx)))
-            .into_any_element()
-    }
 }
 
 enum StatusBlock {

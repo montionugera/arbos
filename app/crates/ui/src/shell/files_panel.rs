@@ -328,18 +328,7 @@ impl Shell {
                         this.set_files_show_all(*show_all, cx)
                     }
                     // Footer rows land in the surface host beside the explorer,
-                    // through the same paths a spawn chip and a side-chat tab use.
-                    FilesEvent::OpenSubagent {
-                        doc_id,
-                        title,
-                        frozen,
-                    } => this.add_subagent_surface(
-                        this.active_chat.clone(),
-                        doc_id.clone(),
-                        title.clone(),
-                        *frozen,
-                        cx,
-                    ),
+                    // through the same path a side-chat tab uses.
                     FilesEvent::OpenChildChat(chat_id) => this.open_child_chat_tab(chat_id, cx),
                     FilesEvent::RenameChildChat(chat_id) => {
                         this.open_rename_chat(chat_id.clone(), cx)

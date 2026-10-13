@@ -2003,13 +2003,28 @@ impl RpcService for EngineRpc {
                     /// side chat's parent so the copy lists as a sibling.
                     #[serde(default)]
                     parent_chat_id: Option<String>,
+                    /// A top-level chat of the source's project instead of a
+                    /// side chat: `parent_chat_id` is ignored and the copy
+                    /// lists beside the source.
+                    #[serde(default)]
+                    top_level: bool,
+                    /// Copy the history through this entry (the latest
+                    /// completed response at or before it) instead of
+                    /// through the latest completed response overall.
+                    #[serde(default)]
+                    through_message_id: Option<String>,
+                    /// The copy's title; without one the first turn names
+                    /// it.
+                    #[serde(default)]
+                    title: Option<String>,
                 }
                 let p: ForkParams = parse_params(params)?;
-                let parent_chat_id = p
-                    .parent_chat_id
-                    .clone()
-                    .filter(|id| !id.trim().is_empty())
-                    .unwrap_or_else(|| p.source_chat_id.clone());
+                let parent_chat_id = (!p.top_level).then(|| {
+                    p.parent_chat_id
+                        .clone()
+                        .filter(|id| !id.trim().is_empty())
+                        .unwrap_or_else(|| p.source_chat_id.clone())
+                });
                 let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
                 let source = self
                     .workspace
@@ -2026,7 +2041,7 @@ impl RpcService for EngineRpc {
                     .chat(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?
                 {
-                    if existing.parent_chat_id.as_deref() == Some(parent_chat_id.as_str()) {
+                    if existing.parent_chat_id == parent_chat_id {
                         return RpcReply::value(&existing);
                     }
                     return Err(RpcError::Failed("Chat id already exists".into()));
@@ -2036,7 +2051,21 @@ impl RpcService for EngineRpc {
                     .doc()
                     .read_entries()
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let boundary = entries
+                // The copy ends at the latest completed response — overall,
+                // or at or before the entry a fork-from-here asked for.
+                let end = match &p.through_message_id {
+                    Some(id) => {
+                        entries
+                            .iter()
+                            .position(|entry| &entry.id == id)
+                            .ok_or_else(|| {
+                                RpcError::Failed("That message is no longer in the chat".into())
+                            })?
+                            + 1
+                    }
+                    None => entries.len(),
+                };
+                let boundary = entries[..end]
                     .iter()
                     .rposition(|entry| {
                         entry.role == zeron_doc::MessageRole::Assistant
@@ -2049,8 +2078,12 @@ impl RpcService for EngineRpc {
                     })?;
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
-                chat.parent_chat_id = Some(parent_chat_id);
-                chat.title = None; // First side-chat turn receives its own generated title.
+                chat.parent_chat_id = parent_chat_id;
+                // Without a given title the first turn names the copy.
+                chat.title = p
+                    .title
+                    .map(|title| title.trim().to_owned())
+                    .filter(|title| !title.is_empty());
                 chat.archived = false;
                 chat.created_at = chrono::Utc::now();
                 chat.last_message_at = None;

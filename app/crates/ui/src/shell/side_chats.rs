@@ -7,6 +7,51 @@ pub(super) struct SideChatTab {
     _events: Vec<Subscription>,
 }
 
+/// Where a fork lands once the engine has copied the history.
+enum ForkLanding {
+    /// A side chat under `parent_id`, opened in the right pane.
+    SideChat { parent_id: String },
+    /// A top-level chat of the source's project, titled `title`, opened as
+    /// the selected chat.
+    ChatTab { title: String },
+}
+
+/// The footer fork's title: the source's name with a "(fork)" suffix.
+pub(super) fn fork_title(source: &zeron_proto::Chat) -> String {
+    let name = source
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Chat");
+    format!("{name} (fork)")
+}
+
+/// The `ForkSideChat` request for `source`: the copy's fresh id, where it
+/// hangs, how far the history goes, and the device that owns the source.
+fn fork_params(
+    source: &zeron_proto::Chat,
+    through_entry_id: Option<String>,
+    landing: &ForkLanding,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "chatId": uuid::Uuid::new_v4().to_string(),
+        "sourceChatId": source.id,
+        "targetDeviceId": source.device_id,
+        "throughMessageId": through_entry_id,
+    });
+    match landing {
+        ForkLanding::SideChat { parent_id } => {
+            params["parentChatId"] = serde_json::Value::String(parent_id.clone());
+        }
+        ForkLanding::ChatTab { title } => {
+            params["topLevel"] = serde_json::Value::Bool(true);
+            params["title"] = serde_json::Value::String(title.clone());
+        }
+    }
+    params
+}
+
 impl Shell {
     pub(super) fn close_empty_right_pane(&mut self, key: &str, cx: &mut Context<Self>) {
         let empty = if key == self.panel_key(cx) {
@@ -52,6 +97,37 @@ impl Shell {
         parent_id: String,
         cx: &mut Context<Self>,
     ) {
+        self.request_fork(source, None, ForkLanding::SideChat { parent_id }, cx);
+    }
+
+    /// The message footer's Fork: a new top-level chat of the same project,
+    /// seeded with `chat_id`'s conversation through the entry `entry_id`,
+    /// titled after the source, and selected once the engine has copied it.
+    pub(super) fn fork_chat_through(&mut self, chat_id: &str, entry_id: String, cx: &mut Context<Self>) {
+        let Some(source) = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .cloned()
+        else {
+            self.show_side_chat_error("That chat is no longer available to fork.", cx);
+            return;
+        };
+        let title = fork_title(&source);
+        self.request_fork(source, Some(entry_id), ForkLanding::ChatTab { title }, cx);
+    }
+
+    /// Ask the engine for the copy, then land it: in the right pane as a
+    /// side chat, or selected as a chat tab of the project.
+    fn request_fork(
+        &mut self,
+        source: zeron_proto::Chat,
+        through_entry_id: Option<String>,
+        landing: ForkLanding,
+        cx: &mut Context<Self>,
+    ) {
         if self.side_chat_creating {
             return;
         }
@@ -60,12 +136,7 @@ impl Shell {
         };
         let key = self.panel_key(cx);
         self.side_chat_creating = true;
-        let params = serde_json::json!({
-            "chatId": uuid::Uuid::new_v4().to_string(),
-            "sourceChatId": source.id,
-            "parentChatId": parent_id,
-            "targetDeviceId": source.device_id,
-        });
+        let params = fork_params(&source, through_entry_id, &landing);
         cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -74,17 +145,7 @@ impl Shell {
             let _ = this.update(cx, |this, cx| {
                 this.side_chat_creating = false;
                 match result {
-                    Ok(chat) => {
-                        if this
-                            .state
-                            .read(cx)
-                            .chats
-                            .iter()
-                            .any(|c| Some(&c.id) == chat.parent_chat_id.as_ref())
-                        {
-                            this.open_side_chat(chat, key, cx);
-                        }
-                    }
+                    Ok(chat) => this.land_fork(chat, key, &landing, cx),
                     Err(error) => this.show_side_chat_error(error.to_string(), cx),
                 }
                 cx.notify();
@@ -92,6 +153,40 @@ impl Shell {
         })
         .detach();
         cx.notify();
+    }
+
+    fn land_fork(
+        &mut self,
+        chat: zeron_proto::Chat,
+        key: String,
+        landing: &ForkLanding,
+        cx: &mut Context<Self>,
+    ) {
+        match landing {
+            ForkLanding::SideChat { .. } => {
+                if self
+                    .state
+                    .read(cx)
+                    .chats
+                    .iter()
+                    .any(|c| Some(&c.id) == chat.parent_chat_id.as_ref())
+                {
+                    self.open_side_chat(chat, key, cx);
+                }
+            }
+            ForkLanding::ChatTab { .. } => {
+                // The synced row follows; seat the copy now so the tab strip
+                // and the selection do not wait on it.
+                let chat_id = chat.id.clone();
+                self.state.update(cx, |state, _| {
+                    if !state.chats.iter().any(|c| c.id == chat_id) {
+                        state.chats.push(chat);
+                    }
+                });
+                self.project.surface = super::project_chrome::Surface::Chat;
+                self.open_chat(chat_id, cx);
+            }
+        }
     }
 
     /// A fresh, empty side chat under `parent_id` (the active chat when
@@ -548,6 +643,98 @@ mod tests {
                 });
                 shell.close_right_surface(RightSurface::SideChat(id), window, cx);
                 assert!(!shell.side_chats.contains_key(&id));
+            })
+            .unwrap();
+    }
+
+    /// The message footer's Fork asks the engine for a top-level copy of the
+    /// chat through that message, named after the source, and selects the
+    /// copy as a chat tab of the same project once it arrives.
+    #[gpui::test]
+    fn footer_fork_opens_a_named_chat_tab_in_the_same_project(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine =
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
+        let dir = tempfile::tempdir().unwrap();
+        let window = shell_window(dir.path(), cx);
+        cx.update(|cx| {
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.active_chat = "main".into();
+                let main: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+                    "id": "main", "title": "Plan the release", "spaceId": "space",
+                    "deviceId": "local", "cwd": "/tmp/main", "archived": false,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                }))
+                .unwrap();
+                shell.state.update(cx, |state, _| {
+                    state.chats = vec![main];
+                    state.selected_chat = Some("main".into());
+                    state.set_test_engine(engine);
+                });
+                shell.fork_chat_through("main", "reply".into(), cx);
+                assert!(shell.side_chat_creating);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("the fork is requested")).unwrap();
+        assert_eq!(request["method"], methods::FORK_SIDE_CHAT);
+        let params = &request["params"];
+        assert_eq!(params["sourceChatId"], "main");
+        assert_eq!(params["throughMessageId"], "reply");
+        assert_eq!(params["topLevel"], true);
+        assert_eq!(params["title"], "Plan the release (fork)");
+        assert!(params.get("parentChatId").is_none());
+        let fork_id = params["chatId"].as_str().unwrap().to_string();
+        let reply = serde_json::json!({
+            "id": request["id"],
+            "ok": {
+                "id": fork_id, "title": params["title"], "spaceId": "space",
+                "deviceId": "local", "cwd": "/tmp/main", "archived": false,
+                "createdAt": Utc::now(),
+            },
+        });
+        runtime.block_on(async {
+            replies.send(reply.to_string()).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while replies.capacity() < replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(!shell.side_chat_creating);
+                assert!(shell.composer.read(cx).failure().is_none());
+                let state = shell.state.read(cx);
+                assert_eq!(state.selected_chat.as_deref(), Some(fork_id.as_str()));
+                let fork = state.chats.iter().find(|c| c.id == fork_id).unwrap();
+                assert_eq!(fork.title.as_deref(), Some("Plan the release (fork)"));
+                assert!(fork.parent_chat_id.is_none());
+                let tabs: Vec<_> = shell
+                    .chat_tabs("space", cx)
+                    .into_iter()
+                    .map(|tab| tab.title)
+                    .collect();
+                assert_eq!(tabs, ["Plan the release (fork)", "Plan the release"]);
             })
             .unwrap();
     }
