@@ -11,7 +11,7 @@ use super::EngineRpc;
 use crate::arbos_goal::{self, GoalRecord};
 use crate::arbos_layout::{self, AgentView};
 use crate::{new_id, now_ms};
-use crate::{arbos_context, arbos_live, arbos_wakes};
+use crate::{arbos_capture, arbos_context, arbos_live, arbos_wakes};
 
 impl EngineRpc {
     pub(super) async fn arbos_call(&self, params: Value) -> Result<Value, String> {
@@ -158,6 +158,19 @@ impl EngineRpc {
                     "removed": id,
                     "subscriptions": arbos_wakes::subscriptions(project_path),
                 }))
+            }
+            "screenshot_capture" => {
+                // The capture runs in this process when the headed app embedded
+                // the engine; a headless or remote engine registered none.
+                let capture = arbos_capture::window_capture();
+                let project = project_path.to_owned();
+                let now = chrono::Utc::now();
+                let view = tokio::task::spawn_blocking(move || {
+                    arbos_capture::capture_screenshot(&project, now, capture)
+                })
+                .await
+                .map_err(|error| format!("the capture ended early: {error}"))??;
+                serde_json::to_value(view).map_err(|err| err.to_string())
             }
             _ => Err("unknown arbos op".into()),
         }

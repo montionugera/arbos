@@ -122,8 +122,9 @@ pub mod methods {
     pub const MUTATE: &str = "Mutate";
     /// Project tools for the `arbos` MCP server and the phone. Params `{op, ...}`.
     /// `op` includes `projects`, `spawn`, `send`, `list`, `result`, `read`,
-    /// `write`, `subscriptions_add`, `subscriptions_list`, and
-    /// `subscriptions_remove`. `projects` needs no project path.
+    /// `write`, `subscriptions_add`, `subscriptions_list`,
+    /// `subscriptions_remove`, and `screenshot_capture`. `projects` needs no
+    /// project path.
     pub const ARBOS_CALL: &str = "ArbosCall";
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).
