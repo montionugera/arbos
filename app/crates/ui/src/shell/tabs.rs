@@ -1,8 +1,8 @@
-//! Session navigation — the horizontal tab strip is gone (wing 2026-08-10):
-//! the activity sidebar IS the session list, and the titlebar names the
-//! selected session (harness brand icon + title). A `+` new-session button
-//! lives in the titlebar's left control cluster while an existing session is
-//! selected. `UiSettings.open_tabs` is legacy — no longer read or written.
+//! Session navigation — the titlebar names the product and carries the
+//! selected project's chat tabs (`project_chrome::render_project_tabs`):
+//! Main first, every other chat after it, and one `+` for a new chat at the
+//! end of the strip. `UiSettings.open_tabs` is legacy — no longer read or
+//! written.
 
 use super::*;
 
@@ -298,13 +298,11 @@ impl Shell {
     /// The trailing titlebar strip follows the columns beneath it.
     pub(super) fn titlebar_trailing_layout(&self, on_canvas: bool, cx: &App) -> TitlebarTrailing {
         let sidebar_now = self.sidebar_now();
-        let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
 
         // Same glide as the old strip: content starts at the inset card's
         // left edge while the sidebar is open, and slides toward the control
         // cluster as it collapses.
-        let content_left =
-            (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start() + plus_inset);
+        let content_left = (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start());
 
         // Trailing titlebar section. With the changes pane open this is the
         // PANE'S HEADER — a strip exactly as wide as the pane carrying its
@@ -339,8 +337,7 @@ impl Shell {
             // own 8px pad lands the first chip on the pane gutter. The
             // window-control cluster still wins while the sidebar is
             // collapsed (the chips clear it instead of underlapping).
-            let cluster_end =
-                self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP + plus_inset - 14.0;
+            let cluster_end = self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP - 14.0;
             (sidebar_now - 8.0).max(cluster_end)
         } else {
             content_left
@@ -383,9 +380,9 @@ impl Shell {
     }
 
     /// The unified titlebar in chat mode:
-    /// `[new-session +] [harness icon + session title] … [toggle-changes]`.
-    /// Replaces the tab strip; inherits its titlebar duties (drag region,
-    /// animated left inset, the toggle-changes button on git projects).
+    /// `[title] [Main tab] [chat tabs…] [+] … [Context] [toggle-changes]`.
+    /// Carries the titlebar duties (drag region, animated left inset, the
+    /// toggle-changes button on git projects).
     pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         // The canvas titles as NOTHING (user request — a "New session"
@@ -413,9 +410,6 @@ impl Shell {
         };
         let harness: Option<zeron_proto::HarnessId> = None;
 
-        // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
-        // session is selected (`render_titlebar_cluster`) — this row budgets
-        // one button slot so the title never sits under it.
         let TitlebarTrailing {
             fit,
             right_pane_visible,

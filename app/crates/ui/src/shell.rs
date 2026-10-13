@@ -71,6 +71,8 @@ mod chat_dropzone_tests;
 #[cfg(test)]
 mod chat_rename_tests;
 mod command_palette;
+#[cfg(test)]
+mod composer_placement_tests;
 mod file_mutations;
 mod files_panel;
 mod harness_updates;
@@ -84,6 +86,8 @@ use panel_layout::{panel_content_tween, AuxiliaryPanel, FitInputs, HorizontalPan
 #[cfg(test)]
 mod panel_interaction_tests;
 pub(crate) mod project_icon;
+#[cfg(test)]
+mod project_tabs_tests;
 mod search_warm;
 mod side_chats;
 mod sidebar_pins;
@@ -295,14 +299,6 @@ fn composer_target_width(panel_width: f32, content_width: f32, docked: bool) -> 
     (content_width + 2.0 * Theme::SPACE_LG).min(panel_width)
 }
 
-fn titlebar_new_session_alpha(route: &Route, has_selected_chat: bool) -> f32 {
-    if matches!(route, Route::PullRequests) || (matches!(route, Route::Chat) && has_selected_chat) {
-        1.0
-    } else {
-        0.0
-    }
-}
-
 /// Open the session at `slot` (zero-based) of the sidebar's active list. One
 /// action carrying the slot, rather than nine near-identical action types.
 #[derive(Clone, PartialEq, Action)]
@@ -342,22 +338,18 @@ pub fn titlebar_spacer_width(is_macos: bool, fullscreen: bool, container_pad: f3
     (titlebar_cluster_start(fullscreen) - container_pad).max(0.0)
 }
 
-/// Within-group rhythm for Back/Forward.
-pub const TITLEBAR_CONTROL_GAP: f32 = 2.0;
-/// Structural separation between titlebar groups: sidebar, navigation,
-/// transcript identity, and trailing actions.
+/// Structural separation between titlebar groups: sidebar, transcript
+/// identity, and trailing actions.
 pub const TITLEBAR_GROUP_GAP: f32 = Theme::SPACE_SM;
-/// Breathing room between the navigation cluster and transcript identity.
+/// Breathing room between the control cluster and transcript identity.
 pub const TITLEBAR_IDENTITY_GAP: f32 = Theme::SPACE_MD;
 /// A 28px action centered in the 38px titlebar with its 2px downward optical
 /// shift lands 6px from the top; use the same inset at the trailing edge.
 pub const TITLEBAR_ACTION_EDGE_INSET: f32 = 6.0;
-/// Width of the persistent top-left button cluster itself: a 24px sidebar
-/// trigger, an 8px group gap, then two 24px history buttons on a 2px rhythm.
-pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + TITLEBAR_GROUP_GAP + TITLEBAR_CONTROL_GAP;
-/// Extra width consumed when the collapsed-sidebar New Session action joins
-/// the left controls as its own group.
-pub const TITLEBAR_ACTION_SLOT_WIDTH: f32 = TITLEBAR_GROUP_GAP + 24.0;
+/// Width of the persistent top-left button cluster itself: the 24px sidebar
+/// trigger. The back/forward arrows and the left `+` are gone (user
+/// request): new chats start from the `+` at the end of the tab strip.
+pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0;
 /// Horizontal inset owned by the titlebar control row itself. Keep this value
 /// paired with [`Self::titlebar_spacer`]: using a different number for the
 /// spacer shifts every control while leaving the declared cluster geometry
@@ -1478,11 +1470,13 @@ const SPLASH_HOLD: Duration = Duration::from_millis(800);
 const CHAT_RENAME_REVEAL_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Which list draws a chat's inline title editor: the sidebar's session row,
-/// or the side-chat row in the explorer's Chats footer.
+/// the side-chat row in the explorer's Chats footer, or the chat's tab in
+/// the titlebar strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChatRenameSurface {
     Sidebar,
     Explorer,
+    Tab,
 }
 
 /// A chat title edited in place on its row (double-click, or Rename in the
@@ -5515,14 +5509,10 @@ impl Shell {
 
     // ---- back/forward (route history) ----
 
+    /// Closing a pull request returns to the board behind it. The titlebar
+    /// has no back/forward arrows (user request); this is the one caller.
     fn navigate_back(&mut self, cx: &mut Context<Self>) {
         if let Some(entry) = self.nav.back() {
-            self.apply_nav(entry, cx);
-        }
-    }
-
-    fn navigate_forward(&mut self, cx: &mut Context<Self>) {
-        if let Some(entry) = self.nav.forward() {
             self.apply_nav(entry, cx);
         }
     }
@@ -5862,14 +5852,15 @@ impl Shell {
         }));
     }
 
-    /// Start editing `chat_id`'s title in place on its row: the sidebar's
-    /// session row, or — for a side chat — its row under the file tree.
+    /// Start editing `chat_id`'s title in place on its row: its tab in the
+    /// titlebar strip, the sidebar's session row, or — for a side chat —
+    /// its row under the file tree.
     fn open_rename_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.close_chat_menu(cx);
         if self.chat_rename.is_some() {
             self.finish_rename_chat(true, cx);
         }
-        let Some((current, parent, archived)) = self
+        let Some((current, parent, archived, space)) = self
             .state
             .read(cx)
             .chats
@@ -5880,16 +5871,25 @@ impl Shell {
                     c.title.clone().unwrap_or_default(),
                     c.parent_chat_id.clone(),
                     c.archived,
+                    c.space_id.clone(),
                 )
             })
         else {
             return;
         };
-        // The sidebar lists only top-level chats; side chats live in the
-        // explorer's Chats footer. Either way the row must be on screen
-        // first: a field on a hidden row would take keystrokes unseen.
+        // A top-level chat of the shown project has a tab in the titlebar
+        // strip; the sidebar lists the other top-level chats; side chats
+        // live in the explorer's Chats footer. Either way the row must be
+        // on screen first: a field on a hidden row would take keystrokes
+        // unseen.
+        let on_strip = parent.is_none()
+            && !archived
+            && space.is_some()
+            && space == self.selected_project(cx).map(|project| project.id);
         let surface = if parent.is_some() {
             ChatRenameSurface::Explorer
+        } else if on_strip {
+            ChatRenameSurface::Tab
         } else {
             ChatRenameSurface::Sidebar
         };
@@ -5903,6 +5903,9 @@ impl Shell {
                     && self.files_panel_open(cx)
                     && self.files.contains_key(&self.panel_key(cx))
             }
+            // Every tab of the shown project is drawn, so the field has a
+            // tab to sit on.
+            ChatRenameSurface::Tab => true,
         };
         if !revealed {
             // The sidebar explains its own refusals.
@@ -5915,6 +5918,22 @@ impl Shell {
             }
             cx.notify();
             return;
+        }
+        self.start_chat_rename(chat_id, current, surface, cx);
+    }
+
+    /// Put the inline title field on `surface`, holding `current` selected,
+    /// with Enter wired to commit. The row is already on screen.
+    fn start_chat_rename(
+        &mut self,
+        chat_id: String,
+        current: String,
+        surface: ChatRenameSurface,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_chat_menu(cx);
+        if self.chat_rename.is_some() {
+            self.finish_rename_chat(true, cx);
         }
         let input = cx.new(|cx| {
             ComposerInput::new("Session title", cx)
@@ -7193,14 +7212,12 @@ impl Shell {
         if !matches!(self.route, Route::PullRequests) {
             return self.render_session_title_bar(cx);
         }
-        let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let inner = div()
             .size_full()
             .flex()
             .items_center()
             .pt(px(Theme::TITLEBAR_TOP_PAD))
-            .pl(px((self.sidebar_now() + Theme::SPACE_LG)
-                .max(self.title_bar_content_start() + plus_inset)))
+            .pl(px((self.sidebar_now() + Theme::SPACE_LG).max(self.title_bar_content_start())))
             .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
             .when_some(self.pull_request_detail.clone(), |bar, detail| {
                 bar.child(detail.update(cx, |page, cx| page.titlebar(cx)))
@@ -7262,24 +7279,17 @@ impl Shell {
             })
     }
 
-    /// The ONE top-left window-control cluster (sidebar toggle + back/forward —
-    /// zeron window-controls.tsx): rendered once, in a paint-only overlay layer
-    /// pinned at the window's top-left, ABOVE the sidebar and headers. The
-    /// sidebar width animates *beneath* it, so the buttons keep their element
-    /// identity and never move or remount on collapse/expand; only the
-    /// fullscreen traffic-light inset tweens (the animated spacer). The
-    /// container has no id/listeners — everything between the buttons falls
-    /// through to the titlebar drag strips below.
+    /// The ONE top-left window-control cluster (the sidebar toggle): rendered
+    /// once, in a paint-only overlay layer pinned at the window's top-left,
+    /// ABOVE the sidebar and headers. The sidebar width animates *beneath*
+    /// it, so the button keeps its element identity and never moves or
+    /// remounts on collapse/expand; only the fullscreen traffic-light inset
+    /// tweens (the animated spacer). The container has no id/listeners —
+    /// everything beside the button falls through to the titlebar drag
+    /// strips below. New chats start from the `+` at the end of the tab
+    /// strip; there are no back/forward arrows (user request).
     fn render_titlebar_cluster(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let can_back = self.nav.can_back();
-        let can_forward = self.nav.can_forward();
-        // The titlebar is the single owner of the new-session action in both
-        // sidebar states. Hide it on the new-session canvas: opening another
-        // blank canvas from an already blank canvas has no effect and used to
-        // leave two competing + placements across the responsive variants.
-        let plus_alpha = self.titlebar_plus_alpha(cx);
-        let show_plus = plus_alpha > 0.01;
         let over_artwork = settings::current(cx)
             .new_thread_composer_background
             .as_ref()
@@ -7362,43 +7372,6 @@ impl Shell {
                 &theme,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
             ))
-            .child(
-                div()
-                    .ml(px(TITLEBAR_GROUP_GAP))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(TITLEBAR_CONTROL_GAP))
-                    .child(nav_history_button(
-                        "nav-back",
-                        icons::ARROW_LEFT,
-                        "Back",
-                        can_back,
-                        &theme,
-                        cx.listener(|this, _, _, cx| this.navigate_back(cx)),
-                    ))
-                    .child(nav_history_button(
-                        "nav-forward",
-                        icons::ARROW_RIGHT,
-                        "Forward",
-                        can_forward,
-                        &theme,
-                        cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
-                    )),
-            )
-            .children(show_plus.then(|| {
-                div()
-                    .flex_none()
-                    .ml(px(TITLEBAR_GROUP_GAP))
-                    .opacity(plus_alpha)
-                    .child(window_control_button(
-                        "titlebar-new-session",
-                        icons::PLUS,
-                        ShortcutId::NewSession.label(),
-                        &theme,
-                        cx.listener(|this, _, _, cx| this.open_project_chat(cx)),
-                    ))
-            }))
             .into_any_element()
     }
 
@@ -7418,8 +7391,7 @@ impl Shell {
                 self.fullscreen.unwrap_or(false),
                 self.linux_left_caption_count(),
             ),
-        ) + CLUSTER_BUTTONS_WIDTH
-            + TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
+        ) + CLUSTER_BUTTONS_WIDTH;
         let left = (sidebar - Theme::SPACE_SM - 24.0).max(cluster_end + TITLEBAR_GROUP_GAP);
         let theme = Theme::of(cx).clone();
         let trigger = self.render_sidebar_view_trigger(&theme, cx);
@@ -7436,12 +7408,6 @@ impl Shell {
                 .child(trigger)
                 .into_any_element(),
         )
-    }
-
-    /// The titlebar owns new-session creation regardless of sidebar state. It
-    /// remains available on PR screens, even without a selected session.
-    pub(super) fn titlebar_plus_alpha(&self, cx: &App) -> f32 {
-        titlebar_new_session_alpha(&self.route, self.state.read(cx).selected_chat.is_some())
     }
 
     /// Native Windows caption controls integrated into Zeron's unified
@@ -11167,15 +11133,15 @@ impl Shell {
             self.reduced_motion,
             frame_time,
         );
-        let chat_has_messages = {
-            let state = self.state.read(cx);
-            !state.transcript.is_empty() || !state.pending_echoes().is_empty()
-        };
-        // A new chat has no messages yet, so the bar stays in the center.
-        // Until history arrives, keep the bar down so an existing chat does
-        // not jump. After the first message it sits under the transcript.
-        let composer_docked =
-            has_selection && (chat_has_messages || !self.state.read(cx).transcript_replayed);
+        // A selected chat docks the bar at the foot of the column from its
+        // first frame, whether or not its history has arrived and whether or
+        // not it has any messages. Lifting an empty chat into the hero route
+        // put the bar, and its placeholder, up the column whenever the empty
+        // replay landed (user report: "Do anything…" at the top of a new
+        // chat); the hero layout also assumes the new-chat canvas's two-row
+        // composer, which a selected chat never renders. Only the canvas,
+        // with no selection, centers the bar.
+        let composer_docked = has_selection;
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
@@ -13366,37 +13332,6 @@ fn linux_caption_button(
         )
 }
 
-/// A titlebar history button (zeron window-controls.tsx): enabled it is a
-/// normal window-control button; disabled it dims to 35% opacity and ignores
-/// the pointer (`disabled:pointer-events-none disabled:opacity-35`).
-fn nav_history_button(
-    id: &'static str,
-    icon_path: &'static str,
-    label: &'static str,
-    enabled: bool,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    if !enabled {
-        return div()
-            .size(px(24.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            // Even disabled it reads as a control — occlude so double-clicks
-            // on it don't fall through to the titlebar strip's zoom handler.
-            .occlude()
-            .child(
-                icon(icon_path)
-                    .size(px(16.0))
-                    .text_color(theme.text_muted.opacity(0.35)),
-            )
-            .into_any_element();
-    }
-    window_control_button(id, icon_path, label, theme, on_click).into_any_element()
-}
-
 /// A size-7 icon button for the main-panel header (zeron __root.tsx:
 /// `grid size-7 place-items-center rounded-md text-muted-foreground`).
 fn header_icon_button(
@@ -14477,9 +14412,7 @@ mod tests {
     #[test]
     fn narrowest_sidebar_keeps_its_options_button_beside_the_titlebar_controls() {
         for is_macos in [true, false] {
-            let cluster_end = cluster_buttons_start(is_macos, false, 0)
-                + CLUSTER_BUTTONS_WIDTH
-                + TITLEBAR_ACTION_SLOT_WIDTH;
+            let cluster_end = cluster_buttons_start(is_macos, false, 0) + CLUSTER_BUTTONS_WIDTH;
             let options_right = cluster_end + TITLEBAR_GROUP_GAP + 24.0;
             assert!(
                 options_right + Theme::SPACE_SM <= SIDEBAR_MIN,
@@ -14902,22 +14835,6 @@ mod tests {
     }
 
     #[test]
-    fn new_session_action_lives_in_the_titlebar_only_when_useful() {
-        assert_eq!(titlebar_new_session_alpha(&Route::Chat, true), 1.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::Chat, false), 0.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, false), 1.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, true), 1.0);
-        assert_eq!(
-            titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), true),
-            0.0
-        );
-        assert_eq!(
-            titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), false),
-            0.0
-        );
-    }
-
-    #[test]
     fn composer_width_shares_the_maximum_only_in_established_threads() {
         for (setting, outer) in [(560.0, 592.0), (736.0, 768.0), (1200.0, 1232.0)] {
             assert_eq!(composer_target_width(1600.0, setting, true), outer);
@@ -15334,11 +15251,11 @@ mod tests {
         // when fullscreen hides them.
         assert_eq!(titlebar_cluster_start(false), 88.0);
         assert_eq!(titlebar_cluster_start(true), 12.0);
-        assert_eq!(TITLEBAR_CONTROL_GAP, 2.0);
         assert_eq!(TITLEBAR_GROUP_GAP, Theme::SPACE_SM);
         assert_eq!(TITLEBAR_IDENTITY_GAP, Theme::SPACE_MD);
-        assert_eq!(CLUSTER_BUTTONS_WIDTH, 82.0);
-        assert_eq!(TITLEBAR_ACTION_SLOT_WIDTH, 32.0);
+        // The cluster is the sidebar toggle alone: no history arrows, no
+        // left `+` (user request).
+        assert_eq!(CLUSTER_BUTTONS_WIDTH, 24.0);
         assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 6.0);
     }
 
@@ -15390,12 +15307,12 @@ mod tests {
 
     #[test]
     fn cluster_clearance_clears_the_overlay_buttons() {
-        // Linux: buttons at 10..92; a 16px-padded header needs 84 more px to
-        // put content at 92 + 8 breathing room.
-        assert_eq!(cluster_clearance(false, false, 0, 16.0), 84.0);
-        assert_eq!(cluster_clearance(false, false, 0, 10.0), 90.0);
+        // Linux: the sidebar toggle at 10..34; a 16px-padded header needs 26
+        // more px to put content at 34 + 8 breathing room.
+        assert_eq!(cluster_clearance(false, false, 0, 16.0), 26.0);
+        assert_eq!(cluster_clearance(false, false, 0, 10.0), 32.0);
         // Linux with a left-side close caption: everything shifts one slot.
-        assert_eq!(cluster_clearance(false, false, 1, 16.0), 84.0 + 26.0);
+        assert_eq!(cluster_clearance(false, false, 1, 16.0), 26.0 + 26.0);
         // macOS: buttons start at the 88px traffic-light cluster start.
         assert_eq!(
             cluster_clearance(true, false, 0, 16.0),
@@ -16715,11 +16632,11 @@ mod exit_regressions {
                         window.draw(cx).clear();
                     });
                     cx.run_until_parked();
-                    let new_session = cx.debug_bounds("titlebar-new-session").unwrap();
+                    let cluster = cx.debug_bounds("toggle-sidebar").unwrap();
                     let title = cx.debug_bounds("pr-detail-title").unwrap();
                     assert!(
-                        title.left() >= new_session.right() + px(8.0),
-                        "PR header overlaps New session: width={width}, collapsed={collapsed}, fullscreen={fullscreen}, title={title:?}, new_session={new_session:?}"
+                        title.left() >= cluster.right() + px(8.0),
+                        "PR header overlaps the sidebar toggle: width={width}, collapsed={collapsed}, fullscreen={fullscreen}, title={title:?}, cluster={cluster:?}"
                     );
                     let external = cx.debug_bounds("pr-external").unwrap();
                     assert!(external.right() <= px(width));

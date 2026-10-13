@@ -2518,6 +2518,12 @@ impl ComposerInput {
         self.content_height
     }
 
+    /// The text viewport's window bounds from the last prepaint.
+    #[cfg(test)]
+    pub(crate) fn painted_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.last_bounds
+    }
+
     pub fn set_placeholder(
         &mut self,
         placeholder: impl Into<SharedString>,

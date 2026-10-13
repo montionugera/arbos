@@ -21,9 +21,8 @@ name: Release main
 #
 # ── safe to re-run ───────────────────────────────────────────────────────────
 # Re-running publishes the same version and build again: the manifest is
-# rewritten, the assets are uploaded with --clobber, and the rolling release
-# is created only if it is missing. Running it twice leaves exactly what
-# running it once leaves.
+# rewritten and a fresh `edge` release replaces the one that is there. Running
+# it twice leaves exactly what running it once leaves, with a newer date.
 #
 # ── one writer ───────────────────────────────────────────────────────────────
 # This is the only workflow that touches the `edge` release. Several commits
@@ -61,9 +60,17 @@ name: Release main
 #                                                      key, for notarization
 #
 # Everything hangs off one rolling pre-release tagged `edge`. The tag is a
-# container, not a version: it is made once and never moved, and what changes
-# is the assets on it. That is what keeps the manifest URL constant, so a
-# shipped app never has to be told where to look next.
+# container, not a version, and the name is the only constant: on every
+# publish the release is rebuilt from nothing and the tag is moved to the
+# commit that was built, so the date on the releases page is the date of this
+# build and not the day the tag was first made. The asset names and the
+# download URLs (`releases/download/edge/...`) do not change, so a shipped app
+# never has to be told where to look next.
+#
+# The swap is staged so the channel is never left empty by a bad run: the
+# payloads go onto an invisible draft first, and only once every byte is up is
+# the old release taken down and the draft published as `edge`. A failed
+# upload leaves the old release exactly as it was.
 
 on:
   workflow_run:
@@ -241,6 +248,11 @@ jobs:
       SHORT: ${{ needs.plan.outputs.short }}
       SIGNING: ${{ needs.macos.outputs.signing }}
       NOTARIZED: ${{ needs.macos.outputs.notarized }}
+      REPO: ${{ github.repository }}
+      # Where the new release is assembled before it becomes `edge`. A draft
+      # never creates a tag and is invisible to anyone without write access,
+      # so this name is never fetched by anything.
+      STAGING: edge-staging
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -262,20 +274,10 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: The rolling pre-release the channel hangs off
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --prerelease \
-              --target "$SHA" \
-              --title "Arbos edge" \
-              --notes "The first build is on its way."
-          fi
       # What is on the release now, for the log and for a warning if this run
-      # would publish something older than it.
+      # would publish something older than it. On the first run, or after a
+      # publish that was interrupted between taking down and putting up, there
+      # is no release yet and that is fine.
       - name: The manifest already published
         env:
           GH_TOKEN: ${{ github.token }}
@@ -327,49 +329,79 @@ jobs:
             echo "::error title=Signing key mismatch::The manifest signed with ARBOS_UPDATE_SIGNING_KEY does not verify against app/crates/update/update-key.pub. The secret and the committed public key are not two halves of one key; nothing was published."
             exit 1
           fi
-      - name: Attach
+      # The new release starts life as a draft under the staging name, and
+      # the payloads go onto it while the old `edge` release is still serving.
+      # A draft left behind by an earlier run that died mid-upload is swept
+      # first, so they do not pile up unseen.
+      - name: Stage the new release as a draft
         working-directory: dist
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "$TAG" ./*.tar.gz manifest.json latest.txt --clobber
-          # Drop the payloads the manifest no longer names, so the pre-release
-          # does not grow a payload per commit forever. The two documents the
-          # app reads are never pruned.
-          keep="$(jq -r '.files | keys[]' manifest.json)"
-          gh release view "$TAG" --json assets -q '.assets[].name' | while read -r name; do
-            case "$name" in
-              manifest.json|latest.txt) continue ;;
-            esac
-            if ! printf '%s\n' "$keep" | grep -qxF "$name"; then
-              echo "pruning $name"
-              gh release delete-asset "$TAG" "$name" -y
-            fi
+          gh api --paginate "repos/$REPO/releases?per_page=100" \
+            --jq ".[] | select(.draft and .tag_name == \"$STAGING\") | .id" |
+          while read -r id; do
+            echo "removing a leftover draft ($id)"
+            gh api -X DELETE "repos/$REPO/releases/$id"
           done
-      - name: Say what went out
+          gh api -X POST "repos/$REPO/releases" \
+            -f tag_name="$STAGING" \
+            -f target_commitish="$SHA" \
+            -f name="Arbos edge" \
+            -f body="Staging $VERSION." \
+            -F draft=true \
+            -F prerelease=true \
+            --jq '"draft " + (.id | tostring) + " created"'
+          gh release upload "$STAGING" ./*.tar.gz manifest.json latest.txt
+          # The same asset names the old release had: the two documents the
+          # app reads and the two payloads the manifest names and signs.
+          gh release view "$STAGING" --json assets -q '.assets[].name' | sort
+      # The swap. Everything is up, so the old release goes, its tag goes with
+      # it, and the draft becomes `edge` at the commit that was built — which
+      # creates the tag there. The channel is dark for the second between.
+      - name: Publish it as edge
         env:
           GH_TOKEN: ${{ github.token }}
           NOTES: ${{ needs.plan.outputs.notes }}
         run: |
           set -euo pipefail
-          commit_url="https://github.com/${{ github.repository }}/commit/$SHA"
-          manifest_url="https://github.com/${{ github.repository }}/releases/download/$TAG/manifest.json"
-          # The page says what the newest build is, so the releases list reads
-          # as a release and not as a bucket.
+          published="$(date -u +'%Y-%m-%d %H:%M UTC')"
+          commit_url="https://github.com/$REPO/commit/$SHA"
+          manifest_url="https://github.com/$REPO/releases/download/$TAG/manifest.json"
+          # The page says what the newest build is and when, so the releases
+          # list reads as a release and not as a bucket.
           {
-            printf '**%s** — [`%s`](%s)\n\n' "$VERSION" "$SHORT" "$commit_url"
+            printf '**%s** — built from [`%s`](%s), published %s.\n\n' "$VERSION" "$SHORT" "$commit_url" "$published"
             printf '%s\n\n' "$NOTES"
-            printf 'Every green commit on `main`, published for the Arbos app'"'"'s own updater. The tag is a container, not a version: what changes is the assets on it.\n\n'
+            printf 'Every green commit on `main`, published for the Arbos app'"'"'s own updater. The release is rebuilt on each publish and the tag moves to the commit that was built; the download URLs do not change.\n\n'
             printf 'macOS signature: `%s`. Notarized: `%s`.\n\n' "${SIGNING:-unknown}" "${NOTARIZED:-false}"
             printf 'Manifest: <%s>\n' "$manifest_url"
           } > release-notes.md
-          gh release edit "$TAG" --prerelease --title "Arbos edge" --notes-file release-notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes --cleanup-tag
+          else
+            echo "no $TAG release to replace"
+          fi
+          # The tag can outlive its release — a hand-made tag, or a run that
+          # stopped right here — and publishing onto an existing tag would
+          # leave it where it is instead of moving it to this commit.
+          if gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            gh api -X DELETE "repos/$REPO/git/refs/tags/$TAG"
+          fi
+          gh release edit "$STAGING" \
+            --tag "$TAG" \
+            --target "$SHA" \
+            --draft=false \
+            --prerelease \
+            --title "Arbos edge" \
+            --notes-file release-notes.md
           rm -f release-notes.md
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease,targetCommitish,publishedAt
           {
             echo "### Release main"
             echo
-            echo "Published \`$VERSION\` (\`$SHORT\`)."
+            echo "Published \`$VERSION\` (\`$SHORT\`) at $published."
             echo
             echo "| | |"
             echo "| --- | --- |"
