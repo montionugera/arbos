@@ -99,6 +99,31 @@ pub(crate) fn xai_tool_name(update: &Value) -> Option<&str> {
     update.get("_meta")?.get("x.ai/tool")?.get("name")?.as_str()
 }
 
+/// The tool's own name on a `tool_call` (fx writes `name` beside `title`;
+/// plain ACP has no such field). The title is a display label ("Reading",
+/// "Searching capabilities") and must not stand in for the tool's identity.
+fn wire_tool_name(update: &Value) -> Option<&str> {
+    update
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
+/// Name for a call no typed arm claims: the tool's wire name, with the
+/// display label after it when the label says more ("read_tool_result:
+/// Reading"), the same `genus: detail` shape as "Agent: …" and "Task: …".
+/// Without a wire name the label alone (or the ACP kind) is all there is.
+fn unknown_tool_name(update: &Value, kind: &str, title: String) -> String {
+    let label = title.trim();
+    match wire_tool_name(update) {
+        Some(name) if label.is_empty() || label == name => name.to_owned(),
+        Some(name) => format!("{name}: {label}"),
+        None if title.is_empty() => kind.to_owned(),
+        None => title,
+    }
+}
+
 /// First location path (`locations: [{path, line?}]`), for read/edit calls.
 fn first_location(update: &Value) -> Option<String> {
     let path = update.get("locations")?.as_array()?.first()?.get("path")?;
@@ -339,7 +364,7 @@ fn typed_call(update: &Value) -> ToolCall {
             input: raw.cloned(),
         },
         _ => ToolCall::Unknown {
-            name: if title.is_empty() { kind.into() } else { title },
+            name: unknown_tool_name(update, kind, title),
             input: raw.cloned(),
         },
     }
@@ -1172,6 +1197,123 @@ mod tests {
                 AgentEvent::ToolCall { call: ToolCall::Unknown { name, .. }, .. },
                 AgentEvent::ToolResult { is_error: false, .. },
             ] if name == "Agent: Viz probe"
+        ));
+    }
+
+    /// fx refuses a call before it runs (invalid JSON arguments, an unknown
+    /// tool) with the frames `recordToolCallRejected` writes: a pending
+    /// `tool_call` carrying `name` beside a display `title`, then a failed
+    /// update whose content is the reason. The call must keep its tool name
+    /// — "Reading" is a label, not an identity — and the reason must reach
+    /// the result, so the journal says which tool failed and why.
+    #[test]
+    fn fx_refused_call_keeps_its_tool_name_and_failure_reason() {
+        let pending = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_7",
+            "name": "read_tool_result",
+            "title": "Reading",
+            "kind": "other",
+            "status": "pending",
+            "_meta": { "fx": { "toolCall": { "internal": false } } },
+        });
+        assert_eq!(
+            map_update(&pending),
+            vec![AgentEvent::ToolCall {
+                id: "call_7".into(),
+                call: ToolCall::Unknown {
+                    name: "read_tool_result: Reading".into(),
+                    input: None,
+                },
+            }]
+        );
+        let reason = "{\"error\":{\"type\":\"tool_execution_failed\",\"tool_name\":\"read_tool_result\",\"message\":\"Tool arguments were not valid JSON.\"}}";
+        let failed = json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call_7",
+            "status": "failed",
+            "content": [
+                { "type": "content", "content": { "type": "text", "text": reason } },
+            ],
+        });
+        // No kind/title/rawInput: the failed update resolves the call
+        // without re-typing it, so the name above stands in the journal.
+        assert_eq!(
+            map_update(&failed),
+            vec![AgentEvent::ToolResult {
+                id: "call_7".into(),
+                is_error: true,
+                output: Some(reason.into()),
+                diff: None,
+            }]
+        );
+
+        let search = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_8",
+            "name": "capability_search",
+            "title": "Searching capabilities",
+            "kind": "other",
+            "status": "pending",
+            "rawInput": { "query": "journal" },
+            "_meta": { "fx": { "toolCall": { "internal": false } } },
+        });
+        assert!(matches!(
+            map_update(&search).as_slice(),
+            [AgentEvent::ToolCall { call: ToolCall::Unknown { name, input: Some(_) }, .. }]
+                if name == "capability_search: Searching capabilities"
+        ));
+    }
+
+    /// The label is appended only when it adds something: a title that
+    /// repeats the name, or no title at all, leaves the bare name. Agents
+    /// that send no `name` keep the old title-or-kind naming.
+    #[test]
+    fn fx_tool_name_stands_alone_without_a_distinct_title() {
+        let same = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "t1",
+            "name": "mcp_arbos_agents_send",
+            "title": "mcp_arbos_agents_send",
+            "kind": "other",
+        });
+        assert!(matches!(
+            map_update(&same).as_slice(),
+            [AgentEvent::ToolCall { call: ToolCall::Unknown { name, .. }, .. }]
+                if name == "mcp_arbos_agents_send"
+        ));
+        let untitled = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "t2",
+            "name": "skill",
+            "title": "  ",
+            "kind": "other",
+        });
+        assert!(matches!(
+            map_update(&untitled).as_slice(),
+            [AgentEvent::ToolCall { call: ToolCall::Unknown { name, .. }, .. }]
+                if name == "skill"
+        ));
+        let nameless = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "t3",
+            "title": "Thinking hard",
+            "kind": "think",
+        });
+        assert!(matches!(
+            map_update(&nameless).as_slice(),
+            [AgentEvent::ToolCall { call: ToolCall::Unknown { name, .. }, .. }]
+                if name == "Thinking hard"
+        ));
+        let bare_kind = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "t4",
+            "kind": "think",
+        });
+        assert!(matches!(
+            map_update(&bare_kind).as_slice(),
+            [AgentEvent::ToolCall { call: ToolCall::Unknown { name, .. }, .. }]
+                if name == "think"
         ));
     }
 }
