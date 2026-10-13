@@ -427,7 +427,8 @@ pub fn project_id(project: &Path) -> Option<String> {
     read_project(project).map(|file| file.id)
 }
 
-/// The icon string stored in `project.toml`: `emoji:…`, `image:…`, or `repo`.
+/// The icon string stored in `project.toml`: `glyph:<name>:<color>`,
+/// `emoji:…`, `image:…`, or `repo`. A folder without a layout reads `repo`.
 pub fn icon_of(project: &Path) -> String {
     read_project(project)
         .map(|file| file.icon)
@@ -438,8 +439,9 @@ pub fn project_name(project: &Path) -> Option<String> {
     read_project(project).map(|file| file.name)
 }
 
-/// Set the rail icon. `emoji:` takes the glyph, `image:` takes a file on
-/// disk, and `repo` uses the repository's own icon.
+/// Set the rail icon. `glyph:` names a built-in symbol and its color,
+/// `emoji:` takes the glyph, `image:` takes a file on disk, and `repo` uses
+/// the repository's own icon.
 pub fn set_icon(project: &Path, icon: &str) -> Result<(), String> {
     let _guard = layout_lock();
     let icon = normalize_icon(icon)?;
@@ -2209,7 +2211,24 @@ fn normalize_icon(icon: &str) -> Result<String, String> {
         }
         return Ok(format!("image:{}", path.display()));
     }
-    Err("icon must be an emoji, an image file, or the repo icon".into())
+    if let Some(rest) = icon.strip_prefix("glyph:") {
+        // `glyph:<name>:<color>` — a built-in symbol in a palette color. The
+        // app owns both sets; here only the shape of the value is checked.
+        let token_ok = |token: &str| {
+            !token.is_empty()
+                && token
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        };
+        if let Some((glyph, color)) = rest.split_once(':')
+            && token_ok(glyph)
+            && token_ok(color)
+        {
+            return Ok(format!("glyph:{glyph}:{color}"));
+        }
+        return Err("pick a glyph and a color".into());
+    }
+    Err("icon must be a glyph, an emoji, an image file, or the repo icon".into())
 }
 
 fn context_file(project: &Path, relative: &str) -> Result<PathBuf, String> {

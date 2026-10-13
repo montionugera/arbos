@@ -8,15 +8,16 @@ use std::time::Duration;
 use gpui::{
     div, prelude::*, px, Animation, AnimationExt, AnyElement, ClickEvent, Context, Entity,
     Focusable, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Task, Window,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window,
 };
 
-use crate::composer::ComposerInput;
+use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::image_media::{decode_project_icon, MediaImage};
 use crate::theme::Theme;
 use zeron_engine::arbos_layout::status_is_live;
 
 use super::listening_pill::{listening_rows, ListeningRow};
+use super::project_glyph::{color_tone, glyph_tile, ProjectIcon, COLORS, GLYPHS};
 use super::{ChatRenameSurface, Shell};
 
 pub(super) const RAIL_WIDTH: f32 = 88.0;
@@ -44,6 +45,8 @@ pub(super) enum Surface {
 pub(super) struct ProjectChrome {
     pub surface: Surface,
     pub icon_for: Option<String>,
+    /// Where the icon menu was opened from; `None` anchors it to the rail.
+    icon_menu_at: Option<gpui::Point<gpui::Pixels>>,
     pub context_relative: Option<String>,
     editor: Option<Entity<ComposerInput>>,
     emoji_input: Option<Entity<ComposerInput>>,
@@ -82,6 +85,17 @@ pub(super) struct ProjectChrome {
     /// The chat whose tab was last scrolled into view, so a selection change
     /// scrolls once and the person can then scroll freely.
     tab_revealed: Option<String>,
+    /// The project whose name is being edited on its rail button.
+    pub(super) rename: Option<ProjectRename>,
+}
+
+/// An inline rename on a rail button: the field that replaced the label.
+pub(super) struct ProjectRename {
+    pub(super) space_id: String,
+    pub(super) input: Entity<ComposerInput>,
+    focus_pending: bool,
+    _events: Subscription,
+    _blur: Option<Subscription>,
 }
 
 impl Default for ProjectChrome {
@@ -89,6 +103,7 @@ impl Default for ProjectChrome {
         Self {
             surface: Surface::Chat,
             icon_for: None,
+            icon_menu_at: None,
             context_relative: None,
             editor: None,
             emoji_input: None,
@@ -113,6 +128,7 @@ impl Default for ProjectChrome {
             icon_loading: HashSet::new(),
             tab_scroll: ScrollHandle::new(),
             tab_revealed: None,
+            rename: None,
         }
     }
 }
@@ -120,8 +136,29 @@ impl Default for ProjectChrome {
 pub(super) struct ProjectRow {
     pub(super) id: String,
     pub(super) path: String,
-    name: String,
+    pub(super) name: String,
     home: String,
+    /// The icon value stored with the project; empty when none was chosen.
+    stored_icon: String,
+}
+
+impl ProjectRow {
+    fn from_space(space: &zeron_proto::Space) -> Self {
+        let path = Path::new(&space.path);
+        Self {
+            id: space.id.clone(),
+            path: space.path.clone(),
+            name: space.display_name().to_owned(),
+            home: zeron_engine::arbos_layout::home_of(path),
+            stored_icon: zeron_engine::arbos_layout::icon_of(path),
+        }
+    }
+
+    /// The project's icon. Every project has one: the stored choice, else
+    /// a glyph and color derived from its id.
+    pub(super) fn icon(&self) -> ProjectIcon {
+        ProjectIcon::parse(&self.stored_icon, &self.id)
+    }
 }
 
 pub(super) struct ChatTab {
@@ -272,6 +309,8 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The rail button's context menu: rename, the glyph grid, the color
+    /// row, then an emoji, an image file, or the repository's own artwork.
     pub(super) fn render_icon_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let space_id = self.project.icon_for.clone()?;
         let project = self
@@ -281,98 +320,162 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let emoji = self.project.emoji_input.clone()?;
         let image = self.project.image_input.clone()?;
+        let icon = project.icon();
+        let (current_glyph, current_color) = icon.glyph_and_color(&project.id);
         let path = project.path.clone();
-        let path_emoji = path.clone();
-        let path_image = path.clone();
-        let path_repo = path.clone();
-        Some(
-            div()
-                .absolute()
-                .left(px(RAIL_WIDTH + 8.0))
-                .top(px(Theme::TITLEBAR_HEIGHT + 8.0))
-                .w(px(240.0))
-                .p(px(10.0))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.surface_raised)
-                .child(menu_label("Icon", &theme))
-                .child(emoji)
-                .child(
-                    div()
-                        .id("icon-menu-emoji")
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .text_size(px(12.0))
-                        .text_color(theme.text)
-                        .bg(theme.element_hover)
-                        .child("Use emoji")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let glyph = this
-                                .project
-                                .emoji_input
-                                .as_ref()
-                                .map(|input| input.read(cx).text().trim().to_owned())
-                                .unwrap_or_default();
-                            if !glyph.is_empty() {
-                                this.set_project_icon(
-                                    path_emoji.clone(),
-                                    format!("emoji:{glyph}"),
-                                    cx,
-                                );
-                            }
-                        })),
-                )
-                .child(image)
-                .child(
-                    div()
-                        .id("icon-menu-image")
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .text_size(px(12.0))
-                        .text_color(theme.text)
-                        .bg(theme.element_hover)
-                        .child("Use image file")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let file = this
-                                .project
-                                .image_input
-                                .as_ref()
-                                .map(|input| input.read(cx).text().trim().to_owned())
-                                .unwrap_or_default();
-                            if !file.is_empty() {
-                                this.set_project_icon(
-                                    path_image.clone(),
-                                    format!("image:{file}"),
-                                    cx,
-                                );
-                            }
-                        })),
-                )
-                .child(
-                    div()
-                        .id("icon-menu-repo")
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .text_size(px(12.0))
-                        .text_color(theme.text)
-                        .bg(theme.element_hover)
-                        .child("Use repo icon")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_project_icon(path_repo.clone(), "repo".into(), cx);
-                        })),
-                )
-                .into_any_element(),
-        )
+        let rename_id = project.id.clone();
+
+        let mut glyphs = div().flex().flex_row().flex_wrap().gap(px(6.0));
+        for (glyph, _) in GLYPHS {
+            let chosen = matches!(icon, ProjectIcon::Glyph { .. }) && glyph == current_glyph;
+            let path = path.clone();
+            glyphs = glyphs.child(
+                div()
+                    .id(SharedString::from(format!("icon-menu-glyph-{glyph}")))
+                    .debug_selector(move || format!("icon-menu-glyph-{glyph}"))
+                    .p(px(2.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(if chosen {
+                        theme.accent
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.element_hover))
+                    .child(glyph_tile(glyph, current_color, 24.0, &theme))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let stored = ProjectIcon::Glyph {
+                            glyph,
+                            color: current_color,
+                        }
+                        .stored();
+                        this.set_project_icon(path.clone(), stored, cx);
+                    })),
+            );
+        }
+        let mut colors = div().flex().flex_row().flex_wrap().gap(px(6.0));
+        for (color, ..) in COLORS {
+            let chosen = color == current_color;
+            let path = path.clone();
+            let tone = color_tone(color, &theme);
+            colors = colors.child(
+                div()
+                    .id(SharedString::from(format!("icon-menu-color-{color}")))
+                    .debug_selector(move || format!("icon-menu-color-{color}"))
+                    .size(px(22.0))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(if chosen {
+                        theme.text
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .p(px(2.0))
+                    .cursor_pointer()
+                    .child(div().size_full().rounded_full().bg(tone))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let stored = ProjectIcon::Glyph {
+                            glyph: current_glyph,
+                            color,
+                        }
+                        .stored();
+                        this.set_project_icon(path.clone(), stored, cx);
+                    })),
+            );
+        }
+
+        let position = self.project.icon_menu_at;
+        let card = div()
+            .id("project-icon-menu")
+            .debug_selector(|| "project-icon-menu".into())
+            .absolute()
+            .map(|card| match position {
+                Some(point) => card.left(point.x + px(4.0)).top(point.y + px(4.0)),
+                None => card
+                    .left(px(RAIL_WIDTH + 8.0))
+                    .top(px(Theme::TITLEBAR_HEIGHT + 8.0)),
+            })
+            .w(px(240.0))
+            .p(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .shadow_md()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.project.icon_for = None;
+                cx.notify();
+            }))
+            .child(
+                menu_action("icon-menu-rename", "Rename", &theme).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.project.icon_for = None;
+                        this.open_rename_project(rename_id.clone(), cx);
+                    },
+                )),
+            )
+            .child(menu_label("Icon", &theme))
+            .child(glyphs)
+            .child(menu_label("Color", &theme))
+            .child(colors)
+            .child(div().h(px(1.0)).w_full().bg(theme.border))
+            .child(emoji)
+            .child(
+                menu_action("icon-menu-emoji", "Use emoji", &theme).on_click(cx.listener({
+                    let path = path.clone();
+                    move |this, _, _, cx| {
+                        let glyph = this
+                            .project
+                            .emoji_input
+                            .as_ref()
+                            .map(|input| input.read(cx).text().trim().to_owned())
+                            .unwrap_or_default();
+                        if !glyph.is_empty() {
+                            this.project.icon_for = None;
+                            this.set_project_icon(
+                                path.clone(),
+                                ProjectIcon::Emoji(glyph).stored(),
+                                cx,
+                            );
+                        }
+                    }
+                })),
+            )
+            .child(image)
+            .child(
+                menu_action("icon-menu-image", "Use image file", &theme).on_click(cx.listener({
+                    let path = path.clone();
+                    move |this, _, _, cx| {
+                        let file = this
+                            .project
+                            .image_input
+                            .as_ref()
+                            .map(|input| input.read(cx).text().trim().to_owned())
+                            .unwrap_or_default();
+                        if !file.is_empty() {
+                            this.project.icon_for = None;
+                            this.set_project_icon(
+                                path.clone(),
+                                ProjectIcon::Image(file).stored(),
+                                cx,
+                            );
+                        }
+                    }
+                })),
+            )
+            .child(
+                menu_action("icon-menu-repo", "Use repo icon", &theme).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.project.icon_for = None;
+                        this.set_project_icon(path.clone(), ProjectIcon::Repo.stored(), cx);
+                    },
+                )),
+            );
+        Some(card.into_any_element())
     }
 
     pub(super) fn render_project_checklist(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1012,6 +1115,21 @@ impl Shell {
     }
 
     pub(super) fn open_icon_menu(&mut self, space_id: String, cx: &mut Context<Self>) {
+        self.open_icon_menu_at(space_id, None, cx);
+    }
+
+    /// Open the icon menu beside the pointer, or at the rail's top when
+    /// there is no pointer position (the debug entry).
+    pub(super) fn open_icon_menu_at(
+        &mut self,
+        space_id: String,
+        position: Option<gpui::Point<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project.rename.is_some() {
+            self.finish_rename_project(true, cx);
+        }
+        self.project.icon_menu_at = position;
         if self.project.emoji_input.is_none() {
             self.project.emoji_input =
                 Some(cx.new(|cx| ComposerInput::with_context("Emoji", "ProjectIcon", cx)));
@@ -1025,10 +1143,11 @@ impl Shell {
         cx.notify();
     }
 
+    /// Store `icon` with the project. The menu stays open so a glyph and a
+    /// color can be picked one after the other.
     fn set_project_icon(&mut self, path: String, icon: String, cx: &mut Context<Self>) {
         self.project.icons.clear();
         self.project.icon_loading.clear();
-        self.project.icon_for = None;
         self.mutate(
             serde_json::json!({
                 "op": "setProjectIcon",
@@ -1177,17 +1296,12 @@ impl Shell {
         listening_rows(subscriptions, agents, &since)
     }
 
-    fn project_rows(&self, cx: &gpui::App) -> Vec<ProjectRow> {
+    pub(super) fn project_rows(&self, cx: &gpui::App) -> Vec<ProjectRow> {
         self.state
             .read(cx)
             .spaces
             .iter()
-            .map(|space| ProjectRow {
-                id: space.id.clone(),
-                path: space.path.clone(),
-                name: space.display_name().to_owned(),
-                home: zeron_engine::arbos_layout::home_of(Path::new(&space.path)),
-            })
+            .map(ProjectRow::from_space)
             .collect()
     }
 
@@ -1198,12 +1312,7 @@ impl Shell {
             .as_ref()
             .and_then(|id| state.spaces.iter().find(|space| &space.id == id))
             .or_else(|| state.spaces.first())?;
-        Some(ProjectRow {
-            id: space.id.clone(),
-            path: space.path.clone(),
-            name: space.display_name().to_owned(),
-            home: zeron_engine::arbos_layout::home_of(Path::new(&space.path)),
-        })
+        Some(ProjectRow::from_space(space))
     }
 
     pub(super) fn chat_tabs(&self, space_id: &str, cx: &gpui::App) -> Vec<ChatTab> {
@@ -1292,8 +1401,31 @@ impl Shell {
         let icon = self.rail_icon(row, cx);
         let unread =
             self.project.unread && self.project.watched.as_deref() == Some(row.path.as_str());
+        let rename = self
+            .project
+            .rename
+            .as_ref()
+            .filter(|rename| rename.space_id == row.id)
+            .map(|rename| rename.input.clone());
+        let label = match rename {
+            Some(input) => crate::shell::chat_title_editor(
+                SharedString::from(format!("project-rail-editor-{}", row.id)),
+                input,
+                theme,
+            ),
+            None => div()
+                .debug_selector(|| format!("project-rail-name-{}", row.id))
+                .max_w(px(76.0))
+                .overflow_hidden()
+                .text_size(px(11.0))
+                .line_height(px(13.0))
+                .text_color(if active { theme.text } else { theme.text_muted })
+                .child(row.name.clone())
+                .into_any_element(),
+        };
         div()
             .id(SharedString::from(format!("project-rail-{}", row.id)))
+            .debug_selector(|| format!("project-rail-{}", row.id))
             .w(px(80.0))
             .py(px(4.0))
             .rounded(px(8.0))
@@ -1326,22 +1458,20 @@ impl Shell {
                     )
                 }),
             )
-            .child(
-                div()
-                    .max_w(px(76.0))
-                    .overflow_hidden()
-                    .text_size(px(11.0))
-                    .line_height(px(13.0))
-                    .text_color(if active { theme.text } else { theme.text_muted })
-                    .child(row.name.clone()),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .child(div().w(px(76.0)).flex().justify_center().child(label))
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                // The first click of a double-click opens the project; the
+                // second turns its name into a field.
+                if event.click_count() == 2 {
+                    this.open_rename_project(space_id.clone(), cx);
+                    return;
+                }
                 this.open_project(&space_id, cx);
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                    this.open_icon_menu(menu_id.clone(), cx);
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.open_icon_menu_at(menu_id.clone(), Some(event.position), cx);
                 }),
             )
             .into_any_element()
@@ -1351,30 +1481,126 @@ impl Shell {
         self.project_icon(row, 22.0, cx)
     }
 
-    /// The project's icon at `size` px: its emoji, its image (the repo's
-    /// own or a chosen file) once loaded, else the first letter of its name.
-    /// The rail and the Main tab share this, so both show the same art.
-    fn project_icon(&mut self, row: &ProjectRow, size: f32, cx: &mut Context<Self>) -> AnyElement {
-        let icon = zeron_engine::arbos_layout::icon_of(Path::new(&row.path));
-        if let Some(emoji) = icon.strip_prefix("emoji:") {
-            return div()
+    /// The project's icon at `size` px — the same art wherever the project
+    /// is named: its glyph tile, its emoji, or its image (the repo's own or
+    /// a chosen file) once loaded. Until an image loads, and when there is
+    /// none to load, the project's default glyph tile stands in, so a
+    /// project never shows without an icon.
+    pub(super) fn project_icon(
+        &mut self,
+        row: &ProjectRow,
+        size: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let icon = row.icon();
+        match &icon {
+            ProjectIcon::Glyph { glyph, color } => glyph_tile(glyph, color, size, &theme),
+            ProjectIcon::Emoji(emoji) => div()
                 .text_size(px(size * 16.0 / 22.0))
-                .child(emoji.to_owned())
-                .into_any_element();
+                .child(emoji.clone())
+                .into_any_element(),
+            ProjectIcon::Image(_) | ProjectIcon::Repo => {
+                let stored = icon.stored();
+                let key = format!("{}|{stored}", row.path);
+                if let Some(media) = self.project.icons.get(&key) {
+                    return gpui::img(media.image.clone())
+                        .size(px(size))
+                        .object_fit(gpui::ObjectFit::Contain)
+                        .into_any_element();
+                }
+                self.request_icon(key, row.path.clone(), stored, cx);
+                let (glyph, color) = icon.glyph_and_color(&row.id);
+                glyph_tile(glyph, color, size, &theme)
+            }
         }
-        let key = format!("{}|{icon}", row.path);
-        if let Some(media) = self.project.icons.get(&key) {
-            return gpui::img(media.image.clone())
-                .size(px(size))
-                .object_fit(gpui::ObjectFit::Contain)
-                .into_any_element();
+    }
+
+    /// Double-click on a rail button: edit the project's name where it
+    /// sits. Enter or blur saves it with the project; Escape drops the edit.
+    pub(super) fn open_rename_project(&mut self, space_id: String, cx: &mut Context<Self>) {
+        if self.project.rename.is_some() {
+            self.finish_rename_project(true, cx);
         }
-        self.request_icon(key, row.path.clone(), icon, cx);
-        let letter = row.name.chars().next().unwrap_or('?').to_string();
-        div()
-            .text_size(px((size * 12.0 / 22.0).max(10.0)))
-            .child(letter)
-            .into_any_element()
+        let Some(current) = self
+            .project_rows(cx)
+            .into_iter()
+            .find(|row| row.id == space_id)
+            .map(|row| row.name)
+        else {
+            return;
+        };
+        self.project.icon_for = None;
+        let input = cx.new(|cx| {
+            ComposerInput::new("Project name", cx)
+                .with_single_line()
+                .with_text_metrics(11.0, 13.0)
+                .with_accessibility_role(gpui::Role::TextInput)
+        });
+        input.update(cx, |input, cx| {
+            input.set_text(current, cx);
+            input.select_all_text(cx);
+        });
+        let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Submitted) {
+                this.finish_rename_project(true, cx);
+            }
+        });
+        // The first click opened the project, which queued a composer
+        // refocus; that must not take the field before it is typed in.
+        self.composer
+            .update(cx, |composer, _| composer.focus_pending = false);
+        self.project.rename = Some(ProjectRename {
+            space_id,
+            input,
+            focus_pending: true,
+            _events: events,
+            _blur: None,
+        });
+        cx.notify();
+    }
+
+    /// Focus a just-opened rename and arm its save-on-blur.
+    pub(super) fn focus_rename_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.project.rename.as_mut() else {
+            return;
+        };
+        if !std::mem::take(&mut rename.focus_pending) {
+            return;
+        }
+        let focus = rename.input.focus_handle(cx);
+        window.focus(&focus, cx);
+        rename._blur = Some(cx.on_blur(&focus, window, |this, _, cx| {
+            this.finish_rename_project(true, cx);
+        }));
+    }
+
+    /// Close the inline rename. With `commit` (Enter or blur) a changed,
+    /// non-empty name is saved with the project; Escape drops it.
+    pub(super) fn finish_rename_project(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let Some(rename) = self.project.rename.take() else {
+            return;
+        };
+        let name = rename.input.read(cx).text().trim().to_string();
+        let unchanged = self
+            .state
+            .read(cx)
+            .spaces
+            .iter()
+            .find(|space| space.id == rename.space_id)
+            .is_none_or(|space| space.display_name() == name);
+        if commit && !name.is_empty() && !unchanged {
+            self.mutate(
+                serde_json::json!({ "op": "renameSpace", "spaceId": rename.space_id, "name": name }),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Whether a rail button is being renamed.
+    pub(super) fn renaming_project(&self) -> bool {
+        self.project.rename.is_some()
     }
 
     fn request_icon(&mut self, key: String, project: String, icon: String, cx: &mut Context<Self>) {
@@ -1755,6 +1981,21 @@ fn menu_label(text: &str, theme: &Theme) -> AnyElement {
         .text_color(theme.text)
         .child(text.to_owned())
         .into_any_element()
+}
+
+/// One clickable row of the icon menu.
+fn menu_action(id: &'static str, text: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .text_size(px(12.0))
+        .text_color(theme.text)
+        .bg(theme.element_hover)
+        .child(text)
 }
 
 fn worker_context_file(project: &Path, chat_id: &str) -> Option<(String, String)> {
