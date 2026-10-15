@@ -12,6 +12,7 @@ struct HomeView: View {
     @State private var showNewChat = false
     @State private var searching = false
     @State private var query = ""
+    @State private var slowConnect = false
     @FocusState private var searchFocused: Bool
 
     private var projects: [Project] {
@@ -194,9 +195,17 @@ struct HomeView: View {
                     .foregroundStyle(theme.text)
             } else if model.link == .connecting && !model.isFixture {
                 ProgressView().tint(theme.muted)
-                Text("Loading your agents…")
+                Text(slowConnect ? "Still connecting…" : "Loading your agents…")
                     .font(.system(size: Theme.small))
                     .foregroundStyle(theme.muted)
+                if slowConnect {
+                    Button("Retry") {
+                        slowConnect = false
+                        Task { await model.refreshRegistry() }
+                    }
+                    .font(.system(size: Theme.small, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                }
             } else {
                 Text("No agents yet")
                     .font(.system(size: Theme.body, weight: .semibold))
@@ -210,6 +219,13 @@ struct HomeView: View {
         .frame(maxWidth: .infinity)
         .padding(.top, 160)
         .padding(.horizontal, 24)
+        .task(id: model.link) {
+            // "Loading your agents…" must not spin forever: after 10 s offer a retry.
+            slowConnect = false
+            guard model.link == .connecting else { return }
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            if !Task.isCancelled && model.link == .connecting { slowConnect = true }
+        }
     }
 
     // MARK: Row data
