@@ -1,0 +1,378 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A1F6426F79178DB9A90C8EA2 /* ArbosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FA6D4B127AF19E74875062 /* ArbosApp.swift */; };
+		A15DA44CF0E636E3D9860250 /* DebugHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B0A3D2AD3FE3145729342F /* DebugHooks.swift */; };
+		A1B8B46004801036DC4B4D97 /* Model.swift in Sources */ = {isa = PBXBuildFile; fileRef = A155587775513DEC1F23B656 /* Model.swift */; };
+		A1627BBC9C62B0C159B656E4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A19CCD11486CB5CFFBAC839C /* Assets.xcassets */; };
+		A1B2553F3B08E424A698DF1E /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A126D30B5C9C2AC07F0C6219 /* AppModel.swift */; };
+		A11264651E1B169D16B1114D /* ChatDoc.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1996265542C4ED02CC38120 /* ChatDoc.swift */; };
+		A1F8337A17E3652D621D25E1 /* Frame.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CDA192373B6FA79DDB37A1 /* Frame.swift */; };
+		A15CBD2513A3DFEA102E839D /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A892804BF00CAFB11A07C1 /* Keychain.swift */; };
+		A195EDF981D82D89797CAADF /* RelayAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13F46FAAEFD7122680FEBDA /* RelayAPI.swift */; };
+		A1ED1ECA03BAD316F116572E /* Room.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11BDF873D89AEB240C28AB2 /* Room.swift */; };
+		A18F59FA9AE462F8486DB31A /* ChatListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DFDB106DEC76C607F1D977 /* ChatListView.swift */; };
+		A1ED1D7F2332871010811C4F /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10D68BEDFFBE789DB809322 /* ChatView.swift */; };
+		A1F12D308A5B1CE991FB56A7 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11A236F38A876412ED7529E /* PairingView.swift */; };
+		A1C8308C610D1A8EE364BC67 /* ProjectsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A140602765C12E3B611D9ACD /* ProjectsView.swift */; };
+		A113297F2A9C3E4B738265A9 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DA7AA499A09D206795478F /* SettingsView.swift */; };
+		A11743C65532A7DD3DB13DA9 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A186CA2D73C6ABA8F66A42F3 /* Theme.swift */; };
+		A1578C1E9E55FED0F05761B7 /* Transcript.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A5ADDC945944096DDB1F56 /* Transcript.swift */; };
+		A1C2F6278D4FFE2C67A91076 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1ECE6E6AE5F254159178833 /* Loro */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A1FA6D4B127AF19E74875062 /* ArbosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArbosApp.swift; sourceTree = "<group>"; };
+		A1B0A3D2AD3FE3145729342F /* DebugHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugHooks.swift; sourceTree = "<group>"; };
+		A155587775513DEC1F23B656 /* Model.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Model.swift; sourceTree = "<group>"; };
+		A19CCD11486CB5CFFBAC839C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A126D30B5C9C2AC07F0C6219 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		A1996265542C4ED02CC38120 /* ChatDoc.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDoc.swift; sourceTree = "<group>"; };
+		A1CDA192373B6FA79DDB37A1 /* Frame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Frame.swift; sourceTree = "<group>"; };
+		A1A892804BF00CAFB11A07C1 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		A13F46FAAEFD7122680FEBDA /* RelayAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayAPI.swift; sourceTree = "<group>"; };
+		A11BDF873D89AEB240C28AB2 /* Room.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Room.swift; sourceTree = "<group>"; };
+		A1DFDB106DEC76C607F1D977 /* ChatListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListView.swift; sourceTree = "<group>"; };
+		A10D68BEDFFBE789DB809322 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		A11A236F38A876412ED7529E /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
+		A140602765C12E3B611D9ACD /* ProjectsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectsView.swift; sourceTree = "<group>"; };
+		A1DA7AA499A09D206795478F /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A186CA2D73C6ABA8F66A42F3 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		A1A5ADDC945944096DDB1F56 /* Transcript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transcript.swift; sourceTree = "<group>"; };
+		A1D1358493A4FD5407CE1D11 /* Arbos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Arbos.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A1CF5BDB0BEAFE176F962919 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1C2F6278D4FFE2C67A91076 /* Loro in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A19BA62AACF9AABB98774F6F /* <main> */ = {
+			isa = PBXGroup;
+			children = (
+				A1564A0EBD33D8D4B92AD461,
+				A1CA9DEF8434A85687602C88,
+			);
+			sourceTree = "<group>";
+		};
+		A1CA9DEF8434A85687602C88 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A1D1358493A4FD5407CE1D11,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A1564A0EBD33D8D4B92AD461 /* Arbos */ = {
+			isa = PBXGroup;
+			children = (
+				A11C48CE29E4E135EE62951B,
+				A1E07CCD2F097A63F965E3B6,
+				A1A024F06580C79B7582C380,
+				A19280D59085B3F544BB4B9A,
+				A1547B8F755AA0185CE79D46,
+				A1C0E2252AFA1180F1B1FAB8,
+			);
+			path = Arbos;
+			sourceTree = "<group>";
+		};
+		A11C48CE29E4E135EE62951B /* App */ = {
+			isa = PBXGroup;
+			children = (
+				A1FA6D4B127AF19E74875062,
+				A1B0A3D2AD3FE3145729342F,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		A1E07CCD2F097A63F965E3B6 /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				A155587775513DEC1F23B656,
+			);
+			path = Model;
+			sourceTree = "<group>";
+		};
+		A1A024F06580C79B7582C380 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				A19CCD11486CB5CFFBAC839C,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		A19280D59085B3F544BB4B9A /* Store */ = {
+			isa = PBXGroup;
+			children = (
+				A126D30B5C9C2AC07F0C6219,
+			);
+			path = Store;
+			sourceTree = "<group>";
+		};
+		A1547B8F755AA0185CE79D46 /* Sync */ = {
+			isa = PBXGroup;
+			children = (
+				A1996265542C4ED02CC38120,
+				A1CDA192373B6FA79DDB37A1,
+				A1A892804BF00CAFB11A07C1,
+				A13F46FAAEFD7122680FEBDA,
+				A11BDF873D89AEB240C28AB2,
+			);
+			path = Sync;
+			sourceTree = "<group>";
+		};
+		A1C0E2252AFA1180F1B1FAB8 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				A1DFDB106DEC76C607F1D977,
+				A10D68BEDFFBE789DB809322,
+				A11A236F38A876412ED7529E,
+				A140602765C12E3B611D9ACD,
+				A1DA7AA499A09D206795478F,
+				A186CA2D73C6ABA8F66A42F3,
+				A1A5ADDC945944096DDB1F56,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000000000000000000002 /* Arbos */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1D28A2B497FA98060CD1B56 /* Build configuration list for PBXNativeTarget "Arbos" */;
+			buildPhases = (
+				A11CDF2F71A52B082132B04D /* Sources */,
+				A1CF5BDB0BEAFE176F962919 /* Frameworks */,
+				A1C02F1309AF4906C92F1EAD /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Arbos;
+			packageProductDependencies = (
+				A1ECE6E6AE5F254159178833 /* Loro */,
+			);
+			productName = Arbos;
+			productReference = A1D1358493A4FD5407CE1D11 /* Arbos.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					A10000000000000000000002 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = A13D29D9F3A882C4202964FB /* Build configuration list for PBXProject "Arbos" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A19BA62AACF9AABB98774F6F;
+			packageReferences = (
+				A1B12C4DAB52DBC6960BE255 /* XCRemoteSwiftPackageReference "loro-swift" */,
+			);
+			productRefGroup = A1CA9DEF8434A85687602C88 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A10000000000000000000002 /* Arbos */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A1C02F1309AF4906C92F1EAD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1627BBC9C62B0C159B656E4 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A11CDF2F71A52B082132B04D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1F6426F79178DB9A90C8EA2 /* ArbosApp.swift in Sources */,
+				A15DA44CF0E636E3D9860250 /* DebugHooks.swift in Sources */,
+				A1B8B46004801036DC4B4D97 /* Model.swift in Sources */,
+				A1B2553F3B08E424A698DF1E /* AppModel.swift in Sources */,
+				A11264651E1B169D16B1114D /* ChatDoc.swift in Sources */,
+				A1F8337A17E3652D621D25E1 /* Frame.swift in Sources */,
+				A15CBD2513A3DFEA102E839D /* Keychain.swift in Sources */,
+				A195EDF981D82D89797CAADF /* RelayAPI.swift in Sources */,
+				A1ED1ECA03BAD316F116572E /* Room.swift in Sources */,
+				A18F59FA9AE462F8486DB31A /* ChatListView.swift in Sources */,
+				A1ED1D7F2332871010811C4F /* ChatView.swift in Sources */,
+				A1F12D308A5B1CE991FB56A7 /* PairingView.swift in Sources */,
+				A1C8308C610D1A8EE364BC67 /* ProjectsView.swift in Sources */,
+				A113297F2A9C3E4B738265A9 /* SettingsView.swift in Sources */,
+				A11743C65532A7DD3DB13DA9 /* Theme.swift in Sources */,
+				A1578C1E9E55FED0F05761B7 /* Transcript.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A120590E77A3901B2B27656B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		A10D52CB8E3EBD7E0D45BE89 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A137D698A43EFEC24EDED2B7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 8;
+				DEVELOPMENT_TEAM = 25SCF3Q2AK;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Arbos;
+				INFOPLIST_KEY_CFBundleIconName = AppIcon;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.unarbos.arbos.ios;
+				PRODUCT_NAME = Arbos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A118C63AD30E008CF647703A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 8;
+				DEVELOPMENT_TEAM = 25SCF3Q2AK;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Arbos;
+				INFOPLIST_KEY_CFBundleIconName = AppIcon;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.unarbos.arbos.ios;
+				PRODUCT_NAME = Arbos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A13D29D9F3A882C4202964FB /* Build configuration list for PBXProject "Arbos" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A120590E77A3901B2B27656B /* Debug */,
+				A10D52CB8E3EBD7E0D45BE89 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1D28A2B497FA98060CD1B56 /* Build configuration list for PBXNativeTarget "Arbos" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A137D698A43EFEC24EDED2B7 /* Debug */,
+				A118C63AD30E008CF647703A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A1B12C4DAB52DBC6960BE255 /* XCRemoteSwiftPackageReference "loro-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/loro-dev/loro-swift";
+			requirement = {
+				kind = exactVersion;
+				version = 1.16.2;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A1ECE6E6AE5F254159178833 /* Loro */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B12C4DAB52DBC6960BE255 /* XCRemoteSwiftPackageReference "loro-swift" */;
+			productName = Loro;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A10000000000000000000001 /* Project object */;
+}

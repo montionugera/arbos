@@ -1,0 +1,11 @@
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.p8
+*.p12
+*.mobileprovision
+fastlane/report.xml
+fastlane/test_output/
+.bundle/
+vendor/bundle/
