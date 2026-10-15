@@ -74,14 +74,22 @@ enum Effort: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-/// The user's one Daytona computer; projects are workspaces on it. Mirrored
-/// into every project doc as `status.box { state, since }`; until the relay
-/// reports it directly, the app derives it from the projects' box states.
+/// The user's one cloud computer (D70); projects are workspaces on it.
+/// Reported by `GET /machine`; the project docs mirror `status.box
+/// {state, since}` and `status.workspace {state, since}`.
 struct Machine: Equatable {
     var state: BoxState
     var since: Int64?
-    /// Human spec line, e.g. "Daytona · 4 vCPU · 8 GB"; empty when unknown.
+    /// Human spec line, e.g. "Daytona · 4 vCPU · 8 GiB · 10 GiB disk · arbos-agent-0.2.0".
     var spec: String
+    var provider: String = ""
+    var sandboxId: String?
+    var spendTodayUsd: Double = 0
+    var spendCapUsd: Double = 0
+    /// Workspace state per project id.
+    var workspaces: [Id: WorkspaceState] = [:]
+    /// False until the relay has answered `/machine` once.
+    var reported = false
 
     static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
 
@@ -95,19 +103,14 @@ struct Machine: Equatable {
         }
     }
 
-    /// Fold per-project box states into one machine state. A `waking` older
-    /// than five minutes is a wake that never finished; it counts as asleep.
-    static func aggregate(_ projects: [Project]) -> BoxState {
-        let stale = nowMs() - 5 * 60 * 1000
-        let states = projects.map { p -> BoxState in
-            if p.state == .waking, let since = p.stateSince, since > 0, since < stale { return .hibernatedLight }
-            return p.state
-        }
-        if states.contains(.error) { return .error }
-        if states.contains(.waking) { return .waking }
-        if states.contains(.awake) { return .awake }
-        if !states.isEmpty && states.allSatisfy({ $0 == .stoppedByUser }) { return .stoppedByUser }
-        return .hibernatedLight
+    static func specLine(cpu: Int?, memGib: Int?, diskGib: Int?, klass: String?, provider: String?) -> String {
+        var parts: [String] = []
+        if let provider, !provider.isEmpty { parts.append(provider.prefix(1).uppercased() + provider.dropFirst()) }
+        if let cpu { parts.append("\(cpu) vCPU") }
+        if let memGib { parts.append("\(memGib) GiB") }
+        if let diskGib { parts.append("\(diskGib) GiB disk") }
+        if let klass, !klass.isEmpty { parts.append(klass) }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -116,10 +119,11 @@ enum WorkspaceState: String, Equatable {
     case active, idle, error
     case unknown
 
+    /// D70 states: running | starting | stopped | error (older docs: active/idle).
     static func from(_ raw: String?) -> WorkspaceState {
         switch raw ?? "" {
-        case "active", "awake", "running", "busy": return .active
-        case "idle", "asleep", "sleeping", "stopped": return .idle
+        case "running", "starting", "active", "awake", "busy": return .active
+        case "stopped", "idle", "asleep", "sleeping": return .idle
         case "error", "failed": return .error
         default: return .unknown
         }

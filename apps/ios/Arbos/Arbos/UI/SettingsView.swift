@@ -38,14 +38,26 @@ struct SettingsView: View {
                     if let since = model.machine.since, since > 0 {
                         LabeledContent("Since", value: SettingsView.relative(since))
                     }
-                    LabeledContent("Spec", value: model.machine.spec.isEmpty ? "Not reported yet" : model.machine.spec)
+                    LabeledContent("Spec") {
+                        Text(model.machine.spec.isEmpty ? (model.machineError ?? "Not reported yet") : model.machine.spec)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    if model.machine.reported {
+                        LabeledContent("Spend today", value: String(format: "$%.2f of $%.0f", model.machine.spendTodayUsd, model.machine.spendCapUsd))
+                        LabeledContent("Workspaces", value: "\(model.machine.workspaces.values.filter { $0 == .active }.count) running · \(model.machine.workspaces.count) total")
+                        if let id = model.machine.sandboxId, !id.isEmpty {
+                            LabeledContent("Sandbox") {
+                                Text(id).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                            }
+                        }
+                    }
                     switch model.machine.state {
                     case .awake, .waking:
                         Button("Stop machine", role: .destructive) { model.stopMachine() }
                             .disabled(model.machineBusy)
                     case .hibernatedLight, .hibernatedDeep, .stoppedByUser, .error:
                         Button("Start machine") { model.startMachine() }
-                            .disabled(model.machineBusy || model.projects.isEmpty)
+                            .disabled(model.machineBusy)
                     }
                 } header: {
                     Text("Machine")

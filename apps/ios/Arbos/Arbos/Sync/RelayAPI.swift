@@ -184,12 +184,45 @@ final class RelayAPI {
         _ = try await json("POST", "/projects/\(projectId)/wake", body: [String: Any]())
     }
 
-    func start(projectId: Id) async throws {
-        _ = try await json("POST", "/projects/\(projectId)/start", body: [String: Any]())
+    // MARK: Machine (D70: one box per user, projects are workspaces on it)
+
+    /// `GET /machine` → the caller's one box and its workspaces.
+    func machine() async throws -> Machine {
+        guard let m = try await json("GET", "/machine") as? [String: Any] else {
+            throw RelayError(status: 0, message: "Bad /machine response")
+        }
+        let spec = m["spec"] as? [String: Any] ?? [:]
+        var workspaces: [Id: WorkspaceState] = [:]
+        for w in (m["workspaces"] as? [Any]) ?? [] {
+            if let w = w as? [String: Any], let pid = w["project_id"] as? String {
+                workspaces[pid] = WorkspaceState.from(w["state"] as? String)
+            }
+        }
+        return Machine(
+            state: BoxState.fromWire(m["state"] as? String ?? "") ?? .hibernatedLight,
+            since: (m["since"] as? NSNumber)?.int64Value,
+            spec: Machine.specLine(
+                cpu: (spec["cpu"] as? NSNumber)?.intValue,
+                memGib: (spec["mem_gib"] as? NSNumber)?.intValue,
+                diskGib: (spec["disk_gib"] as? NSNumber)?.intValue,
+                klass: spec["class"] as? String,
+                provider: m["provider"] as? String
+            ),
+            provider: m["provider"] as? String ?? "",
+            sandboxId: m["sandbox_id"] as? String,
+            spendTodayUsd: (m["spend_today_usd"] as? NSNumber)?.doubleValue ?? 0,
+            spendCapUsd: (m["spend_cap_usd"] as? NSNumber)?.doubleValue ?? 0,
+            workspaces: workspaces,
+            reported: true
+        )
     }
 
-    func stop(projectId: Id) async throws {
-        _ = try await json("POST", "/projects/\(projectId)/stop", body: [String: Any]())
+    func startMachine() async throws {
+        _ = try await json("POST", "/machine/start", body: [String: Any]())
+    }
+
+    func stopMachine() async throws {
+        _ = try await json("POST", "/machine/stop", body: [String: Any]())
     }
 
     /// Model ids the relay proxy can serve, filtered like the Mac client.

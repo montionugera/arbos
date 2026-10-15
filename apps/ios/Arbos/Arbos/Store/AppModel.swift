@@ -74,8 +74,7 @@ final class AppModel: ObservableObject {
             Task { if let c = await newChat(projectId: project.id) { open(chat: c) } }
         }
     }
-    /// `status.box.since` per project doc; the newest one is the machine's.
-    private var machineSince: [Id: Int64] = [:]
+    @Published private(set) var machineError: String?
     @Published var notice: Notice?
     @Published private(set) var pairingBusy = false
     @Published private(set) var pairingError: String?
@@ -133,12 +132,27 @@ final class AppModel: ObservableObject {
         let endpoint = RelayEndpoint(raw)
         UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
         guard endpoint != api.endpoint else { return }
+        let previous = credentials
         unpair(forget: false)
         api = RelayAPI(endpoint: endpoint) { [weak self] in self?.credentials?.deviceToken ?? "" }
         credentials = Keychain.load(relayUrl: endpoint.httpUrl)
         if credentials != nil {
             startAfterPairing()
+        } else if let previous {
+            // A quick-tunnel URL changes while the relay (and this device's
+            // token) stays the same: try the old token on the new address
+            // before asking for a pairing code.
+            Task { await adopt(previous, at: endpoint) }
         }
+    }
+
+    private func adopt(_ old: DeviceCredentials, at endpoint: RelayEndpoint) async {
+        let probe = RelayAPI(endpoint: endpoint) { old.deviceToken }
+        guard (try? await probe.registry()) != nil else { return }
+        let creds = DeviceCredentials(relayUrl: endpoint.httpUrl, deviceId: old.deviceId, deviceToken: old.deviceToken)
+        try? Keychain.store(creds)
+        credentials = creds
+        startAfterPairing()
     }
 
     func pair(code: String) {
@@ -234,7 +248,7 @@ final class AppModel: ObservableObject {
             }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
-            recomputeMachine()
+            await refreshMachine()
             for p in newProjects {
                 ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
             }
@@ -351,26 +365,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Project doc (crdt-sync §6.3): `settings.modelNote`, `status.workspace
-    /// {state}` and `status.box {state, since}` (the machine mirror). The
-    /// machine *state* still comes from the relay (registry + STATUS frames):
-    /// a dead box cannot rewrite its own stale `awake`. The doc gives `since`.
+    /// Project doc (crdt-sync §6.3): `settings.modelNote`, plus the D70
+    /// mirrors `status.workspace {state, since}` and `status.box {state, since}`.
+    /// The machine itself comes from `GET /machine`; the doc only refines the
+    /// workspace dot between polls.
     private func applyProjectDoc(_ projectId: Id) {
         guard let doc = docs[projectDocKey(projectId)] else { return }
         let settings = doc.mapValue("settings")
         let note = settings["modelNote"] as? String ?? ""
         let status = doc.mapValue("status")
         let workspace = WorkspaceState.from((status["workspace"] as? [String: Any])?["state"] as? String)
-        if let box = status["box"] as? [String: Any], let since = DocJSON.int(box["since"]) {
-            machineSince[projectId] = since
-        } else if let since = DocJSON.int(status["since"]) {
-            machineSince[projectId] = since
-        }
         if let i = projects.firstIndex(where: { $0.id == projectId }) {
             if projects[i].modelNote != note { projects[i].modelNote = note }
-            if projects[i].workspace != workspace { projects[i].workspace = workspace }
+            if workspace != .unknown, projects[i].workspace != workspace { projects[i].workspace = workspace }
         }
-        recomputeMachine()
     }
 
     private func setProjectState(_ projectId: Id, _ state: BoxState, detail: String?) {
@@ -379,56 +387,72 @@ final class AppModel: ObservableObject {
         if projects[i].state != state { projects[i].stateSince = nowMs() }
         projects[i].state = state
         projects[i].stateDetail = detail
-        recomputeMachine()
+        // Room STATUS frames report the user's box (D70): the machine moved too.
+        if machine.reported, machine.state != state, state != .error {
+            machine.state = state
+            machine.since = nowMs()
+        }
     }
 
-    /// One machine per user: fold the projects' box states until the relay
-    /// reports the machine itself.
-    private func recomputeMachine() {
-        let state = Machine.aggregate(projects)
-        let since = machineSince.values.max()
-        let spec = projects.isEmpty ? "" : "Daytona · \(projects.count) workspace\(projects.count == 1 ? "" : "s")"
-        let next = Machine(state: state, since: since, spec: spec)
-        if next != machine { machine = next }
+    /// `GET /machine`: state, since, spec, spend and the workspace states.
+    func refreshMachine() async {
+        do {
+            let m = try await api.machine()
+            machineError = nil
+            if m != machine { machine = m }
+            for i in projects.indices {
+                if let w = m.workspaces[projects[i].id], projects[i].workspace != w { projects[i].workspace = w }
+            }
+        } catch {
+            if (error as? RelayError)?.status == 404 {
+                machineError = "This relay has no machine API yet"
+            } else {
+                machineError = error.localizedDescription
+            }
+        }
     }
 
-    /// Machine-level error text (the first project that reports one).
+    /// Machine-level error text (relay error or the machine's own state detail).
     var machineDetail: String? {
-        projects.first { $0.state == .error }?.stateDetail
+        if machine.state == .error {
+            return projects.first { $0.state == .error }?.stateDetail ?? machineError
+        }
+        return nil
     }
 
-    // MARK: Machine control (per-project endpoints until the relay has a machine API)
+    // MARK: Machine control (D70: one call for the whole box)
 
     func startMachine() {
         guard !machineBusy else { return }
         machineBusy = true
-        let ids = projects.filter { $0.state.isAsleep || $0.state == .error }.map(\.id)
-        for id in ids { setProjectState(id, .waking, detail: nil) }
+        machine.state = .waking
+        machine.since = nowMs()
         Task {
             defer { machineBusy = false }
-            for id in ids {
-                do { try await api.start(projectId: id) } catch {
-                    notice = Notice(text: "Start failed: \(error.localizedDescription)")
-                    setProjectState(id, .error, detail: error.localizedDescription)
-                }
+            do {
+                try await api.startMachine()
+            } catch {
+                notice = Notice(text: "Start failed: \(error.localizedDescription)")
+                machine.state = .error
+                machineError = error.localizedDescription
             }
-            await refreshRegistry()
+            await refreshMachine()
         }
     }
 
     func stopMachine() {
         guard !machineBusy else { return }
         machineBusy = true
-        let ids = projects.filter { $0.state == .awake || $0.state == .waking }.map(\.id)
         Task {
             defer { machineBusy = false }
-            for id in ids {
-                do { try await api.stop(projectId: id) } catch {
-                    notice = Notice(text: "Stop failed: \(error.localizedDescription)")
-                }
+            do {
+                try await api.stopMachine()
+                machine.state = .stoppedByUser
+                machine.since = nowMs()
+            } catch {
+                notice = Notice(text: "Stop failed: \(error.localizedDescription)")
             }
-            for id in ids { setProjectState(id, .stoppedByUser, detail: nil) }
-            await refreshRegistry()
+            await refreshMachine()
         }
     }
 
@@ -589,14 +613,18 @@ final class AppModel: ObservableObject {
 
     func wake(projectId: Id, reason: String) {
         rooms[projectDocKey(projectId)]?.wake(reason: reason)
-        setProjectState(projectId, .waking, detail: "Waking sandbox…")
+        setProjectState(projectId, .waking, detail: nil)
+        machine.state = .waking
+        machine.since = nowMs()
         Task {
             do {
                 try await api.wake(projectId: projectId)
             } catch {
                 notice = Notice(text: "Wake failed: \(error.localizedDescription)")
                 setProjectState(projectId, .error, detail: error.localizedDescription)
+                machine.state = .error
             }
+            await refreshMachine()
         }
     }
 
