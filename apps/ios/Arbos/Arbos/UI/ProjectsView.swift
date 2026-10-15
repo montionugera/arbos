@@ -85,6 +85,7 @@ struct ProjectsView: View {
         } else {
             ScrollView {
                 LazyVStack(spacing: 8) {
+                    MachineIndicator()
                     LinkBanner()
                     ForEach(model.projects) { project in
                         NavigationLink(value: project.id) {
@@ -123,10 +124,7 @@ struct ProjectRow: View {
                     }
                 }
                 HStack(spacing: 6) {
-                    Text(stateLabel)
-                        .font(.system(size: Theme.tiny))
-                        .foregroundStyle(stateColor)
-                    Text("·").foregroundStyle(theme.textFaint)
+                    WorkspaceDot(project: project)
                     Text(project.shortModel)
                         .font(.system(size: Theme.tiny))
                         .foregroundStyle(theme.textFaint)
@@ -141,20 +139,70 @@ struct ProjectRow: View {
         .padding(12)
         .card(radius: 14)
     }
+}
 
-    private var stateLabel: String {
-        switch project.state {
-        case .awake: return "Awake"
-        case .waking: return "Waking…"
-        case .hibernatedLight, .hibernatedDeep: return "Sleeping"
-        case .stoppedByUser: return "Stopped"
-        case .error: return "Needs attention"
+/// Tiny per-project workspace dot: the workspace state when the box reports
+/// one, else the project's own box state.
+struct WorkspaceDot: View {
+    @Environment(\.theme) private var theme
+    let project: Project
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: 6, height: 6)
+            .accessibilityLabel(label)
+    }
+
+    private var color: Color {
+        switch project.workspace {
+        case .active: return theme.accent
+        case .idle: return theme.textFaint
+        case .error: return theme.danger
+        case .unknown:
+            switch project.state {
+            case .awake: return theme.accent
+            case .waking: return theme.accent.opacity(0.5)
+            case .hibernatedLight, .hibernatedDeep, .stoppedByUser: return theme.textFaint
+            case .error: return theme.danger
+            }
         }
     }
 
-    private var stateColor: Color {
-        switch project.state {
-        case .awake: return theme.textMuted
+    private var label: String {
+        switch project.workspace {
+        case .active: return "Workspace active"
+        case .idle: return "Workspace idle"
+        case .error: return "Workspace error"
+        case .unknown: return project.state == .awake ? "Workspace active" : "Workspace idle"
+        }
+    }
+}
+
+/// Header indicator on the projects screen: the one machine, one line.
+struct MachineIndicator: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if model.machine.state == .waking {
+                PulseDot(color: theme.accent)
+            } else {
+                Circle().fill(color).frame(width: 7, height: 7)
+            }
+            Text("Machine · \(model.machine.label)")
+                .font(.system(size: Theme.tiny, weight: .medium))
+                .foregroundStyle(theme.textMuted)
+            Spacer()
+        }
+        .padding(.horizontal, 4)
+        .padding(.bottom, 2)
+    }
+
+    private var color: Color {
+        switch model.machine.state {
+        case .awake: return theme.accent
         case .waking: return theme.accent
         case .hibernatedLight, .hibernatedDeep, .stoppedByUser: return theme.textFaint
         case .error: return theme.danger

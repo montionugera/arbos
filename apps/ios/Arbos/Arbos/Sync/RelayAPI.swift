@@ -130,6 +130,7 @@ final class RelayAPI {
                 icon: p["icon"] as? String ?? "Ω",
                 color: p["color"] as? String ?? "#8b7cf6",
                 state: BoxState.from(state: p["state"] as? String ?? "", box: boxField),
+                stateSince: (detail["box_since"] as? NSNumber)?.int64Value ?? (p["box_since"] as? NSNumber)?.int64Value,
                 stateDetail: nil,
                 model: talking["id"] as? String ?? "anthropic/claude-haiku-5.5",
                 effort: Effort.from(talking["effort"] as? String),
@@ -181,6 +182,14 @@ final class RelayAPI {
 
     func wake(projectId: Id) async throws {
         _ = try await json("POST", "/projects/\(projectId)/wake", body: [String: Any]())
+    }
+
+    func start(projectId: Id) async throws {
+        _ = try await json("POST", "/projects/\(projectId)/start", body: [String: Any]())
+    }
+
+    func stop(projectId: Id) async throws {
+        _ = try await json("POST", "/projects/\(projectId)/stop", body: [String: Any]())
     }
 
     /// Model ids the relay proxy can serve, filtered like the Mac client.

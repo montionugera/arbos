@@ -16,9 +16,7 @@ struct ChatListView: View {
         ZStack {
             theme.bg.ignoresSafeArea()
             VStack(spacing: 0) {
-                if let project {
-                    BoxBanner(project: project)
-                }
+                MachineBanner()
                 List {
                     ForEach(model.chats(of: projectId)) { chat in
                         Button { openChat = chat } label: {
@@ -133,31 +131,29 @@ struct ChatRow: View {
     }
 }
 
-/// S11–S13 banners under the title: sleeping, waking, stopped, wake failed.
-struct BoxBanner: View {
+/// One machine-level banner, shown only while the machine wakes or errored;
+/// "Reconnecting…" when the relay link is down. Sleeping is silent: the
+/// next message wakes the machine.
+struct MachineBanner: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    let project: Project
 
     var body: some View {
-        switch project.state {
-        case .awake:
-            LinkBanner().padding(.horizontal, 12).padding(.top, 6)
+        switch model.machine.state {
         case .waking:
-            banner(icon: nil, text: "Waking sandbox…", color: theme.accent, progress: true)
-        case .hibernatedLight, .hibernatedDeep:
-            banner(icon: "moon.zzz", text: "Sleeping · will wake on your next message", color: theme.textMuted, progress: false)
-        case .stoppedByUser:
-            Button { model.wake(projectId: project.id, reason: "open") } label: {
-                banner(icon: "play.circle", text: "Stopped by you · tap to resume", color: theme.textMuted, progress: false)
+            strip {
+                ProgressView().controlSize(.small).tint(theme.accent)
+                Text("Waking your machine…").foregroundStyle(theme.accent)
+                Spacer()
             }
-            .buttonStyle(.plain)
         case .error:
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle").foregroundStyle(theme.danger)
-                Text("Could not wake sandbox.").foregroundStyle(theme.text)
+                Text(model.machineDetail.map { "Machine: \($0)" } ?? "Could not wake your machine.")
+                    .foregroundStyle(theme.text)
+                    .lineLimit(2)
                 Spacer()
-                Button("Retry") { model.wake(projectId: project.id, reason: "open") }
+                Button("Retry") { model.startMachine() }
                     .font(.system(size: 12.5, weight: .semibold))
             }
             .font(.system(size: 12.5))
@@ -166,25 +162,18 @@ struct BoxBanner: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(theme.dangerSoft))
             .padding(.horizontal, 12)
             .padding(.top, 6)
+        case .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser:
+            LinkBanner().padding(.horizontal, 12).padding(.top, 6)
         }
     }
 
-    private func banner(icon: String?, text: String, color: Color, progress: Bool) -> some View {
-        HStack(spacing: 8) {
-            if progress {
-                ProgressView().controlSize(.small).tint(color)
-            } else if let icon {
-                Image(systemName: icon).font(.system(size: 12)).foregroundStyle(color)
-            }
-            Text(text)
-                .font(.system(size: 12))
-                .foregroundStyle(color)
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(theme.surface1))
-        .padding(.horizontal, 12)
-        .padding(.top, 6)
+    private func strip<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 8, content: content)
+            .font(.system(size: 12))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(theme.surface1))
+            .padding(.horizontal, 12)
+            .padding(.top, 6)
     }
 }

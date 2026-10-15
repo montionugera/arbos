@@ -10,6 +10,32 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    LabeledContent("State") {
+                        HStack(spacing: 6) {
+                            if model.machine.state == .waking {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text(model.machine.label)
+                        }
+                    }
+                    if let since = model.machine.since, since > 0 {
+                        LabeledContent("Since", value: SettingsView.relative(since))
+                    }
+                    LabeledContent("Spec", value: model.machine.spec.isEmpty ? "Not reported yet" : model.machine.spec)
+                    switch model.machine.state {
+                    case .awake, .waking:
+                        Button("Stop machine", role: .destructive) { model.stopMachine() }
+                            .disabled(model.machineBusy)
+                    case .hibernatedLight, .hibernatedDeep, .stoppedByUser, .error:
+                        Button("Start machine") { model.startMachine() }
+                            .disabled(model.machineBusy || model.projects.isEmpty)
+                    }
+                } header: {
+                    Text("Machine")
+                } footer: {
+                    Text("Your one Daytona computer. Projects are workspaces on it; a message to any project wakes it.")
+                }
                 Section("Appearance") {
                     Picker("Theme", selection: $model.appearanceSetting) {
                         ForEach(Appearance.allCases) { a in Text(a.label).tag(a.rawValue) }
@@ -84,6 +110,13 @@ struct SettingsView: View {
         guard !trimmed.isEmpty else { return }
         model.setRelayUrl(trimmed)
         dismiss()
+    }
+
+    static func relative(_ ms: Int64) -> String {
+        let date = Date(timeIntervalSince1970: Double(ms) / 1000)
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f.localizedString(for: date, relativeTo: Date())
     }
 
     static var versionLine: String {

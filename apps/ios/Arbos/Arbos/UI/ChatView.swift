@@ -28,9 +28,7 @@ struct ChatView: View {
         ZStack {
             theme.bg.ignoresSafeArea()
             VStack(spacing: 0) {
-                if let project {
-                    BoxBanner(project: project)
-                }
+                MachineBanner()
                 if isEmpty {
                     emptyState
                 } else {

@@ -74,6 +74,58 @@ enum Effort: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// The user's one Daytona computer; projects are workspaces on it. Mirrored
+/// into every project doc as `status.box { state, since }`; until the relay
+/// reports it directly, the app derives it from the projects' box states.
+struct Machine: Equatable {
+    var state: BoxState
+    var since: Int64?
+    /// Human spec line, e.g. "Daytona · 4 vCPU · 8 GB"; empty when unknown.
+    var spec: String
+
+    static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
+
+    var label: String {
+        switch state {
+        case .awake: return "Awake"
+        case .waking: return "Waking…"
+        case .hibernatedLight, .hibernatedDeep: return "Sleeping"
+        case .stoppedByUser: return "Stopped"
+        case .error: return "Needs attention"
+        }
+    }
+
+    /// Fold per-project box states into one machine state. A `waking` older
+    /// than five minutes is a wake that never finished; it counts as asleep.
+    static func aggregate(_ projects: [Project]) -> BoxState {
+        let stale = nowMs() - 5 * 60 * 1000
+        let states = projects.map { p -> BoxState in
+            if p.state == .waking, let since = p.stateSince, since > 0, since < stale { return .hibernatedLight }
+            return p.state
+        }
+        if states.contains(.error) { return .error }
+        if states.contains(.waking) { return .waking }
+        if states.contains(.awake) { return .awake }
+        if !states.isEmpty && states.allSatisfy({ $0 == .stoppedByUser }) { return .stoppedByUser }
+        return .hibernatedLight
+    }
+}
+
+/// `status.workspace.state` of a project doc: the project's workspace on the machine.
+enum WorkspaceState: String, Equatable {
+    case active, idle, error
+    case unknown
+
+    static func from(_ raw: String?) -> WorkspaceState {
+        switch raw ?? "" {
+        case "active", "awake", "running", "busy": return .active
+        case "idle", "asleep", "sleeping", "stopped": return .idle
+        case "error", "failed": return .error
+        default: return .unknown
+        }
+    }
+}
+
 struct Project: Identifiable, Equatable {
     var id: Id
     var name: String
@@ -82,6 +134,8 @@ struct Project: Identifiable, Equatable {
     /// Hex `#rrggbb` accent for the selected tile border.
     var color: String
     var state: BoxState
+    /// Relay `box_since` (ms); lets a wake that never finished age out.
+    var stateSince: Int64?
     /// Human text for the S12/S13 banner, e.g. "Restoring from archive…".
     var stateDetail: String?
     var model: String
@@ -90,6 +144,8 @@ struct Project: Identifiable, Equatable {
     var spendCapUsd: Double
     /// `settings.modelNote` from the project doc; empty when every id is valid.
     var modelNote: String = ""
+    /// `status.workspace.state` from the project doc; `.unknown` until the box writes it.
+    var workspace: WorkspaceState = .unknown
 
     var shortModel: String { Project.shortModel(model) }
 

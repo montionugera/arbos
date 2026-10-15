@@ -52,6 +52,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var caughtUp: Set<Id> = []
     @Published private(set) var link: Link = .connecting
     @Published private(set) var models: [String] = []
+    @Published private(set) var machine: Machine = .unknown
+    @Published private(set) var machineBusy = false
+    /// `status.box.since` per project doc; the newest one is the machine's.
+    private var machineSince: [Id: Int64] = [:]
     @Published var notice: Notice?
     @Published private(set) var pairingBusy = false
     @Published private(set) var pairingError: String?
@@ -195,8 +199,14 @@ final class AppModel: ObservableObject {
                 }
                 newChats[p.id] = AppModel.sorted(mine)
             }
+            for i in newProjects.indices {
+                if let prev = projects.first(where: { $0.id == newProjects[i].id }) {
+                    newProjects[i].workspace = prev.workspace
+                }
+            }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
+            recomputeMachine()
             for p in newProjects {
                 ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
             }
@@ -313,23 +323,85 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// `settings.modelNote` from the project doc (crdt-sync §6.3). The box
-    /// state comes from the relay (registry + STATUS frames) only: an asleep
-    /// box cannot rewrite its own stale `status.box = awake`.
+    /// Project doc (crdt-sync §6.3): `settings.modelNote`, `status.workspace
+    /// {state}` and `status.box {state, since}` (the machine mirror). The
+    /// machine *state* still comes from the relay (registry + STATUS frames):
+    /// a dead box cannot rewrite its own stale `awake`. The doc gives `since`.
     private func applyProjectDoc(_ projectId: Id) {
         guard let doc = docs[projectDocKey(projectId)] else { return }
         let settings = doc.mapValue("settings")
         let note = settings["modelNote"] as? String ?? ""
-        if let i = projects.firstIndex(where: { $0.id == projectId }), projects[i].modelNote != note {
-            projects[i].modelNote = note
+        let status = doc.mapValue("status")
+        let workspace = WorkspaceState.from((status["workspace"] as? [String: Any])?["state"] as? String)
+        if let box = status["box"] as? [String: Any], let since = DocJSON.int(box["since"]) {
+            machineSince[projectId] = since
+        } else if let since = DocJSON.int(status["since"]) {
+            machineSince[projectId] = since
         }
+        if let i = projects.firstIndex(where: { $0.id == projectId }) {
+            if projects[i].modelNote != note { projects[i].modelNote = note }
+            if projects[i].workspace != workspace { projects[i].workspace = workspace }
+        }
+        recomputeMachine()
     }
 
     private func setProjectState(_ projectId: Id, _ state: BoxState, detail: String?) {
         guard let i = projects.firstIndex(where: { $0.id == projectId }) else { return }
         if projects[i].state == state && projects[i].stateDetail == detail { return }
+        if projects[i].state != state { projects[i].stateSince = nowMs() }
         projects[i].state = state
         projects[i].stateDetail = detail
+        recomputeMachine()
+    }
+
+    /// One machine per user: fold the projects' box states until the relay
+    /// reports the machine itself.
+    private func recomputeMachine() {
+        let state = Machine.aggregate(projects)
+        let since = machineSince.values.max()
+        let spec = projects.isEmpty ? "" : "Daytona · \(projects.count) workspace\(projects.count == 1 ? "" : "s")"
+        let next = Machine(state: state, since: since, spec: spec)
+        if next != machine { machine = next }
+    }
+
+    /// Machine-level error text (the first project that reports one).
+    var machineDetail: String? {
+        projects.first { $0.state == .error }?.stateDetail
+    }
+
+    // MARK: Machine control (per-project endpoints until the relay has a machine API)
+
+    func startMachine() {
+        guard !machineBusy else { return }
+        machineBusy = true
+        let ids = projects.filter { $0.state.isAsleep || $0.state == .error }.map(\.id)
+        for id in ids { setProjectState(id, .waking, detail: nil) }
+        Task {
+            defer { machineBusy = false }
+            for id in ids {
+                do { try await api.start(projectId: id) } catch {
+                    notice = Notice(text: "Start failed: \(error.localizedDescription)")
+                    setProjectState(id, .error, detail: error.localizedDescription)
+                }
+            }
+            await refreshRegistry()
+        }
+    }
+
+    func stopMachine() {
+        guard !machineBusy else { return }
+        machineBusy = true
+        let ids = projects.filter { $0.state == .awake || $0.state == .waking }.map(\.id)
+        Task {
+            defer { machineBusy = false }
+            for id in ids {
+                do { try await api.stop(projectId: id) } catch {
+                    notice = Notice(text: "Stop failed: \(error.localizedDescription)")
+                }
+            }
+            for id in ids { setProjectState(id, .stoppedByUser, detail: nil) }
+            await refreshRegistry()
+        }
     }
 
     // MARK: Lookups
