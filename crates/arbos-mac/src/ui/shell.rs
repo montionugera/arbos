@@ -15,6 +15,7 @@ use gpui::{
 use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget};
 use crate::model::{now_ms, BoxState, Chat, Id, Link, MachineState, Project};
+use crate::ui::avatars;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
@@ -334,6 +335,15 @@ impl Shell {
                 )
             })
             .collect();
+        // Tree-character avatars (own choice or hash pick) and what they are doing.
+        let avatar_slugs: HashMap<Id, Option<String>> = projects
+            .iter()
+            .map(|(p, _, _)| (p.id.clone(), state.avatar_slug(p)))
+            .collect();
+        let avatar_states: HashMap<Id, avatars::AvatarState> = projects
+            .iter()
+            .map(|(p, _, _)| (p.id.clone(), state.avatar_state(&p.id)))
+            .collect();
         // People in each project (D72 step 3) with their decoded avatars.
         let project_people: HashMap<Id, PeopleWithAvatars> = projects
             .iter()
@@ -413,12 +423,33 @@ impl Shell {
                         .update(cx, |s, cx| s.select_project(id.clone(), cx));
                     Composer::focus(&this.composer, window, cx);
                 }));
-            tile = tile.child(
-                div()
-                    .text_size(px(if collapsed { 16.0 } else { 20.0 }))
-                    .text_color(theme.text)
-                    .child(project.icon.clone()),
-            );
+            match avatar_slugs.get(&project.id).cloned().flatten() {
+                Some(slug) => {
+                    let avatar_state = avatar_states
+                        .get(&project.id)
+                        .copied()
+                        .unwrap_or(avatars::AvatarState::Idle);
+                    if avatar_state != avatars::AvatarState::Idle {
+                        PulseClock::request(cx);
+                    }
+                    tile = tile.child(avatars::element(
+                        Some(&slug),
+                        avatar_state,
+                        if collapsed { 26.0 } else { 40.0 },
+                        &project.icon,
+                        groups::project_color(&project.color, theme.accent),
+                        &theme,
+                    ));
+                }
+                None => {
+                    tile = tile.child(
+                        div()
+                            .text_size(px(if collapsed { 16.0 } else { 20.0 }))
+                            .text_color(theme.text)
+                            .child(project.icon.clone()),
+                    );
+                }
+            }
             if !collapsed {
                 tile = tile.child(
                     div()
@@ -673,6 +704,11 @@ impl Shell {
         let panel_open = state.right_panel_open;
         let in_call = self.voice.read(cx).in_call();
         let projects = state.projects.clone();
+        let pinned_avatar = project.as_ref().filter(|p| !p.is_people()).and_then(|p| {
+            state
+                .avatar_slug(p)
+                .map(|slug| (slug, state.avatar_state(&p.id)))
+        });
         let can_group =
             project.as_ref().map(|p| !p.is_guest()).unwrap_or(false) && projects.len() > 1;
         let picker_open = self.group_picker_open;
@@ -747,12 +783,26 @@ impl Shell {
                         ((dt as f32 / SHAKE_MS as f32) * std::f32::consts::PI * 4.0).sin() * 3.0
                     })
                     .unwrap_or(0.0);
-                tab = tab.left(px(shake_offset)).child(
-                    div()
-                        .text_size(px(14.0))
-                        .text_color(theme.text)
-                        .child(project.as_ref().map(|p| p.icon.clone()).unwrap_or_default()),
-                );
+                tab =
+                    tab.left(px(shake_offset))
+                        .child(match (&project, pinned_avatar.clone()) {
+                            (Some(p), Some((slug, st))) => {
+                                if st != avatars::AvatarState::Idle {
+                                    PulseClock::request(cx);
+                                }
+                                avatars::element(
+                                    Some(&slug),
+                                    st,
+                                    20.0,
+                                    &p.icon,
+                                    groups::project_color(&p.color, theme.accent),
+                                    &theme,
+                                )
+                            }
+                            _ => div().text_size(px(14.0)).text_color(theme.text).child(
+                                project.as_ref().map(|p| p.icon.clone()).unwrap_or_default(),
+                            ),
+                        });
             }
             if streaming {
                 let phase = PulseClock::phase(cx, 1200);
@@ -2645,6 +2695,7 @@ impl Render for Shell {
         let new_chat_open = state.new_chat_open;
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
         let project_space = state.selected().filter(|p| !p.is_people()).cloned();
+        let avatar_picker = state.avatar_picker.clone();
 
         let mut root = div()
             .id("shell-root")
@@ -2764,6 +2815,9 @@ impl Render for Shell {
             } else {
                 90.0
             };
+            if avatar_picker.as_deref() == Some(project.id.as_str()) {
+                root = root.child(avatars::picker(&project, &self.state, right, cx));
+            }
             if self.members_open {
                 root = root.child(people::project_members_popover(
                     &project,

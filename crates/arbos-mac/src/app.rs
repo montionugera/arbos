@@ -129,6 +129,10 @@ pub struct AppState {
     awaiting_dm: Option<String>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
+    /// Avatar reply reaction window per project (ms): plays once after a turn.
+    pub avatar_reply_until: HashMap<Id, u64>,
+    /// Avatar picker open for this project.
+    pub avatar_picker: Option<Id>,
     /// Last time we told the room we are typing, per chat.
     typing_sent_at: HashMap<Id, u64>,
     /// Set by a fresh sign-in: with no projects yet, create "Home" and land in it.
@@ -266,6 +270,8 @@ impl AppState {
             avatars: HashMap::new(),
             awaiting_dm: None,
             invite_target: None,
+            avatar_reply_until: HashMap::new(),
+            avatar_picker: None,
             typing_sent_at: HashMap::new(),
             device_id: None,
             projects: Vec::new(),
@@ -1510,6 +1516,42 @@ impl AppState {
         cx.notify();
     }
 
+    // ----- avatars
+
+    /// Character slug a project shows (own choice or the hash pick).
+    pub fn avatar_slug(&self, project: &Project) -> Option<String> {
+        crate::ui::avatars::slug_for(project, &self.projects)
+    }
+
+    /// Animation state for a project's avatar from what its agent is doing.
+    pub fn avatar_state(&self, project_id: &str) -> crate::ui::avatars::AvatarState {
+        use crate::ui::avatars::AvatarState;
+        if self.project_is_streaming(project_id) {
+            return AvatarState::Working;
+        }
+        match self.avatar_reply_until.get(project_id) {
+            Some(until) if *until > now_ms() => AvatarState::Reply,
+            _ => AvatarState::Idle,
+        }
+    }
+
+    pub fn set_avatar(&mut self, project_id: Id, slug: String, cx: &mut Context<Self>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.avatar = Some(slug.clone());
+        }
+        self.avatar_picker = None;
+        self.command(ClientCommand::SetAvatar { project_id, slug });
+        cx.notify();
+    }
+
+    pub fn toggle_avatar_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.avatar_picker = match &self.avatar_picker {
+            Some(id) if *id == project_id => None,
+            _ => Some(project_id),
+        };
+        cx.notify();
+    }
+
     pub fn machine_restart(&mut self, cx: &mut Context<Self>) {
         self.command(ClientCommand::MachineRestart);
         cx.notify();
@@ -1635,6 +1677,20 @@ impl AppState {
         let finished = !message.is_streaming() && message.status != MessageStatus::Queued;
         if !finished || !(was_streaming || is_new) {
             return;
+        }
+        if message.role == Role::Assistant && was_streaming {
+            // The avatar's short reply reaction, once per completed turn.
+            let slug = self
+                .projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .and_then(|p| self.avatar_slug(p));
+            let len = slug
+                .as_deref()
+                .map(crate::ui::avatars::reply_duration_ms)
+                .unwrap_or(1000);
+            self.avatar_reply_until
+                .insert(project_id.clone(), now_ms() + len);
         }
         if message.role == Role::Project || sender.starts_with("project:") {
             self.notify(

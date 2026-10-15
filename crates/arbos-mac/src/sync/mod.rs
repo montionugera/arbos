@@ -296,6 +296,11 @@ pub enum ClientCommand {
     MachineStop,
     /// Always-on machines: stop then start (`POST /machine/stop`, `/machine/start`).
     MachineRestart,
+    /// Avatar picker: `PATCH /projects/{id} {avatar: slug}` (mirrored into the doc).
+    SetAvatar {
+        project_id: Id,
+        slug: String,
+    },
     FetchBlob {
         project_id: Id,
         key: String,

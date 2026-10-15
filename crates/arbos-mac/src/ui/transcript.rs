@@ -552,7 +552,36 @@ impl Transcript {
                             .map(|p| groups::project_color(&p.color, theme.accent))
                     })
                     .unwrap_or_else(|| groups::sender_color(&seed, &theme));
-                let chip = groups::sender_chip(&name, icon.as_deref(), color, &theme);
+                // The sender's tree avatar: a shared agent's own slug, else my project's.
+                let avatar_slug = seed
+                    .strip_prefix("agent:")
+                    .or_else(|| seed.strip_prefix("project:"))
+                    .and_then(|pid| {
+                        state
+                            .selected()
+                            .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
+                            .and_then(|a| a.avatar.clone())
+                            .or_else(|| {
+                                state
+                                    .projects
+                                    .iter()
+                                    .find(|p| p.id == pid)
+                                    .and_then(|p| state.avatar_slug(p))
+                            })
+                    });
+                let avatar_state = seed
+                    .strip_prefix("agent:")
+                    .or_else(|| seed.strip_prefix("project:"))
+                    .map(|pid| state.avatar_state(pid))
+                    .unwrap_or(crate::ui::avatars::AvatarState::Idle);
+                let chip = groups::sender_chip_with(
+                    &name,
+                    icon.as_deref(),
+                    color,
+                    avatar_slug.as_deref(),
+                    avatar_state,
+                    &theme,
+                );
                 match note {
                     Some(note) => chip
                         .child(

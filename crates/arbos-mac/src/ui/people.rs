@@ -48,9 +48,20 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
     }
 }
 
-/// A small square glyph for a shared agent (its Project's icon and colour).
+/// A small square glyph for a shared agent (its Project's icon and colour),
+/// or its tree avatar when the agent carries one.
 pub fn agent_glyph(agent: &AgentMember, size: f32, theme: &Theme) -> Div {
     let color = project_color(&agent.color, theme.accent);
+    if let Some(slug) = agent.avatar.as_deref() {
+        return crate::ui::avatars::element(
+            Some(slug),
+            crate::ui::avatars::AvatarState::Idle,
+            size,
+            &agent.icon,
+            color,
+            theme,
+        );
+    }
     div()
         .size(px(size))
         .flex_shrink_0()
@@ -1076,6 +1087,43 @@ pub fn project_controls(
                     this.members_open = !this.members_open;
                     this.add_agent_open = false;
                     cx.notify();
+                })),
+        );
+    }
+    if !project.is_guest() && crate::ui::avatars::available() {
+        let slug = s.avatar_slug(project);
+        let st = s.avatar_state(&project.id);
+        let pid = project.id.clone();
+        let picker_open = s.avatar_picker.as_deref() == Some(project.id.as_str());
+        row = row.child(
+            div()
+                .id("project-avatar")
+                .flex_shrink_0()
+                .h(px(26.0))
+                .px(px(3.0))
+                .flex()
+                .items_center()
+                .rounded(px(13.0))
+                .bg(if picker_open {
+                    theme.surface_2
+                } else {
+                    gpui::transparent_black()
+                })
+                .hover(|st| st.bg(theme.surface_2))
+                .cursor_pointer()
+                .child(crate::ui::avatars::element(
+                    slug.as_deref(),
+                    st,
+                    22.0,
+                    &project.icon,
+                    project_color(&project.color, theme.accent),
+                    &theme,
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.members_open = false;
+                    this.add_agent_open = false;
+                    let p = pid.clone();
+                    this.state.update(cx, |s, cx| s.toggle_avatar_picker(p, cx));
                 })),
         );
     }

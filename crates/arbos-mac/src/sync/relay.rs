@@ -729,6 +729,11 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
                     Some("every_message") => ReplyPolicy::EveryMessage,
                     _ => ReplyPolicy::Mention,
                 },
+                avatar: project
+                    .get("avatar")
+                    .and_then(Value::as_str)
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_string),
             });
         }
     }
@@ -771,6 +776,7 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
         pending,
         shared: false,
         owner_handle: None,
+        avatar: None,
     };
     let previous_unread = shared
         .chats
@@ -1000,6 +1006,13 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .get("owner_handle")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            avatar: p
+                .get("avatar")
+                .or_else(|| item.get("avatar"))
+                .and_then(Value::as_str)
+                .filter(|a| !a.is_empty())
+                .map(str::to_string)
+                .or_else(|| previous.as_ref().and_then(|x| x.avatar.clone())),
         });
         let chats: Vec<Chat> = detail
             .get("chats")
@@ -2825,6 +2838,42 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                 });
             }
+        }
+        ClientCommand::SetAvatar { project_id, slug } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.avatar = Some(slug.clone());
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            // Mirror into the project doc too, so a relay without the column
+            // still carries the choice to other devices.
+            {
+                let docs = shared.docs.lock().unwrap();
+                if let Some(doc) = docs.get(&project_doc_key(&project_id)) {
+                    let settings = doc.doc.get_map("settings");
+                    let _ = settings.insert("avatar", slug.as_str());
+                    doc.commit();
+                }
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .patch_json(
+                        &format!("/projects/{project_id}"),
+                        json!({ "avatar": slug }),
+                    )
+                    .await
+                {
+                    // Older relays reject the field; the doc mirror still holds it.
+                    if !format!("{err:#}").contains("HTTP 400") {
+                        shared.notice(format!("Avatar: {err:#}"));
+                    }
+                }
+            });
         }
         ClientCommand::SetModel {
             project_id,

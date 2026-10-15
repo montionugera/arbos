@@ -62,6 +62,9 @@ pub struct Project {
     pub shared: bool,
     #[serde(default)]
     pub owner_handle: Option<String>,
+    /// Tree-character slug (`PATCH /projects/{id} {avatar}`); `None` = hash pick.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 impl Project {
@@ -168,6 +171,9 @@ pub struct AgentMember {
     pub owner_handle: String,
     #[serde(default)]
     pub reply_policy: ReplyPolicy,
+    /// Tree-character slug of the agent's project, when the relay carries it.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

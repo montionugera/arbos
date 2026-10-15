@@ -529,6 +529,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::MachineStop => {
             set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
         }
+        ClientCommand::SetAvatar { project_id, slug } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.avatar = Some(slug);
+                }
+            }
+            emit_projects(shared);
+        }
         ClientCommand::MachineRestart => {
             set_machine(shared, MachineState::Stopped, Some("Restarting…"), None);
             let shared = shared.clone();
@@ -572,6 +581,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 pending: false,
                 shared: false,
                 owner_handle: None,
+                avatar: None,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -2696,6 +2706,7 @@ fn seed_projects() -> Vec<Project> {
             pending: false,
             shared: false,
             owner_handle: None,
+            avatar: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -2715,6 +2726,7 @@ fn seed_projects() -> Vec<Project> {
             pending: false,
             shared: false,
             owner_handle: None,
+            avatar: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -2734,6 +2746,7 @@ fn seed_projects() -> Vec<Project> {
             pending: false,
             shared: false,
             owner_handle: None,
+            avatar: None,
         },
     ]
 }
@@ -3608,6 +3621,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         agents,
         shared: false,
         owner_handle: None,
+        avatar: None,
     }
 }
 
@@ -3634,6 +3648,7 @@ fn seed_people_projects() -> Vec<Project> {
             pending: false,
             shared: true,
             owner_handle: Some("sam".into()),
+            avatar: None,
         },
     ]
 }
@@ -3928,6 +3943,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         owner_id: ME_ID.into(),
                         owner_handle: ME_HANDLE.into(),
                         reply_policy: ReplyPolicy::Mention,
+                        avatar: None,
                     })
             };
             if let Some(agent) = agent {
@@ -4026,6 +4042,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 owner_id: ME_ID.into(),
                                 owner_handle: ME_HANDLE.into(),
                                 reply_policy: ReplyPolicy::EveryMessage,
+                                avatar: None,
                             })
                     };
                     if let Some(agent) = agent {
