@@ -47,12 +47,18 @@ platform :ios do
   lane :archive do
     number = build_number
     archive_path = "#{out_dir}/Arbos.xcarchive"
+    log = "#{out_dir}/archive.log"
+    # Full xcodebuild output goes to the log; the console keeps errors and the verdict.
     sh "cd .. && xcodebuild -project #{PROJECT} -scheme #{SCHEME} " \
        "-configuration Release -destination 'generic/platform=iOS' " \
        "-archivePath '#{archive_path}' archive " \
        "CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO " \
-       "CURRENT_PROJECT_VERSION=#{number} | tail -3"
-    UI.user_error!("archive has no binary") unless File.executable?("#{archive_path}/Products/Applications/Arbos.app/Arbos")
+       "CURRENT_PROJECT_VERSION=#{number} 2>&1 | tee '#{log}' | grep -E 'error:|ARCHIVE (SUCCEEDED|FAILED)' || true"
+    unless File.executable?("#{archive_path}/Products/Applications/Arbos.app/Arbos")
+      errors = File.exist?(log) ? File.readlines(log).grep(/error:/).uniq : []
+      UI.error(errors.join) unless errors.empty?
+      UI.user_error!("archive has no binary (#{errors.size} compiler errors, see #{log})")
+    end
     UI.success("Archive #{archive_path} build #{number}")
     lane_context[:ARBOS_ARCHIVE] = archive_path
     lane_context[:ARBOS_BUILD_NUMBER] = number

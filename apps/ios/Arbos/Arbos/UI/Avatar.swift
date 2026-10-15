@@ -89,9 +89,12 @@ struct BlobAvatar: View {
             return p
         case .hex:
             var p = Path()
+            let half: CGFloat = size / 2
             for i in 0..<6 {
-                let a = Double(i) * .pi / 3 - .pi / 6
-                let pt = CGPoint(x: size / 2 + cos(a) * size / 2, y: size / 2 + sin(a) * size / 2)
+                let angle: Double = Double(i) * Double.pi / 3 - Double.pi / 6
+                let dx: CGFloat = CGFloat(cos(angle)) * half
+                let dy: CGFloat = CGFloat(sin(angle)) * half
+                let pt = CGPoint(x: half + dx, y: half + dy)
                 if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
             }
             p.closeSubpath()

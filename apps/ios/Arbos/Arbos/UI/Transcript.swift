@@ -491,8 +491,11 @@ struct VoiceMemoBubble: View {
             .buttonStyle(.plain)
             HStack(spacing: 2) {
                 ForEach(0..<22, id: \.self) { i in
-                    Capsule().fill((fromUser ? theme.userText : theme.text).opacity(Double(i) / 22 < player.progress ? 1 : 0.35))
-                        .frame(width: 3, height: 6 + CGFloat((i * 7) % 13))
+                    let played: Bool = Double(i) / 22.0 < player.progress
+                    let barHeight: CGFloat = 6 + CGFloat((i * 7) % 13)
+                    Capsule()
+                        .fill((fromUser ? theme.userText : theme.text).opacity(played ? 1 : 0.35))
+                        .frame(width: 3, height: barHeight)
                 }
             }
             Text(player.durationLabel)
