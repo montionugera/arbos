@@ -205,6 +205,24 @@ final class RelayAPI {
         return ids
     }
 
+    /// Upload an attachment to the relay blob mirror; returns the key.
+    func putBlob(projectId: Id, key: String, mime: String, data: Data) async throws -> String {
+        guard let url = URL(string: "\(endpoint.httpUrl)/blob/\(projectId)/\(key)") else {
+            throw RelayError(status: 0, message: "Bad relay URL")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        req.setValue(mime, forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        let (body, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw RelayError(status: status, message: String(data: body, encoding: .utf8) ?? "")
+        }
+        return key
+    }
+
     /// Room checkpoint (crdt-sync §7.3). Returns `(seq, bytes)`.
     func checkpoint(room: String) async throws -> (Int64, Data) {
         let (data, http) = try await request("GET", "/room/\(room)/checkpoint")

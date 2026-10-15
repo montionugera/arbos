@@ -1,8 +1,9 @@
-// The chat body: one row per markdown block, prose only (Grok-bot style).
-// Tool calls, raw JSON, status events, usage footers and return contracts
-// never render here; `ChatView` shows one working indicator while a turn
-// runs. Port of `crates/arbos-mac/src/ui/transcript.rs::build_rows`.
+// The message stream, Grok Bot style: assistant bubbles (#202020) left, user
+// bubbles (#5C5C5C) right, centred muted system lines between them, file and
+// voice-memo cards, one "<Project> is working" line while a turn runs.
+// Prose only: tool calls, status noise, usage and JSON never render.
 
+import AVFoundation
 import SwiftUI
 import UIKit
 
@@ -13,72 +14,130 @@ enum Block: Equatable, Hashable {
     case numbered([String])
     case code(lang: String, code: String)
     case table([String])
-
-    var textLength: Int {
-        switch self {
-        case .paragraph(let t), .heading(_, let t), .code(_, let t): return t.utf8.count
-        case .bullets(let items), .numbered(let items), .table(let items): return items.reduce(0) { $0 + $1.utf8.count + 1 }
-        }
-    }
 }
 
 enum RowKind: Equatable {
-    case user(text: String, attachments: [String], pending: Bool)
-    case markdown(block: Block, live: Bool)
-    /// S8: the agent asked a question.
-    case askUser(text: String)
+    case user(text: String, pending: Bool)
+    case assistant(blocks: [Block], live: Bool)
+    /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
+    case system(icon: String?, text: String, avatarProject: Id?)
+    case question(text: String)
+    case file(name: String, subtitle: String, projectId: Id, ref: String?)
+    case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
+    case image(projectId: Id, ref: String?, fromUser: Bool)
     case error(code: String, message: String)
 }
 
 struct Row: Identifiable, Equatable {
     var id: String
     var messageId: Id
+    var role: Role
     var kind: RowKind
 }
 
 enum Transcript {
-    /// Prose and real attachments only. Tool calls, status events, raw JSON,
-    /// usage footers and subagent names never render; `ChatView` shows one
-    /// working indicator while any turn in the chat streams.
-    static func rows(_ messages: [Message]) -> [Row] {
+    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:]) -> [Row] {
         var rows: [Row] = []
+        var lastAt: Int64 = 0
         for message in messages {
+            // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
+            if message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000) {
+                rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
+                                kind: .system(icon: nil, text: dateLabel(message.createdAt), avatarProject: nil)))
+            }
+            if message.createdAt > 0 { lastAt = message.createdAt }
             let streaming = message.isStreaming
             switch message.role {
             case .user:
-                var attachments: [String] = []
                 for part in message.parts {
-                    if case .attachment(_, let a) = part { attachments.append(a.name) }
+                    if case .attachment(let id, let a) = part {
+                        rows.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: true))
+                    }
                 }
-                rows.append(Row(id: "\(message.id)#user", messageId: message.id,
-                                kind: .user(text: message.plainText, attachments: attachments, pending: message.pending)))
+                let text = message.plainText
+                if !text.isEmpty {
+                    rows.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
+                                    kind: .user(text: text, pending: message.pending)))
+                }
             case .assistant, .system, .project:
+                // Hand-off ack: Grok shows "Messaged ◉ <bot>" as a system line.
+                if message.turn == .new, let name = message.subagentName ?? subagentNames[message.subagentId ?? ""] {
+                    rows.append(Row(id: "\(message.id)#handoff", messageId: message.id, role: .system,
+                                    kind: .system(icon: nil, text: "Messaged \u{FFFC}\(name)", avatarProject: projectId)))
+                }
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
                 for (pix, part) in message.parts.enumerated() {
                     switch part {
                     case .text(let id, let text):
                         let blocks = Markdown.blocks(text).filter { !Markdown.isJSON($0) }
-                        let isLastText = pix == lastTextPart
-                        for (bix, block) in blocks.enumerated() {
-                            let live = streaming && isLastText && bix + 1 == blocks.count
-                            rows.append(Row(id: "\(message.id)#\(id).\(bix)", messageId: message.id,
-                                            kind: .markdown(block: block, live: live)))
-                        }
+                        if blocks.isEmpty { continue }
+                        let live = streaming && pix == lastTextPart
+                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                        kind: .assistant(blocks: blocks, live: live)))
                     case .status(let id, .askUser, let text):
-                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, kind: .askUser(text: text)))
+                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .question(text: text)))
+                    case .status(let id, .handoff, let text):
+                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
+                                        kind: .system(icon: nil, text: handoffText(text), avatarProject: nil)))
+                    case .status(let id, .stopped, _):
+                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
+                                        kind: .system(icon: "stop.circle", text: "Stopped", avatarProject: nil)))
+                    case .attachment(let id, let a):
+                        rows.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: false))
                     case .error(let id, let code, let text):
-                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, kind: .error(code: code, message: text)))
-                    case .status, .tool, .subagentResult, .reasoning, .attachment, .unknown:
+                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .error(code: code, message: text)))
+                    case .status, .tool, .subagentResult, .reasoning, .unknown:
                         break
                     }
                 }
                 if message.status == .error && !message.hasErrorPart {
-                    rows.append(Row(id: "\(message.id)#failed", messageId: message.id,
+                    rows.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                     kind: .error(code: "turn_failed", message: "The agent could not finish this turn.")))
                 }
             }
         }
         return rows
+    }
+
+    private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool) -> Row {
+        if a.mime.hasPrefix("audio/") {
+            return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
+                       kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
+        }
+        if a.mime.hasPrefix("image/") {
+            return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
+                       kind: .image(projectId: projectId, ref: a.blobRef, fromUser: fromUser))
+        }
+        return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
+                   kind: .file(name: a.name, subtitle: subtitle(for: a), projectId: projectId, ref: a.blobRef))
+    }
+
+    private static func subtitle(for a: Attachment) -> String {
+        if let dot = a.name.lastIndex(of: ".") {
+            return String(a.name[a.name.index(after: dot)...]).uppercased() + " file"
+        }
+        return a.mime
+    }
+
+    /// "Handed to subagent itsdangerous-tests" → "Messaged ◉ itsdangerous-tests".
+    private static func handoffText(_ raw: String) -> String {
+        let t = raw.trimmingCharacters(in: .whitespaces)
+        for prefix in ["Handed to subagent ", "Handed to ", "Handed off to "] where t.hasPrefix(prefix) {
+            return "Messaged \u{FFFC}" + t.dropFirst(prefix.count)
+        }
+        return t
+    }
+
+    static func dateLabel(_ ms: Int64) -> String {
+        let date = Date(timeIntervalSince1970: Double(ms) / 1000)
+        let cal = Calendar.current
+        let time = date.formatted(date: .omitted, time: .shortened)
+        if cal.isDateInToday(date) { return "Today \(time)" }
+        if cal.isDateInYesterday(date) { return "Yesterday \(time)" }
+        if let week = cal.date(byAdding: .day, value: -6, to: Date()), date > week {
+            return date.formatted(.dateTime.weekday(.wide)) + " \(time)"
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
     }
 }
 
@@ -177,69 +236,136 @@ struct RowView: View {
     @Environment(\.theme) private var theme
     let row: Row
     let chatId: Id
+    let width: CGFloat
+
+    private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
     var body: some View {
         switch row.kind {
-        case .user(let text, let attachments, let pending):
+        case .user(let text, let pending):
             HStack {
-                Spacer(minLength: 60)
-                VStack(alignment: .leading, spacing: 6) {
-                    if !attachments.isEmpty {
-                        HStack(spacing: 6) {
-                            ForEach(attachments, id: \.self) { name in
-                                Text(name)
-                                    .font(.system(size: Theme.tiny))
-                                    .foregroundStyle(theme.textMuted)
-                                    .padding(.horizontal, 8).padding(.vertical, 2)
-                                    .background(RoundedRectangle(cornerRadius: 6).fill(theme.surface2))
-                            }
-                        }
-                    }
-                    Text(text)
-                        .font(.system(size: Theme.body))
-                        .foregroundStyle(theme.text)
-                        .textSelection(.enabled)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubble))
-                .opacity(pending ? 0.6 : 1)
+                Spacer(minLength: 0)
+                Text(Markdown.inline(text))
+                    .font(.system(size: Theme.body))
+                    .lineSpacing(Theme.bodyLineSpacing)
+                    .foregroundStyle(theme.userText)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, Theme.bubbleHPad)
+                    .padding(.vertical, Theme.bubbleVPad)
+                    .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
+                    .frame(maxWidth: maxBubble, alignment: .trailing)
+                    .opacity(pending ? 0.6 : 1)
             }
-            .padding(.vertical, 6)
-        case .markdown(let block, let live):
-            BlockView(block: block, live: live)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 4)
-        case .askUser(let text):
-            HStack(alignment: .top, spacing: 10) {
-                RoundedRectangle(cornerRadius: 1).fill(theme.warn).frame(width: 2)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("WAITING FOR YOU")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(theme.warn)
+        case .assistant(let blocks, let live):
+            HStack {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
+                        BlockView(block: block, live: live && i == blocks.count - 1)
+                    }
+                }
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .frame(maxWidth: maxBubble, alignment: .leading)
+                Spacer(minLength: 0)
+            }
+        case .system(let icon, let text, let avatarProject):
+            HStack(spacing: 5) {
+                if let icon {
+                    Image(systemName: icon).font(.system(size: 13, weight: .regular))
+                }
+                systemText(text, avatarProject: avatarProject)
+            }
+            .font(.system(size: Theme.small))
+            .foregroundStyle(theme.muted)
+            .frame(maxWidth: .infinity)
+            .multilineTextAlignment(.center)
+        case .question(let text):
+            HStack {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Question")
+                        .font(.system(size: Theme.tiny, weight: .semibold))
+                        .foregroundStyle(theme.muted)
                     Text(Markdown.inline(text))
                         .font(.system(size: Theme.body))
                         .foregroundStyle(theme.text)
                 }
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad + 2)
+                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .overlay(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).strokeBorder(theme.warn.opacity(0.5), lineWidth: 1))
+                .frame(maxWidth: maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 12).padding(.vertical, 10)
-            .card()
-            .padding(.vertical, 4)
+        case .file(let name, let subtitle, let projectId, let ref):
+            HStack {
+                if row.role == .user { Spacer(minLength: 0) }
+                FileCard(name: name, subtitle: subtitle, projectId: projectId, blobRef: ref, fromUser: row.role == .user)
+                    .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
+                if row.role != .user { Spacer(minLength: 0) }
+            }
+        case .voiceMemo(let name, let projectId, let ref, let fromUser):
+            HStack {
+                if fromUser { Spacer(minLength: 0) }
+                VoiceMemoBubble(name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
+                    .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
+                if !fromUser { Spacer(minLength: 0) }
+            }
+        case .image(let projectId, let ref, let fromUser):
+            HStack {
+                if fromUser { Spacer(minLength: 0) }
+                Group {
+                    if let ref, let url = model.blobURL(projectId: projectId, key: ref) {
+                        AsyncImage(url: url) { phase in
+                            switch phase {
+                            case .success(let img): img.resizable().scaledToFill()
+                            case .failure: Image(systemName: "photo").font(.system(size: 28)).foregroundStyle(theme.muted)
+                            case .empty: ProgressView().tint(theme.muted)
+                            @unknown default: Color.clear
+                            }
+                        }
+                    } else {
+                        Image(systemName: "photo").font(.system(size: 28)).foregroundStyle(theme.muted)
+                    }
+                }
+                .frame(width: min(240, maxBubble), height: 180)
+                .background(theme.bubbleAssistant)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+                if !fromUser { Spacer(minLength: 0) }
+            }
         case .error(let code, let message):
             HStack(spacing: 10) {
-                Text("✗").foregroundStyle(theme.danger).font(.system(size: 12))
-                Text(message).font(.system(size: 13)).foregroundStyle(theme.text)
+                Image(systemName: "exclamationmark.circle").foregroundStyle(theme.danger)
+                Text(message).font(.system(size: Theme.small)).foregroundStyle(theme.text)
                 Spacer(minLength: 0)
-                Text(code).font(.system(size: 11)).foregroundStyle(theme.textFaint)
+                Text(code).font(.system(size: 11)).foregroundStyle(theme.muted)
                 Button("Retry") { model.retry(chatId: chatId, messageId: row.messageId) }
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(theme.accent)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(theme.text)
             }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: Theme.panelRadius).fill(theme.dangerSoft))
-            .overlay(RoundedRectangle(cornerRadius: Theme.panelRadius).strokeBorder(theme.danger.opacity(0.4), lineWidth: 1))
-            .padding(.vertical, 4)
+            .padding(.horizontal, Theme.bubbleHPad).padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.dangerSoft))
+        }
+    }
+
+    /// "Messaged \u{FFFC}Affine" draws a small avatar where the object marker is.
+    @ViewBuilder
+    private func systemText(_ text: String, avatarProject: Id?) -> some View {
+        if let range = text.range(of: "\u{FFFC}") {
+            let before = String(text[..<range.lowerBound])
+            let after = String(text[range.upperBound...])
+            let target = model.projects.first { $0.name.caseInsensitiveCompare(after) == .orderedSame }
+            HStack(spacing: 5) {
+                Text(before)
+                if let target {
+                    BlobAvatar(project: target, theme: theme, size: 16)
+                } else {
+                    BlobAvatar(color: theme.muted, shape: BlobShape.pick(for: after), size: 16)
+                }
+                Text(after)
+            }
+        } else {
+            Text(text)
         }
     }
 }
@@ -254,27 +380,27 @@ struct BlockView: View {
         case .paragraph(let text):
             if live {
                 StreamingText(text: text, font: .system(size: Theme.body), color: theme.text)
+                    .lineSpacing(Theme.bodyLineSpacing)
             } else {
                 Text(Markdown.inline(text))
                     .font(.system(size: Theme.body))
+                    .lineSpacing(Theme.bodyLineSpacing)
                     .foregroundStyle(theme.text)
-                    .lineSpacing(Theme.bodyLine - Theme.body - 4)
                     .textSelection(.enabled)
             }
-        case .heading(let level, let text):
+        case .heading(_, let text):
             Text(Markdown.inline(text))
-                .font(.system(size: level == 1 ? 22 : level == 2 ? 19 : 17, weight: .semibold))
+                .font(.system(size: Theme.body, weight: .semibold))
                 .foregroundStyle(theme.text)
-                .padding(.top, 6)
         case .bullets(let items), .numbered(let items):
             let numbered: Bool = { if case .numbered = block { return true } else { return false } }()
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(items.enumerated()), id: \.offset) { i, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(numbered ? "\(i + 1)." : "•")
                             .font(.system(size: Theme.body))
-                            .foregroundStyle(theme.textMuted)
-                            .frame(width: 18, alignment: .trailing)
+                            .foregroundStyle(theme.text)
+                            .frame(minWidth: 16, alignment: .trailing)
                         if live && i == items.count - 1 {
                             StreamingText(text: item, font: .system(size: Theme.body), color: theme.text)
                         } else {
@@ -290,42 +416,125 @@ struct BlockView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
                         Text(line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: "    "))
-                            .font(.system(size: 13, weight: i == 0 ? .semibold : .regular, design: .monospaced))
-                            .foregroundStyle(i == 0 ? theme.text : theme.textMuted)
+                            .font(.system(size: 14, weight: i == 0 ? .semibold : .regular, design: .monospaced))
+                            .foregroundStyle(theme.text)
                     }
                 }
                 .padding(10)
             }
-            .background(RoundedRectangle(cornerRadius: 8).fill(theme.codeBg))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.border, lineWidth: 1))
-        case .code(let lang, let code):
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Text(lang.isEmpty ? "code" : lang)
-                    Spacer()
-                    Button("Copy") { UIPasteboard.general.string = code }
-                }
-                .font(.system(size: 11))
-                .foregroundStyle(theme.textFaint)
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .overlay(alignment: .bottom) { Rectangle().fill(theme.border).frame(height: 1) }
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(code)
-                        .font(.system(size: 13, design: .monospaced))
-                        .foregroundStyle(theme.text)
-                        .textSelection(.enabled)
-                        .padding(10)
-                }
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
+        case .code(_, let code):
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.system(size: 14, design: .monospaced))
+                    .foregroundStyle(theme.text)
+                    .textSelection(.enabled)
+                    .padding(10)
             }
-            .background(RoundedRectangle(cornerRadius: 8).fill(theme.codeBg))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.border, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
         }
     }
 }
 
-/// Streaming fade (zeron "veil"): each appended chunk fades in by alpha only,
-/// so the layout never jumps. Fade length tracks the arrival cadence
-/// (3× the gap, clamped to 120–400 ms).
+/// Document card (Grok: icon, title, domain) for a non-audio attachment.
+struct FileCard: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let name: String
+    let subtitle: String
+    let projectId: Id
+    let blobRef: String?
+    let fromUser: Bool
+
+    var body: some View {
+        Button {
+            if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) { UIApplication.shared.open(url) }
+        } label: {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(hex: "#FFB000")!)
+                    .frame(width: 22, height: 26)
+                    .overlay(Image(systemName: "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name).font(.system(size: Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
+                    Text(subtitle).font(.system(size: Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
+                }
+            }
+            .padding(.horizontal, Theme.bubbleHPad)
+            .padding(.vertical, Theme.bubbleVPad)
+            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Voice memo bubble: play/pause, a static waveform, duration.
+struct VoiceMemoBubble: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let name: String
+    let projectId: Id
+    let blobRef: String?
+    let fromUser: Bool
+    @StateObject private var player = MemoPlayer()
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button {
+                if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) {
+                    player.toggle(url: url, headers: model.authHeaders)
+                }
+            } label: {
+                Circle().fill(theme.primary).frame(width: 32, height: 32)
+                    .overlay(Image(systemName: player.playing ? "pause.fill" : "play.fill").font(.system(size: 13, weight: .bold)).foregroundStyle(theme.onPrimary).offset(x: player.playing ? 0 : 1))
+            }
+            .buttonStyle(.plain)
+            HStack(spacing: 2) {
+                ForEach(0..<22, id: \.self) { i in
+                    Capsule().fill((fromUser ? theme.userText : theme.text).opacity(Double(i) / 22 < player.progress ? 1 : 0.35))
+                        .frame(width: 3, height: 6 + CGFloat((i * 7) % 13))
+                }
+            }
+            Text(player.durationLabel)
+                .font(.system(size: Theme.tiny, design: .monospaced))
+                .foregroundStyle(fromUser ? theme.userText.opacity(0.8) : theme.muted)
+        }
+        .padding(.horizontal, Theme.bubbleHPad)
+        .padding(.vertical, Theme.bubbleVPad)
+        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+    }
+}
+
+@MainActor
+final class MemoPlayer: ObservableObject {
+    @Published var playing = false
+    @Published var progress: Double = 0
+    @Published var durationLabel = "0:00"
+    private var player: AVPlayer?
+    private var timeObserver: Any?
+
+    func toggle(url: URL, headers: [String: String]) {
+        if let player {
+            if playing { player.pause(); playing = false } else { player.play(); playing = true }
+            return
+        }
+        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        let item = AVPlayerItem(asset: asset)
+        let p = AVPlayer(playerItem: item)
+        player = p
+        timeObserver = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] t in
+            guard let self, let d = p.currentItem?.duration.seconds, d.isFinite, d > 0 else { return }
+            self.progress = t.seconds / d
+            let remaining = Int(max(0, d - t.seconds))
+            self.durationLabel = String(format: "%d:%02d", remaining / 60, remaining % 60)
+            if t.seconds >= d - 0.05 { self.playing = false; p.seek(to: .zero); self.progress = 0 }
+        }
+        p.play()
+        playing = true
+    }
+}
+
+/// Streaming fade (the "veil"): each appended chunk fades in by alpha only.
 struct StreamingText: View {
     let text: String
     let font: Font

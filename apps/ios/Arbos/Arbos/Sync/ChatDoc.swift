@@ -66,7 +66,7 @@ final class ChatDoc {
     // MARK: Writing (client side only: user rows + commands, §4.3)
 
     /// Append a user message as nested containers. Does not commit.
-    func insertUserMessage(id: Id, text: String, deviceId: String) throws {
+    func insertUserMessage(id: Id, text: String, deviceId: String, attachments: [Attachment] = []) throws {
         let list = messages
         let map = try list.insertContainer(pos: list.len(), child: LoroMap())
         try map.insert(key: "id", v: id)
@@ -82,7 +82,16 @@ final class ChatDoc {
             try map.insert(key: k, v: LoroValue.null)
         }
         let parts = try map.insertContainer(key: "parts", child: LoroList())
-        let part = try parts.insertContainer(pos: 0, child: LoroMap())
+        for a in attachments {
+            let part = try parts.insertContainer(pos: parts.len(), child: LoroMap())
+            try part.insert(key: "id", v: newId())
+            try part.insert(key: "kind", v: "attachment")
+            let att = try part.insertContainer(key: "attachment", child: LoroMap())
+            try att.insert(key: "name", v: a.name)
+            try att.insert(key: "mime", v: a.mime)
+            if let ref = a.blobRef { try att.insert(key: "ref", v: ref) } else { try att.insert(key: "ref", v: LoroValue.null) }
+        }
+        let part = try parts.insertContainer(pos: parts.len(), child: LoroMap())
         try part.insert(key: "id", v: newId())
         try part.insert(key: "kind", v: "text")
         let textC = try part.insertContainer(key: "text", child: LoroText())

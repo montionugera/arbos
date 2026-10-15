@@ -11,12 +11,28 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
-                    LabeledContent("State") {
-                        HStack(spacing: 6) {
-                            if model.machine.state == .waking {
-                                ProgressView().controlSize(.small)
-                            }
-                            Text(model.machine.label)
+                    HStack(spacing: 14) {
+                        GlassCircle(size: 56) {
+                            Image(systemName: "person.fill").font(.system(size: 22)).foregroundStyle(theme.text)
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Arbos").font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(theme.text)
+                            Text(model.relayUrl.isEmpty ? "Not paired" : model.relayUrl)
+                                .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                .lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .listRowBackground(theme.card)
+
+                Section {
+                    HStack {
+                        Text("State")
+                        Spacer()
+                        HStack(spacing: 7) {
+                            Circle().fill(machineDotColor(model.machine.state, theme: theme)).frame(width: 8, height: 8)
+                            Text(model.machine.label).foregroundStyle(theme.muted)
                         }
                     }
                     if let since = model.machine.since, since > 0 {
@@ -34,8 +50,10 @@ struct SettingsView: View {
                 } header: {
                     Text("Machine")
                 } footer: {
-                    Text("Your one Daytona computer. Projects are workspaces on it; a message to any project wakes it.")
+                    Text("Your one cloud computer. Projects are workspaces on it; a message to any project wakes it.")
                 }
+                .listRowBackground(theme.card)
+
                 Section("Appearance") {
                     Picker("Theme", selection: $model.appearanceSetting) {
                         ForEach(Appearance.allCases) { a in Text(a.label).tag(a.rawValue) }
@@ -45,6 +63,8 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                 }
+                .listRowBackground(theme.card)
+
                 Section {
                     TextField("https://relay.example.com", text: $relayUrl)
                         .keyboardType(.URL)
@@ -60,24 +80,28 @@ struct SettingsView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    LabeledContent("Link") {
-                        Text(linkLabel)
-                    }
+                    LabeledContent("Link", value: linkLabel)
                 } header: {
                     Text("Relay")
                 } footer: {
                     Text("The device token is kept in the Keychain. Switching relays signs this device out of the current one.")
                 }
+                .listRowBackground(theme.card)
+
                 Section {
                     Button("Sign out this device", role: .destructive) { confirmUnpair = true }
                 }
+                .listRowBackground(theme.card)
+
                 Section("About") {
                     LabeledContent("Version", value: SettingsView.versionLine)
                     LabeledContent("Protocol", value: "room proto \(protoVersion) · Loro")
                 }
+                .listRowBackground(theme.card)
             }
             .scrollContentBackground(.hidden)
             .background(theme.bg)
+            .tint(theme.text)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

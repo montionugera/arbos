@@ -24,14 +24,14 @@ struct RootView: View {
     var body: some View {
         Group {
             if model.isPaired {
-                ProjectsView()
+                HomeView()
             } else {
                 PairingView()
             }
         }
         .environment(\.theme, theme)
         .preferredColorScheme(preferredScheme)
-        .tint(theme.accent)
+        .tint(theme.text)
         .alert(item: $model.notice) { n in
             Alert(title: Text("Arbos"), message: Text(n.text), dismissButton: .default(Text("OK")))
         }
