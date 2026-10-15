@@ -48,6 +48,12 @@ fn embed_tree_avatars() {
             if !matches!(state, "idle" | "working" | "reply") {
                 continue;
             }
+            // Embed the two the app draws: 56 px (@2x) for chat sizes ≤ 32 px and
+            // 72 px (rail) for the tiles; the other two would double the binary and
+            // the decoded texture memory (144 px × 90 frames ≈ 7.5 MB per state).
+            if (rail && scale == 2) || (!rail && scale == 1) {
+                continue;
+            }
             strips.push((slug.to_string(), state.to_string(), rail, scale, path));
             println!("cargo:rerun-if-changed={}", entry.path().display());
         }

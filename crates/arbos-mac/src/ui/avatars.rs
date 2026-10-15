@@ -199,7 +199,8 @@ fn cache() -> &'static Mutex<HashMap<Key, Option<Arc<RenderImage>>>> {
 /// The decoded strip for (slug, state, rail size, scale), falling back to the
 /// other scale, then to the idle strip, then to the non-rail size.
 pub fn image(slug: &str, state: AvatarState, rail: bool) -> Option<Arc<RenderImage>> {
-    let scale = 2u32;
+    // Chat sizes draw the 56 px strip, rail tiles the 72 px one (see build.rs).
+    let scale = if rail { 1u32 } else { 2u32 };
     let key: Key = (slug.to_string(), state.key(), rail, scale);
     if let Some(hit) = cache().lock().unwrap().get(&key) {
         return hit.clone();
@@ -209,13 +210,14 @@ pub fn image(slug: &str, state: AvatarState, rail: bool) -> Option<Arc<RenderIma
         .find(|c| c.slug == slug)
         .and_then(|c| c.fps.get(state.key()).copied())
         .unwrap_or(30.0);
+    let other = if rail { 2u32 } else { 1u32 };
     let candidates: [(&str, bool, u32); 6] = [
-        (state.key(), rail, 2),
-        (state.key(), rail, 1),
-        ("idle", rail, 2),
-        ("idle", rail, 1),
-        (state.key(), !rail, 2),
-        ("idle", !rail, 2),
+        (state.key(), rail, scale),
+        (state.key(), rail, other),
+        ("idle", rail, scale),
+        ("idle", rail, other),
+        (state.key(), !rail, if rail { 2 } else { 1 }),
+        ("idle", !rail, if rail { 2 } else { 1 }),
     ];
     let mut decoded = None;
     for (st, r, sc) in candidates {
