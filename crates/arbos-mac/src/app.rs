@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::model::{
     new_id, now_ms, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView,
-    Message, MessageStatus, Part, Project, ProjectDocView, QuestionState, Role, Routine,
+    Machine, Message, MessageStatus, Part, Project, ProjectDocView, QuestionState, Role, Routine,
     RoutineRun, RoutineTrigger, Skill, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
@@ -103,6 +103,9 @@ pub struct AppState {
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
+    /// The user's one machine (projects are workspaces on it).
+    pub machine: Machine,
+    pub machine_hover: bool,
     /// Settings → Connectors (F1).
     pub connectors: ConnectorsView,
     /// Settings → Routines, per project (F3).
@@ -129,7 +132,6 @@ pub struct AppState {
 /// What the Details drawer (stub) describes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetailsTarget {
-    Project(Id),
     Message { chat_id: Id, message_id: Id },
     Blob(String),
 }
@@ -207,6 +209,8 @@ impl AppState {
             details_open: None,
             new_project_open: false,
             show_details: false,
+            machine: Machine::default(),
+            machine_hover: false,
             connectors: ConnectorsView::default(),
             routines: HashMap::new(),
             routine_runs: HashMap::new(),
@@ -454,6 +458,10 @@ impl AppState {
                         self.select_project(id, cx);
                     }
                 }
+                cx.notify();
+            }
+            SyncEvent::Machine(machine) => {
+                self.machine = machine;
                 cx.notify();
             }
             SyncEvent::ProjectStatus {
@@ -1044,11 +1052,6 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn wake(&mut self, project_id: Id, cx: &mut Context<Self>) {
-        self.command(ClientCommand::Wake { project_id });
-        cx.notify();
-    }
-
     pub fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
         let Some(project_id) = self.selected_project.clone() else {
             return;
@@ -1083,6 +1086,16 @@ impl AppState {
 
     pub fn toggle_rail(&mut self, cx: &mut Context<Self>) {
         self.rail_collapsed = !self.rail_collapsed;
+        cx.notify();
+    }
+
+    pub fn machine_start(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::MachineStart);
+        cx.notify();
+    }
+
+    pub fn machine_stop(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::MachineStop);
         cx.notify();
     }
 

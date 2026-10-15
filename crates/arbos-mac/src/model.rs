@@ -888,6 +888,58 @@ pub struct ChannelsView {
     pub loaded: bool,
 }
 
+/// The user's one Daytona computer. Projects are workspaces on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineState {
+    #[default]
+    Asleep,
+    Waking,
+    Awake,
+    Stopped,
+    Error,
+    #[serde(other)]
+    Unknown,
+}
+
+impl MachineState {
+    pub fn label(self) -> &'static str {
+        match self {
+            MachineState::Asleep => "asleep",
+            MachineState::Waking => "waking",
+            MachineState::Awake => "awake",
+            MachineState::Stopped => "stopped",
+            MachineState::Error => "error",
+            MachineState::Unknown => "unknown",
+        }
+    }
+
+    pub fn is_down(self) -> bool {
+        matches!(
+            self,
+            MachineState::Asleep
+                | MachineState::Stopped
+                | MachineState::Error
+                | MachineState::Unknown
+        )
+    }
+}
+
+/// `status.box {state, since}` at user level (mirrored into every project
+/// doc) plus the hover details.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Machine {
+    pub state: MachineState,
+    pub since: Option<u64>,
+    /// e.g. "2 vCPU · 4 GiB · 10 GiB" (`SandboxBinding.resource_class`).
+    pub spec: Option<String>,
+    pub spend_today_usd: f64,
+    pub spend_cap_usd: f64,
+    pub detail: Option<String>,
+    /// 0..1 while waking.
+    pub progress: Option<f32>,
+}
+
 /// Connection to the relay, S14.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Link {

@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use gpui::{
     actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, ElementId, Entity,
-    FocusHandle, Focusable, FontWeight, Render, SharedString, Window,
+    FocusHandle, Focusable, FontWeight, Render, SharedString, Stateful, Window,
 };
 
 use crate::app::{AppState, DetailsTarget};
-use crate::model::{now_ms, BoxState, Chat, Link, Project};
+use crate::model::{now_ms, BoxState, Chat, Link, MachineState, Project};
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
@@ -249,7 +249,6 @@ impl Shell {
             .overflow_y_scroll();
         for (project, streaming, unread) in projects {
             let is_selected = selected.as_deref() == Some(project.id.as_str());
-            let asleep = project.state.is_asleep();
             let id = project.id.clone();
             if streaming {
                 PulseClock::request(cx);
@@ -291,7 +290,6 @@ impl Shell {
                 div()
                     .text_size(px(if collapsed { 16.0 } else { 20.0 }))
                     .text_color(theme.text)
-                    .when(asleep, |el| el.opacity(0.6))
                     .child(project.icon.clone()),
             );
             if !collapsed {
@@ -302,15 +300,23 @@ impl Shell {
                         .child(project.name.clone()),
                 );
             }
-            if asleep {
+            // Workspace state: a tiny dot only (the machine has its own indicator).
+            let ws_dot = match project.state {
+                BoxState::Awake => None,
+                BoxState::Waking => Some(theme.warn),
+                BoxState::HibernatedLight | BoxState::HibernatedDeep => Some(theme.text_faint),
+                BoxState::StoppedByUser => Some(theme.text_muted),
+                BoxState::Error => Some(theme.danger),
+            };
+            if let (Some(c), false) = (ws_dot, streaming) {
                 tile = tile.child(
                     div()
                         .absolute()
-                        .top(px(4.0))
+                        .top(px(5.0))
                         .right(px(6.0))
-                        .text_size(px(9.0))
-                        .text_color(theme.text_faint)
-                        .child("zz"),
+                        .size(px(5.0))
+                        .rounded_full()
+                        .bg(c),
                 );
             }
             if streaming {
@@ -371,6 +377,7 @@ impl Shell {
             .gap(px(10.0))
             .pt(px(6.0))
             .pb(px(12.0))
+            .child(self.render_machine_indicator(collapsed, cx))
             .child(
                 bottom_button("rail-new-project", "+", 20.0, &theme).on_click(cx.listener(
                     |this, _, window, cx| {
@@ -709,12 +716,15 @@ impl Shell {
 
     // ----- banners (S11–S14) ------------------------------------------------
 
+    /// One machine-level banner, only while the user's machine is waking or
+    /// errored (and S14 while the relay link is down). Workspace state never
+    /// banners: it is the tiny dot on the tab/rail.
     fn render_banner(&self, cx: &mut Context<Self>) -> Option<Div> {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let link = state.link;
-        let project = state.selected().cloned()?;
-        let project_id = project.id.clone();
+        let machine = state.machine.clone();
+        state.selected()?;
 
         let banner = |bg: gpui::Hsla, fg: gpui::Hsla| {
             div()
@@ -737,110 +747,182 @@ impl Shell {
             );
         }
 
-        match project.state {
-            BoxState::Awake => None,
-            BoxState::Waking => {
+        match machine.state {
+            MachineState::Waking => {
                 PulseClock::request(cx);
-                let progress = project.wake_progress.unwrap_or(0.0).clamp(0.0, 1.0);
-                let detail = project
-                    .state_detail
+                let detail = machine
+                    .detail
                     .clone()
-                    .unwrap_or_else(|| "Waking sandbox…".to_string());
+                    .unwrap_or_else(|| "Starting your machine…".to_string());
+                let mut b = banner(theme.surface_1, theme.text)
+                    .child(cards_spinner(&theme, cx))
+                    .child(detail);
+                if let Some(progress) = machine.progress {
+                    b = b.child(
+                        div()
+                            .flex_1()
+                            .h(px(4.0))
+                            .rounded_full()
+                            .bg(theme.border)
+                            .child(
+                                div()
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(theme.accent)
+                                    .w(gpui::relative(progress.clamp(0.02, 1.0))),
+                            ),
+                    );
+                } else {
+                    b = b.child(div().flex_1());
+                }
                 Some(
-                    banner(theme.surface_1, theme.text)
-                        .child(cards_spinner(&theme, cx))
-                        .child(detail)
-                        .child(
-                            div()
-                                .flex_1()
-                                .h(px(4.0))
-                                .rounded_full()
-                                .bg(theme.border)
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .rounded_full()
-                                        .bg(theme.accent)
-                                        .w(gpui::relative(progress.max(0.02))),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.text_faint)
-                                .child("your message is queued"),
-                        ),
+                    b.child(
+                        div()
+                            .text_color(theme.text_faint)
+                            .child("messages are queued"),
+                    ),
                 )
             }
-            BoxState::HibernatedLight | BoxState::HibernatedDeep => Some(
-                banner(theme.surface_1, theme.text_muted)
-                    .child(div().text_color(theme.text_faint).child("zz"))
-                    .child("Sleeping · will wake on your next message")
+            MachineState::Error => Some(
+                banner(theme.danger_soft, theme.text)
+                    .child(div().text_color(theme.danger).child("✗"))
+                    .child(
+                        machine
+                            .detail
+                            .clone()
+                            .unwrap_or_else(|| "Your machine could not start.".to_string()),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
-                            .id("banner-wake")
+                            .id("banner-retry")
                             .text_color(theme.accent)
                             .cursor_pointer()
-                            .child("Wake now")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.wake(project_id.clone(), cx));
+                            .child("Retry")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.machine_start(cx));
                             })),
                     ),
             ),
-            BoxState::StoppedByUser => Some(
-                banner(theme.surface_1, theme.text_muted)
-                    .child(div().text_color(theme.danger).child("■"))
-                    .child("Stopped by you · tap to resume")
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("banner-resume")
-                            .text_color(theme.accent)
-                            .cursor_pointer()
-                            .child("Resume")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.wake(project_id.clone(), cx));
-                            })),
-                    ),
-            ),
-            BoxState::Error => {
-                let details_id = project.id.clone();
-                Some(
-                    banner(theme.danger_soft, theme.text)
-                        .child(div().text_color(theme.danger).child("✗"))
-                        .child("Could not wake sandbox.")
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .id("banner-retry")
-                                .text_color(theme.accent)
-                                .cursor_pointer()
-                                .child("Retry")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.state
-                                        .update(cx, |s, cx| s.wake(project_id.clone(), cx));
-                                })),
-                        )
-                        .child(
-                            div()
-                                .id("banner-details")
-                                .text_color(theme.text_muted)
-                                .cursor_pointer()
-                                .child("Details")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| {
-                                        s.open_details(
-                                            DetailsTarget::Project(details_id.clone()),
-                                            cx,
-                                        )
-                                    });
-                                })),
-                        ),
-                )
-            }
+            MachineState::Asleep
+            | MachineState::Awake
+            | MachineState::Stopped
+            | MachineState::Unknown => None,
         }
+    }
+
+    /// Rail footer: the machine indicator (dot + state word); hover shows
+    /// spec, uptime and spend; click opens Settings (Machine section).
+    fn render_machine_indicator(&self, collapsed: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = Theme::of(cx).clone();
+        let state = self.state.read(cx);
+        let machine = state.machine.clone();
+        let hover = state.machine_hover;
+        let color = match machine.state {
+            MachineState::Awake => theme.accent,
+            MachineState::Waking => theme.warn,
+            MachineState::Asleep | MachineState::Unknown => theme.text_faint,
+            MachineState::Stopped => theme.text_muted,
+            MachineState::Error => theme.danger,
+        };
+        if machine.state == MachineState::Waking {
+            PulseClock::request(cx);
+        }
+        let phase = PulseClock::phase(cx, 1100);
+        let dot_alpha = if machine.state == MachineState::Waking {
+            0.35 + 0.65 * phase
+        } else {
+            1.0
+        };
+        let mut tile = div()
+            .id("machine-indicator")
+            .relative()
+            .w(px(if collapsed { 36.0 } else { RAIL_TILE }))
+            .h(px(22.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(6.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.state.update(cx, |s, cx| {
+                    s.machine_hover = *hovered;
+                    cx.notify();
+                });
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.settings_open = true;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .size(px(7.0))
+                    .rounded_full()
+                    .bg(Theme::with_alpha(color, dot_alpha)),
+            );
+        if !collapsed {
+            tile = tile.child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(theme.text_faint)
+                    .child(machine.state.label()),
+            );
+        }
+        if hover {
+            let uptime = machine
+                .since
+                .filter(|_| machine.state == MachineState::Awake)
+                .map(|since| fmt_uptime(now_ms().saturating_sub(since)))
+                .unwrap_or_else(|| "—".into());
+            let card = div()
+                .absolute()
+                .left(px(if collapsed { 44.0 } else { RAIL_TILE + 8.0 }))
+                .bottom(px(0.0))
+                .w(px(230.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .p(px(10.0))
+                .rounded(px(PANEL_RADIUS))
+                .bg(theme.card())
+                .border_1()
+                .border_color(theme.border_strong)
+                .shadow_lg()
+                .text_size(px(11.5))
+                .text_color(theme.text)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(div().size(px(7.0)).rounded_full().bg(color))
+                        .child(format!("Machine · {}", machine.state.label())),
+                )
+                .child(
+                    div().text_color(theme.text_muted).child(
+                        machine
+                            .spec
+                            .clone()
+                            .unwrap_or_else(|| "spec unknown".into()),
+                    ),
+                )
+                .child(
+                    div()
+                        .text_color(theme.text_muted)
+                        .child(format!("Uptime {uptime}")),
+                )
+                .child(div().text_color(theme.text_muted).child(format!(
+                    "Spend today ${:.2} of ${:.2}",
+                    machine.spend_today_usd, machine.spend_cap_usd
+                )))
+                .when_some(machine.detail.clone(), |el, d| {
+                    el.child(div().text_color(theme.text_faint).child(d))
+                });
+            tile = tile.child(frosted(PANEL_RADIUS, MENU_BLUR, card));
+        }
+        tile
     }
 
     // ----- center column ------------------------------------------------------
@@ -1089,55 +1171,6 @@ impl Shell {
         let mut preview: Option<String> = None;
         let mut blob_key: Option<String> = None;
         let title = match target {
-            DetailsTarget::Project(id) => {
-                let mut rows = Vec::new();
-                if let Some(p) = state.project(id) {
-                    rows.push(("Project".into(), p.name.clone()));
-                    rows.push(("Box state".into(), format!("{:?}", p.state)));
-                    rows.push((
-                        "Model".into(),
-                        format!("{} · {}", p.model, p.effort.label()),
-                    ));
-                    rows.push((
-                        "Spend today".into(),
-                        format!("${:.2} of ${:.2}", p.spend_today_usd, p.spend_cap_usd),
-                    ));
-                    if let Some(d) = &p.state_detail {
-                        rows.push(("Detail".into(), d.clone()));
-                    }
-                }
-                sections.push(("Project".into(), rows));
-                if let Some(doc) = state.project_docs.get(id) {
-                    if !doc.model_note.is_empty() {
-                        sections.push((
-                            "Model note".into(),
-                            vec![("Note".into(), doc.model_note.clone())],
-                        ));
-                    }
-                    sections.push(("Box status (project doc)".into(), json_rows(&doc.status)));
-                    sections.push(("Settings (project doc)".into(), json_rows(&doc.settings)));
-                    sections.push((
-                        "Threads · T1 index".into(),
-                        doc.threads
-                            .iter()
-                            .map(|t| {
-                                (
-                                    format!("{} · {} · {}", t.name, t.status, t.harness),
-                                    if t.summary.is_empty() {
-                                        t.purpose.clone()
-                                    } else {
-                                        t.summary.clone()
-                                    },
-                                )
-                            })
-                            .collect(),
-                    ));
-                    if !doc.memory_t1.is_empty() {
-                        preview = Some(doc.memory_t1.clone());
-                    }
-                }
-                "Project details".to_string()
-            }
             DetailsTarget::Message {
                 chat_id,
                 message_id,
@@ -1492,6 +1525,7 @@ impl Shell {
             | crate::update::UpdatePhase::Installing(_)
             | crate::update::UpdatePhase::Restarting(_) => None,
         };
+        let machine = state.machine.clone();
         let glass_ok = Theme::glass_available();
 
         let option = |id: &'static str,
@@ -1614,6 +1648,76 @@ impl Shell {
                         .on_click(cx.listener(|this, _, _, cx| {
                             let s = Theme::of(cx).surface;
                             this.set_theme(Appearance::Light, s, cx);
+                        })),
+                    ),
+            )
+            .child(div().h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("MACHINE"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .px(px(2.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text)
+                    .child(format!(
+                        "State: {}{}",
+                        machine.state.label(),
+                        machine
+                            .detail
+                            .as_deref()
+                            .map(|d| format!(" · {d}"))
+                            .unwrap_or_default()
+                    ))
+                    .child(
+                        div().text_color(theme.text_muted).child(
+                            machine
+                                .spec
+                                .clone()
+                                .unwrap_or_else(|| "spec unknown".into()),
+                        ),
+                    )
+                    .child(div().text_color(theme.text_muted).child(format!(
+                        "Spend today ${:.2} of ${:.2}",
+                        machine.spend_today_usd, machine.spend_cap_usd
+                    ))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(4.0))
+                    .child(
+                        option(
+                            "machine-start",
+                            "Start",
+                            false,
+                            machine.state.is_down(),
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.state.read(cx).machine.state.is_down() {
+                                this.state.update(cx, |s, cx| s.machine_start(cx));
+                            }
+                        })),
+                    )
+                    .child(
+                        option(
+                            "machine-stop",
+                            "Stop",
+                            false,
+                            !machine.state.is_down(),
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if !this.state.read(cx).machine.state.is_down() {
+                                this.state.update(cx, |s, cx| s.machine_stop(cx));
+                            }
                         })),
                     ),
             )
@@ -2055,6 +2159,17 @@ fn json_rows(v: &serde_json::Value) -> Vec<(String, String)> {
         }
         serde_json::Value::Null => Vec::new(),
         other => vec![("value".into(), scalar(other))],
+    }
+}
+
+fn fmt_uptime(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 

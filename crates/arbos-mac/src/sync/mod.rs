@@ -19,8 +19,8 @@ use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Message, Project,
-    ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill,
+    BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Machine, Message,
+    Project, ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -39,7 +39,9 @@ pub enum SyncEvent {
     Projects(Vec<Project>),
     /// Model ids the relay proxy can serve (picker contents).
     Models(Vec<String>),
-    /// Box lifecycle for one project (relay `STATUS` frame or doc `status`).
+    /// The user's machine (`status.box` at user level).
+    Machine(Machine),
+    /// Workspace lifecycle for one project (`status.workspace` or relay `STATUS`).
     ProjectStatus {
         project_id: Id,
         state: BoxState,
@@ -174,10 +176,8 @@ pub enum ClientCommand {
     CreateProject {
         name: String,
     },
-    /// S11 "tap to resume" / S13 "Retry".
-    Wake {
-        project_id: Id,
-    },
+    MachineStart,
+    MachineStop,
     FetchBlob {
         project_id: Id,
         key: String,

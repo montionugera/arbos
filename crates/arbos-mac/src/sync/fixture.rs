@@ -15,7 +15,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
-use crate::model::{ProjectDocView, ThreadInfo};
+use crate::model::{Machine, MachineState, ProjectDocView, ThreadInfo};
 
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -72,6 +72,7 @@ struct Shared {
     routines: Mutex<Vec<Routine>>,
     routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
     local: Mutex<LocalView>,
+    machine: Mutex<Machine>,
 }
 
 pub struct FixtureSource;
@@ -109,11 +110,21 @@ impl SyncSource for FixtureSource {
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
+                machine: Mutex::new(Machine {
+                    state: MachineState::Awake,
+                    since: Some(now_ms().saturating_sub(42 * 60_000)),
+                    spec: Some("arbos-std · 2 vCPU · 4 GiB · 10 GiB".into()),
+                    spend_today_usd: 5.39,
+                    spend_cap_usd: 25.0,
+                    detail: None,
+                    progress: None,
+                }),
             });
             seed_docs(&shared);
 
             let _ = events.send(SyncEvent::Link(Link::Connecting));
             emit_projects(&shared);
+            emit_machine(&shared);
             emit_chats(&shared);
             {
                 let docs = shared.docs.lock().unwrap();
@@ -186,7 +197,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             {
                 let docs = shared.docs.lock().unwrap();
                 if let Some(doc) = docs.get(&chat_id) {
-                    let asleep = project_state(shared, &project_id).is_asleep();
+                    let asleep = machine_down(shared);
                     let mut parts: Vec<Part> = attachments
                         .iter()
                         .map(|path| Part::Attachment {
@@ -390,11 +401,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
-        ClientCommand::Wake { project_id } => {
+        ClientCommand::MachineStart => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                wake_project(&shared, &project_id).await;
+                wake_machine(&shared).await;
             });
+        }
+        ClientCommand::MachineStop => {
+            set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
         }
         ClientCommand::Pair { .. } => {
             let _ = shared.events.send(SyncEvent::Paired {
@@ -1114,6 +1128,65 @@ fn set_project_state(
     });
 }
 
+fn emit_machine(shared: &Shared) {
+    let m = shared.machine.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::Machine(m));
+}
+
+fn machine_down(shared: &Shared) -> bool {
+    shared.machine.lock().unwrap().state.is_down()
+}
+
+fn set_machine(shared: &Shared, state: MachineState, detail: Option<&str>, progress: Option<f32>) {
+    {
+        let mut m = shared.machine.lock().unwrap();
+        if m.state != state {
+            m.since = Some(now_ms());
+        }
+        m.state = state;
+        m.detail = detail.map(str::to_string);
+        m.progress = progress;
+    }
+    emit_machine(shared);
+}
+
+/// Start the user's machine: a short progress ramp, then every queued
+/// message in every workspace is released.
+async fn wake_machine(shared: &Arc<Shared>) {
+    if !machine_down(shared) {
+        return;
+    }
+    let was_stopped = shared.machine.lock().unwrap().state == MachineState::Stopped;
+    let steps = if was_stopped { 18 } else { 14 };
+    for i in 0..=steps {
+        set_machine(
+            shared,
+            MachineState::Waking,
+            Some("Starting your machine…"),
+            Some(i as f32 / steps as f32),
+        );
+        sleep(Duration::from_millis(180)).await;
+    }
+    set_machine(shared, MachineState::Awake, None, None);
+    let docs = shared.docs.lock().unwrap();
+    for doc in docs.values() {
+        let mut changed = false;
+        for ix in 0..doc.len() {
+            if doc
+                .read_message(ix)
+                .map(|m| m.status == MessageStatus::Queued)
+                .unwrap_or(false)
+            {
+                let _ = doc.set_status(ix, MessageStatus::Done);
+                changed = true;
+            }
+        }
+        if changed {
+            doc.commit();
+        }
+    }
+}
+
 fn emit_projects(shared: &Shared) {
     let projects = shared.projects.lock().unwrap().clone();
     let _ = shared.events.send(SyncEvent::Projects(projects));
@@ -1217,23 +1290,9 @@ async fn wake_project(shared: &Arc<Shared>, project_id: &str) {
     if !state.is_asleep() && state != BoxState::Error {
         return;
     }
-    let deep = state == BoxState::HibernatedDeep;
-    let steps = if deep { 24 } else { 14 };
-    let detail = if deep {
-        "Restoring from archive…"
-    } else {
-        "Waking sandbox…"
-    };
-    for i in 0..=steps {
-        set_project_state(
-            shared,
-            project_id,
-            BoxState::Waking,
-            Some(detail),
-            Some(i as f32 / steps as f32),
-        );
-        sleep(Duration::from_millis(180)).await;
-    }
+    // Workspaces open fast once the machine is up: a brief "waking" dot, then awake.
+    set_project_state(shared, project_id, BoxState::Waking, None, None);
+    sleep(Duration::from_millis(600)).await;
     set_project_state(shared, project_id, BoxState::Awake, None, None);
     let chat_ids: Vec<Id> = shared
         .chats
@@ -1473,6 +1532,9 @@ async fn run_turn(
         }
     });
 
+    if machine_down(shared) {
+        wake_machine(shared).await;
+    }
     if project_state(shared, project_id).is_asleep() {
         wake_project(shared, project_id).await;
     }
