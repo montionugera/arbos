@@ -1,7 +1,8 @@
 // Home, Grok Bot layout: top bar with the account circle (left) and search +
 // "+" circles (right), a row of large avatars for the most recent projects,
 // then the agent list (avatar, name, time, preview). One machine: its state
-// is the small dot on the account circle and on each avatar.
+// is the small dot on the account circle and on each avatar (no status line
+// in the list; the machine details live in Settings).
 
 import SwiftUI
 
@@ -31,7 +32,6 @@ struct HomeView: View {
                             emptyState
                         } else {
                             if query.isEmpty {
-                                machineLine
                                 ForEach(model.approvals) { device in
                                     ApprovalCard(device: device)
                                 }
@@ -177,28 +177,6 @@ struct HomeView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
-    }
-
-    /// One muted line for the one machine (Grok's system-line style).
-    private var machineLine: some View {
-        HStack(spacing: 6) {
-            Circle().fill(machineDotColor(model.machine.state, theme: theme)).frame(width: 7, height: 7)
-            Text(machineLineText)
-                .font(.system(size: Theme.tiny))
-                .foregroundStyle(theme.muted)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 6)
-    }
-
-    /// "Machine awake · 4 vCPU · 8 GiB" (spec trimmed to its first two parts).
-    private var machineLineText: String {
-        let label = "Machine \(model.machine.label.lowercased())"
-        guard model.machine.reported else { return label }
-        let parts: [String] = model.machine.spec.components(separatedBy: " · ")
-        let short: [String] = Array(parts.dropFirst().prefix(2))
-        return short.isEmpty ? label : label + " · " + short.joined(separator: " · ")
     }
 
     // MARK: Favourites row (three most recent)
