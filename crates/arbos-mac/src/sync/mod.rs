@@ -301,6 +301,11 @@ pub enum ClientCommand {
         project_id: Id,
         slug: String,
     },
+    /// Avatar picker colour row: `PATCH /projects/{id} {avatar_color: id}` (mirrored into the doc).
+    SetAvatarColor {
+        project_id: Id,
+        color: String,
+    },
     FetchBlob {
         project_id: Id,
         key: String,

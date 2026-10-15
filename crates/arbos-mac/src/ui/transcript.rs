@@ -89,6 +89,8 @@ pub enum RowKind {
         note: Option<String>,
         /// Tree-character slug the relay put on the reply (`senderAvatar`).
         avatar: Option<String>,
+        /// Its colour (`senderAvatarColor`); `None` = look it up / mono.
+        avatar_color: Option<String>,
     },
     /// F11: small speaker under a reply; click speaks it (again).
     Speaker {
@@ -521,6 +523,7 @@ impl Transcript {
                 seed,
                 note,
                 avatar,
+                avatar_color,
             } => {
                 let state = self.state.read(cx);
                 // A shared agent's reply may carry only its handle: name, glyph
@@ -573,6 +576,23 @@ impl Transcript {
                                 })
                         })
                 });
+                let avatar_color = avatar_color.or_else(|| {
+                    seed.strip_prefix("agent:")
+                        .or_else(|| seed.strip_prefix("project:"))
+                        .and_then(|pid| {
+                            state
+                                .selected()
+                                .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
+                                .and_then(|a| a.avatar_color.clone())
+                                .or_else(|| {
+                                    state
+                                        .projects
+                                        .iter()
+                                        .find(|p| p.id == pid)
+                                        .and_then(|p| state.avatar_color(p))
+                                })
+                        })
+                });
                 let avatar_state = seed
                     .strip_prefix("agent:")
                     .or_else(|| seed.strip_prefix("project:"))
@@ -583,6 +603,7 @@ impl Transcript {
                     icon.as_deref(),
                     color,
                     avatar_slug.as_deref(),
+                    avatar_color.as_deref(),
                     avatar_state,
                     &theme,
                 );
@@ -828,6 +849,7 @@ pub fn build_rows(
                             seed: message.sender.clone(),
                             note: None,
                             avatar: None,
+                            avatar_color: None,
                         },
                     });
                 } else if message.sender.starts_with("agent:") && message.asked_by_handle.is_some()
@@ -845,7 +867,15 @@ pub fn build_rows(
                         note.push_str(&format!(" · owned by @{owner}"));
                     }
                     rows.push(Row {
-                        version: hash_version(&(&name, &message.sender_icon, &note), false),
+                        version: hash_version(
+                            &(
+                                &name,
+                                &message.sender_icon,
+                                &note,
+                                &message.sender_avatar_color,
+                            ),
+                            false,
+                        ),
                         id: format!("{}#sender", message.id),
                         message_id: message.id.clone(),
                         kind: RowKind::Sender {
@@ -857,6 +887,10 @@ pub fn build_rows(
                                 .sender_avatar
                                 .clone()
                                 .filter(|a| !a.is_empty() && !a.contains("://")),
+                            avatar_color: message
+                                .sender_avatar_color
+                                .clone()
+                                .filter(|a| !a.is_empty()),
                         },
                     });
                 }

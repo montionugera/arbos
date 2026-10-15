@@ -734,6 +734,12 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
                     .and_then(Value::as_str)
                     .filter(|a| !a.is_empty())
                     .map(str::to_string),
+                avatar_color: project
+                    .get("avatar_color")
+                    .or_else(|| m.get("avatar_color"))
+                    .and_then(Value::as_str)
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_string),
             });
         }
     }
@@ -777,6 +783,7 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
         shared: false,
         owner_handle: None,
         avatar: None,
+        avatar_color: None,
     };
     let previous_unread = shared
         .chats
@@ -1013,6 +1020,13 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .filter(|a| !a.is_empty())
                 .map(str::to_string)
                 .or_else(|| previous.as_ref().and_then(|x| x.avatar.clone())),
+            avatar_color: p
+                .get("avatar_color")
+                .or_else(|| item.get("avatar_color"))
+                .and_then(Value::as_str)
+                .filter(|a| !a.is_empty())
+                .map(str::to_string)
+                .or_else(|| previous.as_ref().and_then(|x| x.avatar_color.clone())),
         });
         let chats: Vec<Chat> = detail
             .get("chats")
@@ -2031,6 +2045,7 @@ async fn send_message(
             } else {
                 None
             },
+            sender_avatar_color: None,
             mentions,
             status: MessageStatus::Done,
             turn: None,
@@ -2871,6 +2886,39 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     // Older relays reject the field; the doc mirror still holds it.
                     if !format!("{err:#}").contains("HTTP 400") {
                         shared.notice(format!("Avatar: {err:#}"));
+                    }
+                }
+            });
+        }
+        ClientCommand::SetAvatarColor { project_id, color } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.avatar_color = Some(color.clone());
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            {
+                let docs = shared.docs.lock().unwrap();
+                if let Some(doc) = docs.get(&project_doc_key(&project_id)) {
+                    let settings = doc.doc.get_map("settings");
+                    let _ = settings.insert("avatarColor", color.as_str());
+                    doc.commit();
+                }
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .patch_json(
+                        &format!("/projects/{project_id}"),
+                        json!({ "avatar_color": color }),
+                    )
+                    .await
+                {
+                    if !format!("{err:#}").contains("HTTP 400") {
+                        shared.notice(format!("Avatar colour: {err:#}"));
                     }
                 }
             });

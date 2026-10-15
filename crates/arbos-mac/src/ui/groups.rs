@@ -69,6 +69,7 @@ pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Di
                 let head = match slug {
                     Some(slug) => crate::ui::avatars::element(
                         Some(&slug),
+                        found.and_then(|p| p.avatar_color.as_deref()),
                         crate::ui::avatars::AvatarState::Idle,
                         GLYPH,
                         &icon,
@@ -104,17 +105,20 @@ pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Di
 
 /// The caption above another Project's message: its glyph and name.
 /// The sender chip above another agent's message, with its tree avatar when it has one.
+#[allow(clippy::too_many_arguments)]
 pub fn sender_chip_with(
     name: &str,
     icon: Option<&str>,
     color: Hsla,
     avatar: Option<&str>,
+    avatar_color: Option<&str>,
     state: crate::ui::avatars::AvatarState,
     theme: &Theme,
 ) -> Div {
     let head = match avatar {
         Some(slug) => crate::ui::avatars::element(
             Some(slug),
+            avatar_color,
             state,
             GLYPH + 4.0,
             icon.unwrap_or("·"),

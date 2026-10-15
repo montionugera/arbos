@@ -55,6 +55,7 @@ pub fn agent_glyph(agent: &AgentMember, size: f32, theme: &Theme) -> Div {
     if let Some(slug) = agent.avatar.as_deref() {
         return crate::ui::avatars::element(
             Some(slug),
+            agent.avatar_color.as_deref(),
             crate::ui::avatars::AvatarState::Idle,
             size,
             &agent.icon,
@@ -1113,6 +1114,7 @@ pub fn project_controls(
                 .cursor_pointer()
                 .child(crate::ui::avatars::element(
                     slug.as_deref(),
+                    project.avatar_color.as_deref(),
                     st,
                     22.0,
                     &project.icon,

@@ -24,7 +24,7 @@ fn embed_tree_avatars() {
     println!("cargo:rerun-if-changed={}", root.join("frames").display());
 
     let manifest = fs::read_to_string(root.join("manifest.json")).unwrap_or_default();
-    let mut strips: Vec<(String, String, bool, u32, PathBuf)> = Vec::new();
+    let mut strips: Vec<(String, String, bool, u32, bool, PathBuf)> = Vec::new();
     if let Ok(entries) = fs::read_dir(root.join("frames")) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -38,10 +38,21 @@ fn embed_tree_avatars() {
                 Some(s) => (s, 2u32),
                 None => (stem, 1u32),
             };
-            let (stem, rail) = match stem.strip_suffix("-rail") {
-                Some(s) => (s, true),
-                None => (stem, false),
-            };
+            // `-tree` (white tree on transparent, no disc) and `-rail` in either order.
+            let mut stem = stem.to_string();
+            let mut tree = false;
+            let mut rail = false;
+            loop {
+                if let Some(s) = stem.strip_suffix("-tree") {
+                    tree = true;
+                    stem = s.to_string();
+                } else if let Some(s) = stem.strip_suffix("-rail") {
+                    rail = true;
+                    stem = s.to_string();
+                } else {
+                    break;
+                }
+            }
             let Some((slug, state)) = stem.rsplit_once('-') else {
                 continue;
             };
@@ -54,7 +65,7 @@ fn embed_tree_avatars() {
             if (rail && scale == 2) || (!rail && scale == 1) {
                 continue;
             }
-            strips.push((slug.to_string(), state.to_string(), rail, scale, path));
+            strips.push((slug.to_string(), state.to_string(), rail, scale, tree, path));
             println!("cargo:rerun-if-changed={}", entry.path().display());
         }
     }
@@ -65,15 +76,19 @@ fn embed_tree_avatars() {
         "pub static MANIFEST_JSON: &str = {:?};\n",
         manifest
     ));
-    code.push_str("/// (slug, state, rail, scale, png bytes)\n");
-    code.push_str("pub static STRIPS: &[(&str, &str, bool, u32, &[u8])] = &[\n");
-    for (slug, state, rail, scale, path) in &strips {
+    code.push_str("/// (slug, state, rail, scale, tree-only, png bytes)\n");
+    code.push_str(
+        "pub type Strip = (&'static str, &'static str, bool, u32, bool, &'static [u8]);\n",
+    );
+    code.push_str("pub static STRIPS: &[Strip] = &[\n");
+    for (slug, state, rail, scale, tree, path) in &strips {
         code.push_str(&format!(
-            "    ({:?}, {:?}, {}, {}, include_bytes!({:?})),\n",
+            "    ({:?}, {:?}, {}, {}, {}, include_bytes!({:?})),\n",
             slug,
             state,
             rail,
             scale,
+            tree,
             abs(path)
         ));
     }

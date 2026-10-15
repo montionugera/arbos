@@ -341,6 +341,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         sender_icon: None,
                         sender_handle: None,
                         sender_avatar: None,
+                        sender_avatar_color: None,
                         mentions: Vec::new(),
                         reply_to: None,
                         asked_by_handle: None,
@@ -538,6 +539,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::SetAvatarColor { project_id, color } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.avatar_color = Some(color);
+                }
+            }
+            emit_projects(shared);
+        }
         ClientCommand::MachineRestart => {
             set_machine(shared, MachineState::Stopped, Some("Restarting…"), None);
             let shared = shared.clone();
@@ -582,6 +592,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 shared: false,
                 owner_handle: None,
                 avatar: None,
+                avatar_color: None,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -1095,6 +1106,7 @@ fn send_user(
                 sender_icon: None,
                 sender_handle: None,
                 sender_avatar: None,
+                sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
                 asked_by_handle: None,
@@ -1391,6 +1403,7 @@ fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
                 sender_icon: None,
                 sender_handle: None,
                 sender_avatar: None,
+                sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
                 asked_by_handle: None,
@@ -1965,6 +1978,7 @@ async fn run_turn(
             sender_icon: None,
             sender_handle: None,
             sender_avatar: None,
+            sender_avatar_color: None,
             mentions: Vec::new(),
             reply_to: None,
             asked_by_handle: None,
@@ -2571,6 +2585,7 @@ async fn run_outcome_turn(
             sender_icon: None,
             sender_handle: None,
             sender_avatar: None,
+            sender_avatar_color: None,
             mentions: Vec::new(),
             reply_to: None,
             asked_by_handle: None,
@@ -2707,6 +2722,7 @@ fn seed_projects() -> Vec<Project> {
             shared: false,
             owner_handle: None,
             avatar: None,
+            avatar_color: Some("teal".into()),
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -2727,6 +2743,7 @@ fn seed_projects() -> Vec<Project> {
             shared: false,
             owner_handle: None,
             avatar: None,
+            avatar_color: Some("violet".into()),
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -2747,6 +2764,7 @@ fn seed_projects() -> Vec<Project> {
             shared: false,
             owner_handle: None,
             avatar: None,
+            avatar_color: None,
         },
     ]
 }
@@ -3015,6 +3033,7 @@ impl Seeder<'_> {
             sender_icon: None,
             sender_handle: None,
             sender_avatar: None,
+            sender_avatar_color: None,
             mentions: Vec::new(),
             reply_to: None,
             asked_by_handle: None,
@@ -3051,6 +3070,7 @@ impl Seeder<'_> {
             sender_icon: None,
             sender_handle: None,
             sender_avatar: None,
+            sender_avatar_color: None,
             mentions: Vec::new(),
             reply_to: None,
             asked_by_handle: None,
@@ -3088,6 +3108,7 @@ fn project_message(chat_id: &str, project: &Project, text: &str, t: u64) -> Mess
         sender_icon: Some(project.icon.clone()),
         sender_handle: None,
         sender_avatar: None,
+        sender_avatar_color: None,
         mentions: Vec::new(),
         reply_to: None,
         asked_by_handle: None,
@@ -3622,6 +3643,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         shared: false,
         owner_handle: None,
         avatar: None,
+        avatar_color: None,
     }
 }
 
@@ -3649,6 +3671,7 @@ fn seed_people_projects() -> Vec<Project> {
             shared: true,
             owner_handle: Some("sam".into()),
             avatar: None,
+            avatar_color: None,
         },
     ]
 }
@@ -3697,6 +3720,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         sender_icon: None,
         sender_handle: Some(who.handle.clone()),
         sender_avatar: Some(who.avatar_url.clone()),
+        sender_avatar_color: None,
         mentions: Vec::new(),
         reply_to: None,
         asked_by_handle: None,
@@ -3944,6 +3968,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         owner_handle: ME_HANDLE.into(),
                         reply_policy: ReplyPolicy::Mention,
                         avatar: None,
+                        avatar_color: None,
                     })
             };
             if let Some(agent) = agent {
@@ -4043,6 +4068,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 owner_handle: ME_HANDLE.into(),
                                 reply_policy: ReplyPolicy::EveryMessage,
                                 avatar: None,
+                                avatar_color: None,
                             })
                     };
                     if let Some(agent) = agent {
@@ -4193,6 +4219,7 @@ async fn agent_reply(
             sender_icon: Some(agent.icon.clone()),
             sender_handle: Some(agent.handle.clone()),
             sender_avatar: None,
+            sender_avatar_color: None,
             mentions: Vec::new(),
             reply_to: None,
             asked_by_handle: Some(asker.handle.clone()),

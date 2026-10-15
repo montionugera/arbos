@@ -65,6 +65,10 @@ pub struct Project {
     /// Tree-character slug (`PATCH /projects/{id} {avatar}`); `None` = hash pick.
     #[serde(default)]
     pub avatar: Option<String>,
+    /// Avatar colour id from the manifest (`PATCH /projects/{id} {avatar_color}`);
+    /// `None` = mono.
+    #[serde(default)]
+    pub avatar_color: Option<String>,
 }
 
 impl Project {
@@ -175,6 +179,8 @@ pub struct AgentMember {
     /// Tree-character slug of the agent's project, when the relay carries it.
     #[serde(default)]
     pub avatar: Option<String>,
+    #[serde(default)]
+    pub avatar_color: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,6 +713,9 @@ pub struct Message {
     pub sender_handle: Option<String>,
     #[serde(default)]
     pub sender_avatar: Option<String>,
+    /// Avatar colour of the agent that wrote it (`senderAvatarColor`, D72 shared agents).
+    #[serde(default)]
+    pub sender_avatar_color: Option<String>,
     /// `agent:<project_id>` / `user:<id>` the composer resolved from `@`.
     #[serde(default)]
     pub mentions: Vec<String>,

@@ -1174,6 +1174,7 @@ impl AppState {
                 sender_icon: None,
                 sender_handle: None,
                 sender_avatar: None,
+                sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
                 asked_by_handle: None,
@@ -1341,6 +1342,7 @@ impl AppState {
                 sender_icon: None,
                 sender_handle: None,
                 sender_avatar: None,
+                sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
                 asked_by_handle: None,
@@ -1533,6 +1535,22 @@ impl AppState {
             Some(until) if *until > now_ms() => AvatarState::Reply,
             _ => AvatarState::Idle,
         }
+    }
+
+    /// Avatar colour id a project shows (`None` = mono / manifest default).
+    pub fn avatar_color(&self, project: &Project) -> Option<String> {
+        project
+            .avatar_color
+            .clone()
+            .filter(|c| !c.trim().is_empty())
+    }
+
+    pub fn set_avatar_color(&mut self, project_id: Id, color: String, cx: &mut Context<Self>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.avatar_color = Some(color.clone());
+        }
+        self.command(ClientCommand::SetAvatarColor { project_id, color });
+        cx.notify();
     }
 
     pub fn set_avatar(&mut self, project_id: Id, slug: String, cx: &mut Context<Self>) {

@@ -434,6 +434,7 @@ impl Shell {
                     }
                     tile = tile.child(avatars::element(
                         Some(&slug),
+                        project.avatar_color.as_deref(),
                         avatar_state,
                         if collapsed { 26.0 } else { 40.0 },
                         &project.icon,
@@ -792,6 +793,7 @@ impl Shell {
                                 }
                                 avatars::element(
                                     Some(&slug),
+                                    p.avatar_color.as_deref(),
                                     st,
                                     20.0,
                                     &p.icon,
