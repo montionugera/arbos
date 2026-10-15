@@ -19,7 +19,7 @@ struct ChatView: View {
     private var project: Project? { model.project(projectId) }
     private var chat: Chat? { model.chat(chatId) }
     private var messages: [Message] { model.messages(of: chatId) }
-    private var rows: [Row] { Transcript.rows(messages) }
+    @State private var rows: [Row] = []
     private var isEmpty: Bool { messages.isEmpty && !sentOnce }
     private var needsAnswer: Bool { model.chatNeedsAnswer(chatId) }
     private var streaming: Bool { model.isStreaming(chatId) }
@@ -71,7 +71,10 @@ struct ChatView: View {
             }
         }
         .onAppear { model.markRead(chatId: chatId) }
-        .onChange(of: messages.count) { _, _ in model.markRead(chatId: chatId) }
+        .onChange(of: messages, initial: true) { _, new in
+            rows = Transcript.rows(new)
+            model.markRead(chatId: chatId)
+        }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             if ready, !sentOnce, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
                 draft = text

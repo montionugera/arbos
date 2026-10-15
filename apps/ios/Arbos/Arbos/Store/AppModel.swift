@@ -81,6 +81,9 @@ final class AppModel: ObservableObject {
         }
         #endif
         let endpoint = RelayEndpoint(saved)
+        if !endpoint.httpUrl.isEmpty {
+            UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
+        }
         api = RelayAPI(endpoint: endpoint) { "" }
         if creds == nil { creds = Keychain.load(relayUrl: endpoint.httpUrl) }
         credentials = creds
@@ -96,9 +99,9 @@ final class AppModel: ObservableObject {
 
     func setRelayUrl(_ raw: String) {
         let endpoint = RelayEndpoint(raw)
+        UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
         guard endpoint != api.endpoint else { return }
         unpair(forget: false)
-        UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
         api = RelayAPI(endpoint: endpoint) { [weak self] in self?.credentials?.deviceToken ?? "" }
         credentials = Keychain.load(relayUrl: endpoint.httpUrl)
         if credentials != nil {
@@ -350,8 +353,14 @@ final class AppModel: ObservableObject {
         return last.askUserText != nil
     }
 
+    /// A turn is running: the last assistant message streams, or any recent
+    /// one does. A message left `streaming` by a box that died hours ago
+    /// must not pin the indicator forever.
     func isStreaming(_ chatId: Id) -> Bool {
-        messages(of: chatId).contains { $0.role == .assistant && $0.isStreaming }
+        let list = messages(of: chatId)
+        if let last = list.last(where: { $0.role == .assistant }), last.isStreaming { return true }
+        let recent = nowMs() - 15 * 60 * 1000
+        return list.contains { $0.role == .assistant && $0.isStreaming && $0.createdAt >= recent }
     }
 
     func isStreaming(project projectId: Id) -> Bool {

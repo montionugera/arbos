@@ -91,6 +91,10 @@ struct PairingView: View {
         .onAppear {
             relayUrl = model.relayUrl
             focus = relayUrl.isEmpty ? .relay : .code
+            if let hook = DebugHooks.pairCode {
+                code = hook
+                submit()
+            }
         }
     }
 
