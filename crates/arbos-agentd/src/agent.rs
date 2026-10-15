@@ -1300,6 +1300,7 @@ impl Agent {
             Err(e) => (MessageStatus::Error, Some(e.to_string())),
         };
         let (talking_model, _) = self.live_models().await;
+        let room_name;
         {
             let mut h = host.lock().await;
             if let Some(e) = &err_text {
@@ -1315,6 +1316,10 @@ impl Agent {
                 ],
             );
             h.doc.finish_message(&assistant_msg_id, final_status);
+            room_name = h.room.clone();
+        }
+        if matches!(final_status, MessageStatus::Done) && !turn.streamed_text.trim().is_empty() {
+            self.announce_reply(&room_name, &assistant_msg_id, &turn.streamed_text);
         }
         if !turn.streamed_text.trim().is_empty() {
             let _ = self.store.t3_append(
@@ -1516,6 +1521,41 @@ impl Agent {
             .send()
             .await?;
         Ok(())
+    }
+
+    /// Tell the relay a whole reply landed, so people who are not looking get a notification
+    /// (`POST /chats/{id}/notify` for a people chat, `POST /projects/{p}/chats/{c}/notify`
+    /// otherwise). Fire-and-forget: the message is in the doc either way.
+    pub fn announce_reply(self: &Arc<Self>, room: &str, message_id: &str, text: &str) {
+        let Some((project, chat_id)) = room.split_once('/') else {
+            return;
+        };
+        let url = if project == crate::people::PEOPLE_PROJECT {
+            format!("{}/chats/{chat_id}/notify", self.cfg.relay_url)
+        } else {
+            format!(
+                "{}/projects/{}/chats/{chat_id}/notify",
+                self.cfg.relay_url, self.cfg.project_id
+            )
+        };
+        let body = json!({
+            "message_id": message_id,
+            "text": text.chars().take(600).collect::<String>(),
+            "project_id": self.cfg.project_id,
+        });
+        let me = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = me
+                .http
+                .post(url)
+                .bearer_auth(&me.cfg.box_token)
+                .json(&body)
+                .send()
+                .await
+            {
+                tracing::debug!(error = %e, "notify relay of reply failed");
+            }
+        });
     }
 
     pub async fn post_timing(&self, kind: &str, ms: i64, detail: Option<&str>) -> Result<()> {
