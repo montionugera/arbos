@@ -1,8 +1,7 @@
 // Home, Grok Bot layout: top bar with the account circle (left) and search +
-// "+" circles (right), a row of large avatars for the most recent projects,
-// then the agent list (avatar, name, time, preview). One machine: its state
-// is the small dot on the account circle and on each avatar (no status line
-// in the list; the machine details live in Settings).
+// "+" circles (right), then the chat list (avatar, name, time, preview) —
+// nothing between the bar and the list. One machine: its state is the small
+// dot on the account circle; the machine details live in Settings.
 
 import SwiftUI
 
@@ -35,7 +34,6 @@ struct HomeView: View {
                                 ForEach(model.approvals) { device in
                                     ApprovalCard(device: device)
                                 }
-                                favorites
                             }
                             ForEach(homeRows) { row in
                                 switch row {
@@ -177,29 +175,6 @@ struct HomeView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
-    }
-
-    // MARK: Favourites row (three most recent)
-
-    private var favorites: some View {
-        let top = Array(projects.prefix(3))
-        return HStack(alignment: .top, spacing: 0) {
-            ForEach(top) { project in
-                Button { model.open(project: project) } label: {
-                    VStack(spacing: 10) {
-                        BlobAvatar(project: project, theme: theme, size: 72,
-                                   dot: model.isStreaming(project: project.id) ? theme.warn : nil)
-                        Text(project.name)
-                            .font(.system(size: Theme.small))
-                            .foregroundStyle(theme.muted)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.vertical, 14)
     }
 
     // MARK: Empty / error
