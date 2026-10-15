@@ -49,6 +49,8 @@ impl AvatarState {
 pub struct Character {
     pub slug: String,
     pub name: String,
+    /// `ready: false` in the manifest = placeholder art, files may be missing.
+    pub ready: bool,
     /// frames per second per state (default 30).
     fps: HashMap<String, f32>,
 }
@@ -64,10 +66,16 @@ struct ManifestCharacter {
     slug: String,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default = "yes")]
+    ready: bool,
     #[serde(default)]
     frames: HashMap<String, StateMeta>,
     #[serde(default)]
     fps: Option<f32>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -86,6 +94,7 @@ fn characters() -> &'static [Character] {
                     .into_iter()
                     .map(|c| Character {
                         name: c.name.clone().unwrap_or_else(|| title(&c.slug)),
+                        ready: c.ready,
                         fps: c
                             .frames
                             .iter()
@@ -103,11 +112,12 @@ fn characters() -> &'static [Character] {
                 out.push(Character {
                     slug: (*slug).to_string(),
                     name: title(slug),
+                    ready: true,
                     fps: HashMap::new(),
                 });
             }
         }
-        out.sort_by(|a, b| a.slug.cmp(&b.slug));
+        // Manifest order is a contract (the relay picks slugs[fnv1a64(id) % n]); do not sort.
         out
     })
 }
@@ -131,22 +141,31 @@ pub fn all() -> &'static [Character] {
     characters()
 }
 
+/// Anything to show or pick at all (manifest or strips present).
 pub fn available() -> bool {
-    !embedded::STRIPS.is_empty()
+    !characters().is_empty()
 }
 
-/// Pick a character for a new project: hash of the id, then the next free
-/// one so a rail does not show the same tree twice (until all are in use).
+/// FNV-1a 64 over the UTF-8 bytes — the relay's `avatar.rs` arithmetic.
+pub fn fnv1a64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// The relay's default: `slugs[fnv1a64(project_id) % n]` in manifest order.
+/// Only when the relay sent no avatar at all does the client walk forward to
+/// the next character not already used in this rail (the relay itself does
+/// not dedupe, so a relay-sent slug is always shown as is).
 pub fn assign(project_id: &str, taken: &HashSet<String>) -> Option<String> {
     let chars = characters();
     if chars.is_empty() {
         return None;
     }
-    let mut h: u64 = 1469598103934665603;
-    for b in project_id.bytes() {
-        h = (h ^ b as u64).wrapping_mul(1099511628211);
-    }
-    let start = (h % chars.len() as u64) as usize;
+    let start = (fnv1a64(project_id) % chars.len() as u64) as usize;
     for i in 0..chars.len() {
         let c = &chars[(start + i) % chars.len()];
         if !taken.contains(&c.slug) {
@@ -305,7 +324,7 @@ pub fn picker(
         .flex()
         .flex_wrap()
         .gap(px(8.0))
-        .max_w(px(4.0 * 76.0 + 3.0 * 8.0));
+        .max_w(px(5.0 * 80.0 + 4.0 * 8.0));
     for c in all() {
         let slug = c.slug.clone();
         let selected = current.as_deref() == Some(c.slug.as_str());
@@ -316,12 +335,13 @@ pub fn picker(
                     "avatar-pick-{}",
                     c.slug
                 ))))
-                .w(px(76.0))
+                .w(px(80.0))
                 .flex()
                 .flex_col()
                 .items_center()
                 .gap(px(4.0))
                 .p(px(6.0))
+                .when(!c.ready, |el| el.opacity(0.6))
                 .rounded(px(10.0))
                 .border_1()
                 .border_color(if selected {
@@ -349,10 +369,12 @@ pub fn picker(
                         .text_size(px(10.5))
                         .text_color(if selected {
                             theme.text
-                        } else {
+                        } else if c.ready {
                             theme.text_muted
+                        } else {
+                            theme.text_faint
                         })
-                        .max_w(px(64.0))
+                        .max_w(px(68.0))
                         .truncate()
                         .child(c.name.clone()),
                 )

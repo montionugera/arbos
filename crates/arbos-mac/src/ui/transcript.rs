@@ -87,6 +87,8 @@ pub enum RowKind {
         seed: String,
         /// "answering @sam · owned by @jacob" for a shared agent (D72).
         note: Option<String>,
+        /// Tree-character slug the relay put on the reply (`senderAvatar`).
+        avatar: Option<String>,
     },
     /// F11: small speaker under a reply; click speaks it (again).
     Speaker {
@@ -518,6 +520,7 @@ impl Transcript {
                 icon,
                 seed,
                 note,
+                avatar,
             } => {
                 let state = self.state.read(cx);
                 // A shared agent's reply may carry only its handle: name, glyph
@@ -553,22 +556,23 @@ impl Transcript {
                     })
                     .unwrap_or_else(|| groups::sender_color(&seed, &theme));
                 // The sender's tree avatar: a shared agent's own slug, else my project's.
-                let avatar_slug = seed
-                    .strip_prefix("agent:")
-                    .or_else(|| seed.strip_prefix("project:"))
-                    .and_then(|pid| {
-                        state
-                            .selected()
-                            .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
-                            .and_then(|a| a.avatar.clone())
-                            .or_else(|| {
-                                state
-                                    .projects
-                                    .iter()
-                                    .find(|p| p.id == pid)
-                                    .and_then(|p| state.avatar_slug(p))
-                            })
-                    });
+                let avatar_slug = avatar.or_else(|| {
+                    seed.strip_prefix("agent:")
+                        .or_else(|| seed.strip_prefix("project:"))
+                        .and_then(|pid| {
+                            state
+                                .selected()
+                                .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
+                                .and_then(|a| a.avatar.clone())
+                                .or_else(|| {
+                                    state
+                                        .projects
+                                        .iter()
+                                        .find(|p| p.id == pid)
+                                        .and_then(|p| state.avatar_slug(p))
+                                })
+                        })
+                });
                 let avatar_state = seed
                     .strip_prefix("agent:")
                     .or_else(|| seed.strip_prefix("project:"))
@@ -823,6 +827,7 @@ pub fn build_rows(
                             icon: message.sender_icon.clone(),
                             seed: message.sender.clone(),
                             note: None,
+                            avatar: None,
                         },
                     });
                 } else if message.sender.starts_with("agent:") && message.asked_by_handle.is_some()
@@ -848,6 +853,10 @@ pub fn build_rows(
                             icon: message.sender_icon.clone(),
                             seed: message.sender.clone(),
                             note: Some(note),
+                            avatar: message
+                                .sender_avatar
+                                .clone()
+                                .filter(|a| !a.is_empty() && !a.contains("://")),
                         },
                     });
                 }
