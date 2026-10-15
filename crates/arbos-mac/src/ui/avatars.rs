@@ -78,6 +78,8 @@ struct ManifestColor {
     #[serde(default)]
     ring: Option<String>,
     #[serde(default)]
+    ring_opacity: Option<f32>,
+    #[serde(default)]
     tree: Option<String>,
     #[serde(default)]
     tree_dark: Option<String>,
@@ -97,6 +99,8 @@ pub struct Palette {
     pub name: String,
     pub bg: [u8; 3],
     pub ring: [u8; 3],
+    /// Ring alpha, 0–255 (manifest `ring_opacity`, default opaque).
+    pub ring_alpha: u8,
     pub tree: [u8; 3],
     pub tree_dark: [u8; 3],
     pub tree_light: [u8; 3],
@@ -116,6 +120,7 @@ impl Palette {
             name: "Mono".into(),
             bg: [0, 0, 0],
             ring: [255, 255, 255],
+            ring_alpha: 255,
             tree: [255, 255, 255],
             tree_dark: [170, 170, 170],
             tree_light: [220, 220, 220],
@@ -153,7 +158,9 @@ impl Palette {
     }
 
     pub fn ring_hsla(&self) -> Hsla {
-        rgb_hsla(self.ring)
+        let mut c = rgb_hsla(self.ring);
+        c.a = self.ring_alpha as f32 / 255.0;
+        c
     }
 
     pub fn tree_hsla(&self) -> Hsla {
@@ -206,6 +213,10 @@ fn palettes() -> &'static [Palette] {
                 name: c.name.unwrap_or_else(|| title(&id)),
                 bg: c.bg.as_deref().and_then(parse_hex).unwrap_or(mono.bg),
                 ring: c.ring.as_deref().and_then(parse_hex).unwrap_or(mono.ring),
+                ring_alpha: c
+                    .ring_opacity
+                    .map(|o| (o.clamp(0.0, 1.0) * 255.0).round() as u8)
+                    .unwrap_or(255),
                 tree,
                 tree_dark: c
                     .tree_dark
@@ -266,6 +277,7 @@ pub fn palette_for(color: Option<&str>) -> Palette {
             name: c.to_string(),
             bg: palettes()[0].bg,
             ring: palettes()[0].ring,
+            ring_alpha: palettes()[0].ring_alpha,
             tree: rgb,
             tree_dark: scale_rgb(rgb, 170),
             tree_light: scale_rgb(rgb, 220),
@@ -598,7 +610,7 @@ fn swatch(p: &Palette, size: f32, selected: bool, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(div().size(px(size * 0.42)).rounded_full().bg(p.tree_hsla()))
+        .child(div().size(px(size * 0.5)).rounded_full().bg(p.tree_hsla()))
 }
 
 /// Settings → Avatar: every character in a grid; the current one is ringed.
