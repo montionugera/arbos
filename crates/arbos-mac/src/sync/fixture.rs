@@ -113,7 +113,8 @@ impl SyncSource for FixtureSource {
                 machine: Mutex::new(Machine {
                     state: MachineState::Awake,
                     since: Some(now_ms().saturating_sub(42 * 60_000)),
-                    spec: Some("arbos-std · 2 vCPU · 4 GiB · 10 GiB".into()),
+                    spec: Some("4 vCPU · 8 GiB · 10 GiB".into()),
+                    class: Some("arbos-agent-0.1.7".into()),
                     spend_today_usd: 5.39,
                     spend_cap_usd: 25.0,
                     detail: None,

@@ -38,6 +38,8 @@ use crate::model::{
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
 const PRESENCE_EVERY: Duration = Duration::from_secs(15);
 const REGISTRY_POLL: Duration = Duration::from_secs(15);
+/// `GET /machine` is the source of truth for the rail indicator and Settings.
+const MACHINE_POLL: Duration = Duration::from_secs(10);
 const BACKOFF_MIN: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(16);
 const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(30);
@@ -258,6 +260,16 @@ fn start_after_pairing(shared: &Arc<Shared>) {
             refresh_connectors(&shared).await;
         });
     }
+    {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            let mut poll = interval(MACHINE_POLL);
+            loop {
+                poll.tick().await;
+                refresh_machine(&shared).await;
+            }
+        });
+    }
     let shared = shared.clone();
     tokio::spawn(async move {
         let mut poll = interval(REGISTRY_POLL);
@@ -418,19 +430,6 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             merged.push(c);
         }
         *local = merged;
-    }
-    {
-        let spend: f64 = projects.iter().map(|p| p.spend_today_usd).sum();
-        let cap = projects.first().map(|p| p.spend_cap_usd).unwrap_or(25.0);
-        let mut m = shared.machine.lock().unwrap();
-        m.spend_today_usd = spend;
-        m.spend_cap_usd = cap;
-        if m.spec.is_none() {
-            m.spec = Some("arbos-std · 2 vCPU · 4 GiB · 10 GiB".into());
-        }
-        let snapshot = m.clone();
-        drop(m);
-        let _ = shared.events.send(SyncEvent::Machine(snapshot));
     }
     *shared.projects.lock().unwrap() = projects.clone();
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
@@ -627,9 +626,11 @@ fn box_state_from_word(word: &str) -> Option<BoxState> {
         "awake" => BoxState::Awake,
         "waking" => BoxState::Waking,
         "error" => BoxState::Error,
-        "asleep" | "hibernated_light" => BoxState::HibernatedLight,
+        "running" => BoxState::Awake,
+        "starting" => BoxState::Waking,
+        "asleep" | "stopped" | "hibernated_light" => BoxState::HibernatedLight,
         "hibernated_deep" => BoxState::HibernatedDeep,
-        "stopped" | "stopped_by_user" => BoxState::StoppedByUser,
+        "stopped_by_user" => BoxState::StoppedByUser,
         _ => return None,
     })
 }
@@ -645,9 +646,11 @@ fn machine_state_from_word(word: &str) -> MachineState {
     }
 }
 
-/// Project doc `status`: `box {state, since}` is the user's machine (mirrored
-/// into every project doc); `workspace {state}` is this project. Older docs
-/// carry `box` as a bare word — read that as both.
+/// Project doc `status` (D70): `box {state: awake|asleep, since}` is the
+/// user's machine as the box itself knows it, mirrored into every project
+/// doc — the instant signal between `GET /machine` polls; `workspace {state:
+/// running|stopped, since}` is this project. Older docs carry `box` as a bare
+/// word — read that as both.
 fn apply_project_doc_status(shared: &Shared, project_id: &str) {
     let status = {
         let docs = shared.docs.lock().unwrap();
@@ -659,12 +662,16 @@ fn apply_project_doc_status(shared: &Shared, project_id: &str) {
     match status.get("box") {
         Some(Value::Object(b)) => {
             let word = b.get("state").and_then(Value::as_str).unwrap_or("");
-            let since = b.get("since").and_then(Value::as_u64);
-            let detail = b.get("detail").and_then(Value::as_str).map(str::to_string);
-            set_machine(shared, machine_state_from_word(word), since, detail);
+            let since = b.get("since").and_then(Value::as_u64).filter(|v| *v > 0);
+            let state = machine_state_from_word(word);
+            // The box can only say awake/asleep; never let a stale "asleep"
+            // mirror override the relay's live "waking".
+            let waking = shared.machine.lock().unwrap().state == MachineState::Waking;
+            if !(waking && state == MachineState::Asleep) {
+                set_machine(shared, state, since, None);
+            }
         }
         Some(Value::String(word)) => {
-            // Legacy shape: one box per project. Treat it as the machine too.
             set_machine(shared, machine_state_from_word(word), None, None);
             if let Some(state) = box_state_from_word(word) {
                 set_project_state(shared, project_id, state, None);
@@ -681,9 +688,77 @@ fn apply_project_doc_status(shared: &Shared, project_id: &str) {
             set_project_state(shared, project_id, state, None);
         }
     }
-    if let Some(spend) = status.get("spendTodayUsd").and_then(Value::as_f64) {
+}
+
+/// `GET /machine`: state, spec, spend and every workspace's state.
+async fn refresh_machine(shared: &Arc<Shared>) {
+    let value = match shared.get_json("/machine").await {
+        Ok(v) => v,
+        // Quiet: the registry poll already surfaces relay outages (S14).
+        Err(_) => return,
+    };
+    let word = value.get("state").and_then(Value::as_str).unwrap_or("");
+    let since = value
+        .get("since")
+        .and_then(Value::as_u64)
+        .filter(|v| *v > 0);
+    let detail = value
+        .get("error")
+        .or_else(|| value.get("detail"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let spec_obj = value.get("spec").and_then(Value::as_object);
+    let spec = spec_obj.map(|spec| {
+        let num = |k: &str| spec.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+        format!(
+            "{} vCPU · {} GiB · {} GiB",
+            num("cpu"),
+            num("mem_gib"),
+            num("disk_gib")
+        )
+    });
+    let class = spec_obj
+        .and_then(|spec| spec.get("class"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let snapshot = {
         let mut m = shared.machine.lock().unwrap();
-        m.spend_today_usd = spend;
+        let state = machine_state_from_word(word);
+        if m.state != state {
+            m.since = since.or(Some(now_ms()));
+        } else if since.is_some() {
+            m.since = since;
+        }
+        m.state = state;
+        m.detail = detail;
+        m.progress = None;
+        if spec.is_some() {
+            m.spec = spec;
+        }
+        if class.is_some() {
+            m.class = class;
+        }
+        if let Some(v) = value.get("spend_today_usd").and_then(Value::as_f64) {
+            m.spend_today_usd = v;
+        }
+        if let Some(v) = value.get("spend_cap_usd").and_then(Value::as_f64) {
+            m.spend_cap_usd = v;
+        }
+        m.clone()
+    };
+    let _ = shared.events.send(SyncEvent::Machine(snapshot));
+    if let Some(workspaces) = value.get("workspaces").and_then(Value::as_array) {
+        for ws in workspaces {
+            let (Some(id), Some(word)) = (
+                ws.get("project_id").and_then(Value::as_str),
+                ws.get("state").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            if let Some(state) = box_state_from_word(word) {
+                set_project_state(shared, id, state, None);
+            }
+        }
     }
 }
 
@@ -838,11 +913,14 @@ async fn run_session(
             Err(err) => eprintln!("relay room {room}: checkpoint fetch failed: {err:#}"),
         }
     }
+    // The replica lives in memory, so after a relaunch our own device's rows
+    // are needed too (the relay's `excludeOwn` filters by device, not by
+    // connection). Loro drops the duplicates on a same-process reconnect.
     tx.send(binary(Frame::new(
         FrameType::RowsReq,
         serde_json::to_value(RowsReq {
             after: *cursor,
-            exclude_own: true,
+            exclude_own: false,
         })?,
         Vec::new(),
     )))
@@ -898,6 +976,8 @@ async fn run_session(
                         let header: StatusHeader = serde_json::from_value(frame.header)?;
                         set_project_state(shared, project_id, map_box(header.box_state), header.detail.clone());
                         set_machine(shared, machine_from_wire(header.box_state), None, header.detail);
+                        let poll = shared.clone();
+                        tokio::spawn(async move { refresh_machine(&poll).await });
                     }
                     FrameType::Error => {
                         let header: ErrorHeader = serde_json::from_value(frame.header)?;
@@ -1487,53 +1567,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let start = matches!(cmd, ClientCommand::MachineStart);
             let shared = shared.clone();
             tokio::spawn(async move {
-                // Planned user-level endpoint first; fall back to per-project
-                // start/stop until the relay grows `/machine`.
                 let verb = if start { "start" } else { "stop" };
-                let primary = shared
-                    .post_json(&format!("/machine/{verb}"), json!({}))
-                    .await;
-                if primary.is_ok() {
-                    set_machine(
-                        &shared,
-                        if start {
-                            MachineState::Waking
-                        } else {
-                            MachineState::Stopped
-                        },
-                        None,
-                        None,
-                    );
-                    return;
-                }
-                let ids: Vec<Id> = shared
-                    .projects
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|p| p.id.clone())
-                    .collect();
                 set_machine(
                     &shared,
                     if start {
                         MachineState::Waking
                     } else {
-                        MachineState::Stopped
+                        MachineState::Asleep
                     },
                     None,
                     None,
                 );
-                for id in ids {
-                    if let Err(err) = shared
-                        .post_json(&format!("/projects/{id}/{verb}"), json!({}))
-                        .await
-                    {
-                        shared.notice(format!("Machine {verb}: {err:#}"));
+                match shared
+                    .post_json(&format!("/machine/{verb}"), json!({}))
+                    .await
+                {
+                    Ok(v) => {
+                        if let Some(word) = v.get("state").and_then(Value::as_str) {
+                            set_machine(
+                                &shared,
+                                machine_state_from_word(word),
+                                v.get("since").and_then(Value::as_u64).filter(|v| *v > 0),
+                                None,
+                            );
+                        }
                     }
+                    Err(err) => shared.notice(format!("Machine {verb}: {err:#}")),
                 }
-                if let Err(err) = refresh_registry(&shared).await {
-                    shared.notice(format!("Relay: {err:#}"));
-                }
+                refresh_machine(&shared).await;
             });
         }
         ClientCommand::FetchBlob {

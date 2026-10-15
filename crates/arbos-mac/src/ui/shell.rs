@@ -908,6 +908,9 @@ impl Shell {
                             .unwrap_or_else(|| "spec unknown".into()),
                     ),
                 )
+                .when_some(machine.class.clone(), |el, c| {
+                    el.child(div().text_color(theme.text_faint).child(c))
+                })
                 .child(
                     div()
                         .text_color(theme.text_muted)
@@ -988,7 +991,9 @@ impl Shell {
                         div()
                             .text_size(px(13.0))
                             .text_color(theme.text_muted)
-                            .child("Press + in the rail. The relay registers the project and starts its sandbox."),
+                            .child(
+                                "Press + in the rail. Each project is a workspace on your machine.",
+                            ),
                     ),
             );
         }
@@ -1675,14 +1680,15 @@ impl Shell {
                             .map(|d| format!(" · {d}"))
                             .unwrap_or_default()
                     ))
-                    .child(
-                        div().text_color(theme.text_muted).child(
+                    .child(div().text_color(theme.text_muted).child(format!(
+                            "{}{}",
+                            machine.spec.clone().unwrap_or_else(|| "spec unknown".into()),
                             machine
-                                .spec
-                                .clone()
-                                .unwrap_or_else(|| "spec unknown".into()),
-                        ),
-                    )
+                                .class
+                                .as_deref()
+                                .map(|c| format!(" · {c}"))
+                                .unwrap_or_default()
+                        )))
                     .child(div().text_color(theme.text_muted).child(format!(
                         "Spend today ${:.2} of ${:.2}",
                         machine.spend_today_usd, machine.spend_cap_usd
@@ -2031,12 +2037,18 @@ impl Shell {
             .border_1()
             .border_color(theme.border_strong)
             .shadow_lg()
-            .child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("New project"))
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child("New project"),
+            )
             .child(
                 div()
                     .text_size(px(11.5))
                     .text_color(theme.text_muted)
-                    .child("The relay registers it and creates its sandbox from the image. Enter to create."),
+                    .child("It becomes a workspace on your machine. Enter to create."),
             )
             .child(
                 div()
@@ -2085,7 +2097,9 @@ impl Shell {
                             .text_color(theme.bg)
                             .cursor_pointer()
                             .child("Create")
-                            .on_click(cx.listener(|this, _, window, cx| this.submit_project(window, cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.submit_project(window, cx)),
+                            ),
                     ),
             );
         div()

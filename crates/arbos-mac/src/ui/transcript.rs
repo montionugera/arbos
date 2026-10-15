@@ -987,6 +987,12 @@ fn render_block(
             let numbered = matches!(block, Block::Numbered(_));
             let mut col = base.flex().flex_col().gap(px(3.0));
             let mut offset = 0usize;
+            // Two-digit markers ("10.") need a wider gutter than "•".
+            let marker_w = if numbered && items.len() >= 10 {
+                24.0
+            } else {
+                16.0
+            };
             for (i, item) in items.iter().enumerate() {
                 let marker = if numbered {
                     format!("{}.", i + 1)
@@ -999,7 +1005,7 @@ fn render_block(
                         .gap(px(8.0))
                         .child(
                             div()
-                                .w(px(16.0))
+                                .w(px(marker_w))
                                 .flex_shrink_0()
                                 .text_color(theme.text_muted)
                                 .child(marker),

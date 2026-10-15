@@ -931,8 +931,10 @@ impl MachineState {
 pub struct Machine {
     pub state: MachineState,
     pub since: Option<u64>,
-    /// e.g. "2 vCPU · 4 GiB · 10 GiB" (`SandboxBinding.resource_class`).
+    /// e.g. "4 vCPU · 8 GiB · 10 GiB" (`GET /machine` `spec`).
     pub spec: Option<String>,
+    /// Snapshot / resource class, e.g. "arbos-agent-0.1.7".
+    pub class: Option<String>,
     pub spend_today_usd: f64,
     pub spend_cap_usd: f64,
     pub detail: Option<String>,
