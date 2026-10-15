@@ -590,16 +590,35 @@ pub async fn chat_read(
     Path(id): Path<String>,
     Json(b): Json<ReadBody>,
 ) -> Response {
-    if let Err(r) = member_chat(&state, &principal, &id) {
-        return *r;
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let is_people = state.db.people_chat(&id).ok().flatten().is_some();
+    if is_people {
+        if let Err(r) = member_chat(&state, &principal, &id) {
+            return *r;
+        }
+        if let Err(e) = state
+            .db
+            .set_read_mark(&id, &device_of(&principal), b.seq.max(0))
+        {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
+    } else {
+        // A project chat (own or shared): the same call marks it read for unread counts.
+        let Ok(Some(project_id)) = state.db.chat_project_id(&id) else {
+            return api_error(StatusCode::NOT_FOUND, "not_found", "no such chat");
+        };
+        if !state.allows(&principal, &project_id) {
+            return api_error(StatusCode::FORBIDDEN, "not_member", "not your chat");
+        }
     }
-    match state
-        .db
-        .set_read_mark(&id, &device_of(&principal), b.seq.max(0))
-    {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    if let Err(e) = state.db.mark_chat_read(&me, &id) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    crate::notify::badge_refresh(&state, &me, &device_of(&principal)).await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// `POST /chats/{id}/hide` — delete-for-me on this device (a new message un-hides it).
@@ -1590,6 +1609,7 @@ pub fn on_room_push(
     let (head, _) = state.db.room_activity(&room_of(chat_id)).unwrap_or((0, 0));
     let payload = json!({
         "chat_id": chat_id, "from": format!("user:{user_id}"), "from_handle": handle_of(state, user_id), "seq": head + 1,
+        "sender": crate::notify::Sender::user(state, user_id).json(),
     });
     for other in humans.iter().filter(|u| *u != user_id) {
         let _ = state

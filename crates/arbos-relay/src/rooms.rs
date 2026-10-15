@@ -138,6 +138,11 @@ async fn run(
         }
     }
     tracing::debug!(%room_name, %device, conn_id, "room leave");
+    if let Principal::Device { id, .. } = &principal {
+        if let Some((_, chat_id)) = room_name.rsplit_once('/') {
+            crate::notify::clear_focus(&state, id, chat_id).await;
+        }
+    }
     if is_box {
         boxes::box_disconnected(&state, &box_user).await;
     }
@@ -239,6 +244,24 @@ async fn handle_frame(
                     bytes: row,
                 });
                 if !is_box {
+                    // A person wrote without announcing a message (older apps): the fallback
+                    // notifies the other members by name only.
+                    if let Principal::Device { user_id, .. } = principal {
+                        let chat_id = room_name
+                            .rsplit_once('/')
+                            .map(|(_, c)| c.to_owned())
+                            .unwrap_or_default();
+                        let chat = if project_id == people::PEOPLE_PROJECT {
+                            Some(crate::notify::ChatRef::people(&chat_id))
+                        } else if chat_id != PROJECT_DOC_CHAT_ID {
+                            Some(crate::notify::ChatRef::project(project_id, &chat_id))
+                        } else {
+                            None
+                        };
+                        if let Some(chat) = chat {
+                            crate::notify::on_row_from_device(state, chat, user_id, seq);
+                        }
+                    }
                     // Wake obligation: a client row for a sleeping box (crdt-sync §8.4 step 1–2).
                     if let Some(u) = state.user_of(project_id) {
                         state
@@ -261,6 +284,12 @@ async fn handle_frame(
             }
         }
         FrameType::Presence => {
+            // `focused_chat` (crdt-sync §7.5): the chat on this device's screen; its message
+            // notifications are suppressed while the presence stays fresh.
+            if let Principal::Device { id, .. } = principal {
+                let focused = f.header.get("focused_chat").and_then(|v| v.as_str());
+                crate::notify::set_focus(state, id, focused).await;
+            }
             let out = Frame::new(FrameType::Presence, f.header, f.payload).encode();
             let _ = room.tx.send(RoomBroadcast {
                 from_conn: conn_id,

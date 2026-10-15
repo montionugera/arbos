@@ -468,6 +468,7 @@ impl Db {
         c.execute_batch(crate::db_accounts::ACCOUNTS_SCHEMA)?;
         crate::db_people::migrate_people(&c);
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
+        c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 

@@ -16,7 +16,7 @@ tokio-util = { workspace = true, features = ["io"] }
 futures.workspace = true
 axum.workspace = true
 tower-http.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["http2"] }
 tokio-tungstenite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -35,4 +35,5 @@ base64.workspace = true
 rand.workspace = true
 aes-gcm = "0.10"
 hmac = "0.12"
+ring = "0.17"
 image = { version = "0.25", default-features = false, features = ["png"] }

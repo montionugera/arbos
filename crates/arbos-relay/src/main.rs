@@ -1,5 +1,6 @@
 mod admin;
 mod api;
+mod apns;
 mod auth;
 mod avatar;
 mod blobs;
@@ -12,10 +13,12 @@ mod daytona;
 mod db;
 mod db_accounts;
 mod db_people;
+mod db_push;
 mod groups;
 mod images;
 mod local;
 mod migrate;
+mod notify;
 mod people;
 mod proxy;
 mod rooms;
@@ -267,6 +270,9 @@ async fn main() -> anyhow::Result<()> {
         jwt_key: Arc::new(jwt_key),
         download_cache: Arc::new(Mutex::new(None)),
         upgrading: Arc::new(Mutex::new(HashMap::new())),
+        push: apns::from_env().unwrap_or_else(|| Arc::new(apns::Pusher::Off)),
+        focus: Arc::new(Mutex::new(HashMap::new())),
+        fallback_sent: Arc::new(Mutex::new(HashMap::new())),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
@@ -317,6 +323,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/devices/{id}", delete(signin::device_revoke))
         .route("/me", get(signin::me))
         .route("/me/pushes", get(people::me_pushes))
+        .route("/me/unread", get(notify::me_unread))
+        .route(
+            "/devices/{id}/push",
+            post(notify::register_push).delete(notify::unregister_push),
+        )
+        .route("/chats/{id}/notify", post(notify::notify_people_chat))
+        .route(
+            "/projects/{project_id}/chats/{chat_id}/notify",
+            post(notify::notify_project_chat),
+        )
         .route("/users/search", get(people::users_search))
         .route("/users", get(people::users_directory))
         .route(

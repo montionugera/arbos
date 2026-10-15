@@ -768,6 +768,11 @@ mod tests {
             upgrading: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
+            push: Arc::new(crate::apns::Pusher::Capture(tokio::sync::Mutex::new(
+                Vec::new(),
+            ))),
+            focus: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            fallback_sent: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

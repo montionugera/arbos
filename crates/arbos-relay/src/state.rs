@@ -133,6 +133,12 @@ pub struct AppState {
     pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
     /// user_id → box upgrade in progress (`POST /machine/upgrade`).
     pub upgrading: Arc<Mutex<HashMap<String, UpgradeStatus>>>,
+    /// Message notifications transport (APNs, a capture list in tests, or off).
+    pub push: Arc<crate::apns::Pusher>,
+    /// device_id → the chat its presence says is on screen (suppresses that chat's pushes).
+    pub focus: crate::notify::Focus,
+    /// (chat_id, sender user) → when the row-level fallback last notified for it.
+    pub fallback_sent: Arc<Mutex<HashMap<(String, String), i64>>>,
 }
 
 /// One running box upgrade.
@@ -360,6 +366,9 @@ pub(crate) mod test_support {
             upgrading: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
+            push: Arc::new(crate::apns::Pusher::Capture(Mutex::new(Vec::new()))),
+            focus: Arc::new(Mutex::new(HashMap::new())),
+            fallback_sent: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
