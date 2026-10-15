@@ -630,7 +630,7 @@ struct ChatView: View {
                     .overlay(
                         Image(systemName: canSend ? "arrow.up" : "waveform")
                             .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(.black)
+                            .foregroundStyle(theme.onPrimary)
                     )
             }
             .buttonStyle(.plain)
