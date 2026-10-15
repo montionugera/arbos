@@ -357,7 +357,9 @@ struct ChatView: View {
                     if streaming {
                         workingLine.padding(.top, 20)
                     }
-                    Color.clear.frame(height: 12).id("bottom")
+                    // Clears the 24 pt fade above the composer, so the last row
+                    // (and "<name> is working") is never under the chat bar.
+                    Color.clear.frame(height: 28).id("bottom")
                 }
                 .padding(.horizontal, 16)
             }
