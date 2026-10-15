@@ -31,7 +31,10 @@ struct HomeView: View {
                         if model.projects.isEmpty {
                             emptyState
                         } else {
-                            if query.isEmpty { favorites }
+                            if query.isEmpty {
+                                machineLine
+                                favorites
+                            }
                             ForEach(projects) { project in
                                 Button { model.open(project: project) } label: {
                                     AgentRow(project: project, preview: preview(project), time: timeLabel(project),
@@ -77,17 +80,23 @@ struct HomeView: View {
             }
         }
         .task {
-            guard DebugHooks.demo, model.isFixture else { return }
-            try? await Task.sleep(nanoseconds: 2_600_000_000)
-            if let p = model.project("fx-comms") { model.open(project: p) }
+            if DebugHooks.demo, model.isFixture {
+                try? await Task.sleep(nanoseconds: 2_600_000_000)
+                if let p = model.project("fx-comms") { model.open(project: p) }
+            }
+            if DebugHooks.liveDemo, let id = DebugHooks.openProject {
+                while model.project(id) == nil || model.machine.reported == false { try? await Task.sleep(nanoseconds: 300_000_000) }
+                try? await Task.sleep(nanoseconds: 5_500_000_000)
+                if let p = model.project(id) { model.open(project: p) }
+            }
         }
         .onAppear {
-            if let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
+            if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
                 if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
             }
         }
         .onChange(of: model.projects.count) { _, _ in
-            if let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
+            if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
                 if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
             }
         }
@@ -159,6 +168,21 @@ struct HomeView: View {
             }
         }
         .padding(.horizontal, 16)
+        .padding(.top, 6)
+    }
+
+    /// One muted line for the one machine (Grok's system-line style).
+    private var machineLine: some View {
+        HStack(spacing: 6) {
+            Circle().fill(machineDotColor(model.machine.state, theme: theme)).frame(width: 7, height: 7)
+            Text(model.machine.reported
+                 ? "Machine \(model.machine.label.lowercased()) · \(model.machine.spec.split(separator: "·").dropFirst().prefix(2).map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " · "))"
+                 : "Machine \(model.machine.label.lowercased())")
+                .font(.system(size: Theme.tiny))
+                .foregroundStyle(theme.muted)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
         .padding(.top, 6)
     }
 

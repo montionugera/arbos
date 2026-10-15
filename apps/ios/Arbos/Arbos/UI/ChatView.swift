@@ -26,6 +26,10 @@ struct ChatView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var showPhotos = false
     @State private var showFiles = false
+    @State private var showAttach = false
+    @State private var scroller: ScrollViewProxy?
+    @State private var demoRan = false
+    @State private var demoQueue: [String] = []
     @StateObject private var recorder = MemoRecorder()
     @FocusState private var composerFocused: Bool
 
@@ -59,24 +63,51 @@ struct ChatView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
-        .sheet(isPresented: $showModelPicker) {
+        .sheet(isPresented: $showModelPicker, onDismiss: demoDismissed) {
             if let project {
                 ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme)
             }
         }
-        .sheet(isPresented: $showThreads) {
+        .sheet(isPresented: $showThreads, onDismiss: demoDismissed) {
             ChatListView(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model).environment(\.theme, theme)
         }
-        .fullScreenCover(isPresented: $showVoice) {
+        .fullScreenCover(isPresented: $showVoice, onDismiss: demoDismissed) {
             if let project {
                 VoiceModeView(project: project).environmentObject(model).environment(\.theme, theme)
             }
         }
         .task {
-            guard DebugHooks.demo, model.isFixture else { return }
+            guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
+            model.demoStarted = true
+            while !model.caughtUp.contains(chatId) { try? await Task.sleep(nanoseconds: 200_000_000) }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            composerFocused = true
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            for ch in text { draft.append(ch); try? await Task.sleep(nanoseconds: 45_000_000) }
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            send()
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            composerFocused = false
+            // Wait for the turn: streaming starts, then ends (cap 45 s).
+            var waited = 0
+            while !streaming && waited < 150 { try? await Task.sleep(nanoseconds: 200_000_000); waited += 1 }
+            while streaming && waited < 225 { try? await Task.sleep(nanoseconds: 200_000_000); waited += 1 }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if rows.count > 8 {
+                withAnimation(.easeInOut(duration: 1.2)) { scroller?.scrollTo(rows[rows.count - 8].id, anchor: .top) }
+                try? await Task.sleep(nanoseconds: 2_400_000_000)
+                withAnimation(.easeInOut(duration: 1.0)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+                try? await Task.sleep(nanoseconds: 1_600_000_000)
+            }
+            demoQueue = ["model", "threads", "attach", "voice", "settings"]
+            demoPresentNext()
+        }
+        .task {
+            guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
+            model.demoStarted = true
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             composerFocused = true
             try? await Task.sleep(nanoseconds: 900_000_000)
@@ -120,11 +151,42 @@ struct ChatView: View {
             model.markRead(chatId: chatId)
         }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
-            if ready, !sentOnce, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
+            if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
                 draft = text
                 send()
             }
         }
+    }
+
+    /// Demo tour: present the next sheet; each one auto-dismisses and its
+    /// onDismiss schedules the next, so presentations never overlap.
+    private func demoPresentNext() {
+        guard !demoQueue.isEmpty else { return }
+        let step = demoQueue.removeFirst()
+        let hold: Double = step == "voice" ? 3.5 : 3.0
+        switch step {
+        case "model": showModelPicker = true
+        case "threads": showThreads = true
+        case "attach": showAttach = true
+        case "voice": showVoice = true
+        case "settings": showSettings = true
+        default: break
+        }
+        guard step != "settings" else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
+            switch step {
+            case "model": showModelPicker = false
+            case "threads": showThreads = false
+            case "attach": showAttach = false
+            case "voice": showVoice = false
+            default: break
+            }
+        }
+    }
+
+    private func demoDismissed() {
+        guard DebugHooks.liveDemo, !demoQueue.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { demoPresentNext() }
     }
 
     // MARK: Header (floating glass)
@@ -198,7 +260,7 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    Color.clear.frame(height: 64)
+                    Color.clear.frame(height: 64).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
                         HStack(spacing: 6) {
                             if model.machine.state == .waking { ProgressView().controlSize(.mini).tint(theme.muted) }
@@ -333,10 +395,7 @@ struct ChatView: View {
                 }
             }
             HStack(spacing: 12) {
-                Menu {
-                    Button { showPhotos = true } label: { Label("Photo or video", systemImage: "photo") }
-                    Button { showFiles = true } label: { Label("File", systemImage: "doc") }
-                } label: {
+                Button { showAttach = true } label: {
                     ZStack {
                         Circle().fill(theme.field)
                         Circle().strokeBorder(theme.fieldBorder.opacity(0.6), lineWidth: 1)
@@ -347,6 +406,19 @@ struct ChatView: View {
                     .frame(width: Theme.plusButton, height: Theme.plusButton)
                 }
                 .buttonStyle(.plain)
+                .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
+                    AttachSheet(name: name) {
+                        showAttach = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotos = true }
+                    } onFile: {
+                        showAttach = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
+                    } onVoice: {
+                        showAttach = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showVoice = true }
+                    }
+                    .environment(\.theme, theme)
+                }
                 .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .any(of: [.images, .videos]))
                 .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
                     if case .success(let urls) = result, let url = urls.first {
@@ -490,6 +562,49 @@ struct ChatView: View {
 
     private func stop() {
         model.stop(chatId: chatId)
+    }
+}
+
+/// "+" sheet: Photo or video, File, Voice chat — Grok's attach options as a
+/// short bottom sheet.
+struct AttachSheet: View {
+    @Environment(\.theme) private var theme
+    let name: String
+    let onPhoto: () -> Void
+    let onFile: () -> Void
+    let onVoice: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Capsule().fill(theme.muted.opacity(0.4)).frame(width: 36, height: 5).padding(.top, 8).padding(.bottom, 14)
+            row(icon: "photo", title: "Photo or video", subtitle: "From your library", action: onPhoto)
+            row(icon: "doc", title: "File", subtitle: "From Files or iCloud Drive", action: onFile)
+            row(icon: "waveform", title: "Voice chat", subtitle: "Talk with \(name) live", action: onVoice)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .background(theme.bg)
+        .presentationDetents([.height(250)])
+        .presentationDragIndicator(.hidden)
+        .presentationBackground(theme.bg)
+    }
+
+    private func row(icon: String, title: String, subtitle: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                GlassCircle(size: 44) {
+                    Image(systemName: icon).font(.system(size: 18)).foregroundStyle(theme.text)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                    Text(subtitle).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

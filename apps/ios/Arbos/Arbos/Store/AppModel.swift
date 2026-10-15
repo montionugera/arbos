@@ -58,6 +58,8 @@ final class AppModel: ObservableObject {
     @Published var path: [Route] = []
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
+    /// Debug demo tours run once per process, whichever view instance starts them.
+    var demoStarted = false
 
     enum Route: Hashable {
         case chat(chatId: Id, projectId: Id)

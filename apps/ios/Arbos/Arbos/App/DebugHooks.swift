@@ -13,6 +13,8 @@ enum DebugHooks {
     static var show: String? { value("ARBOS_SHOW") }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
+    /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.
+    static var liveDemo: Bool { value("ARBOS_DEMO") == "live" }
 
     private static func value(_ key: String) -> String? {
         #if DEBUG
