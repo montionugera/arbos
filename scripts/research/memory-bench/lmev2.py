@@ -23,7 +23,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import bench
-from common import JUDGE_MODEL, PRIVATE, SPEND, OpenRouter, ntok, read_jsonl, write_jsonl
+from common import JUDGE_MODEL, PRIVATE, SPEND, SUMMARY_MODEL, OpenRouter, ntok, read_jsonl, write_jsonl
 from strategies import History, Query, TreeWalker, WalkParams, pack_bm25, pack_recent
 from tree import TreeBuilder
 
@@ -33,8 +33,16 @@ WORK = PUBLIC / "lmev2-work"
 sys.path.insert(0, str(PUBLIC / "lmev2-repo" / "evaluation"))
 import qa_eval_metrics as qem  # noqa: E402
 
-RENDER_CLIP = 4000  # chars of accessibility tree kept in a packed leaf
+RENDER_CLIP = int(os.environ.get("MEMBENCH_V2_RENDER_CLIP", "6000"))  # chars of accessibility tree kept in a packed leaf
+PAGE_CARD_CLIP = 7000  # chars of page text the page-card writer sees
 BASE_T = 1_700_000_000_000
+PAGE_CARD_SYSTEM = (
+    "You index pages an agent visited. Given the URL and the page's accessibility tree (clipped), return JSON "
+    '{"page": "<one line: which page/screen this is and what it is for>", "facts": [<up to 14 short strings>]}. '
+    "The facts are the concrete things someone might later ask about: menu/tab/filter/dropdown option labels in order, "
+    "column headers, button names, field labels, prices, counts, dates, status values, error or notice text, record names. "
+    "Quote labels exactly as shown. Prefer specifics over descriptions. JSON only."
+)
 DOMAIN_SYSTEM_PROMPTS = {
     "web": "You are an experienced colleague in a web browsing environment that has a customized magento-based shopping website, a customized magento-based shopping admin cms website, as well as a customized forum website based on reddit/postmill. Answer based on your memory of the environment. If you do not know the answer, output exactly \\boxed{UNKNOWN}. Do not guess. Never attempt to guess an answer if you are not sure. If you believe the question's construction/premise is wrong, provide an explanation in \\boxed{} explaining why the question is flawed.",
     "enterprise": "You are an experienced colleague working in a customized ServiceNow environment. Answer based on your memory of the environment. If you do not know the answer, output exactly \\boxed{UNKNOWN}. Do not guess. Never attempt to guess an answer if you are not sure. If you believe the question's construction/premise is wrong, provide an explanation in \\boxed{} explaining why the question is flawed.",
@@ -43,10 +51,17 @@ SYSTEM_TMPL = """{domain_prompt}
 
 Your memory is the material below: steps from your own earlier browsing sessions in this environment (each step shows the page URL, what you were thinking, the action you took, and the page's accessibility tree, clipped). Sessions are grouped under their task goal.{tools_note}
 Put the final answer in \\boxed{{}} exactly as the question asks.
+Before answering, say in one or two sentences what you checked (which pages or sessions). If the memory shows the question's premise is wrong (the thing asked about is not there, or the page works differently), say that inside \\boxed{{}} instead of UNKNOWN. Use \\boxed{{UNKNOWN}} only when you found nothing relevant at all.
 
 # Memory
 {pack}
 """
+# Per-content-type walk settings: chat history (tuned on the private set and LongMemEval-S) vs
+# tool/trajectory history (tuned on the V2 decision log, §11.4 of the doc).
+PROFILES = {
+    "chat": {"thresholds": {"project": 0.15, "thread": 0.5, "episode": 0.5, "leaf": 0.5}, "beam": {"thread": 12, "episode": 16}},
+    "tool": {"thresholds": {"project": 0.15, "thread": 0.2, "episode": 0.3, "leaf": 0.4}, "beam": {"thread": 16, "episode": 20}},
+}
 TOOLS_NOTE = " You also have tools context_search, context_open (full page tree of a step, or the steps of a session) and context_around over all your sessions; use them when the material below is not enough."
 
 
@@ -56,6 +71,45 @@ def site_of(url: str) -> str:
     if "admin" in (u.path or ""):
         host += "/admin"
     return host
+
+
+async def write_page_cards(leaves: list[dict], or_: OpenRouter) -> dict[str, int]:
+    """One card per distinct page text (deduped by hash); cached across runs."""
+    from common import Cache, sha
+
+    cache = Cache(WORK / "page-card-cache.json")
+    todo: dict[str, dict] = {}
+    for leaf in leaves:
+        page = (leaf.get("full_text") or "").split("\npage:\n", 1)[-1][:PAGE_CARD_CLIP]
+        key = sha(page)
+        leaf["page_key"] = key
+        if not cache.get(key) and key not in todo:
+            todo[key] = {"url": leaf["source"].get("url") or "", "page": page}
+    sem = asyncio.Semaphore(12)
+
+    async def one(key: str, item: dict) -> None:
+        async with sem:
+            text, _ = await or_.chat(
+                [{"role": "system", "content": PAGE_CARD_SYSTEM}, {"role": "user", "content": f"URL: {item['url']}\n\nPage:\n{item['page']}"}],
+                model=SUMMARY_MODEL, purpose="page_cards", max_tokens=500, json_mode=True,
+            )
+            try:
+                v = json.loads(text[text.find("{") : text.rfind("}") + 1])
+                card = {"page": str(v.get("page", ""))[:200], "facts": [str(x)[:120] for x in (v.get("facts") or [])][:14]}
+            except Exception:
+                card = {"page": text[:200], "facts": []}
+            cache.data[key] = card
+
+    await asyncio.gather(*(one(k, v) for k, v in todo.items()))
+    cache.put("_meta", {"n": len(cache.data)})
+    for leaf in leaves:
+        card = cache.get(leaf["page_key"]) or {"page": "", "facts": []}
+        leaf["page_card"] = card
+        head, _, page = leaf["text"].partition("\npage:\n")
+        card_txt = f"page card: {card['page']}\n  facts: " + " | ".join(card["facts"]) if card["facts"] or card["page"] else ""
+        leaf["text"] = head + ("\n" + card_txt if card_txt else "") + "\npage:\n" + page
+        leaf["tokens"] = ntok(leaf["text"])
+    return {"distinct_pages": len(set(l["page_key"] for l in leaves)), "new_cards": len(todo)}
 
 
 def build_domain(domain: str, trajectories: dict[str, Any], order: list[str]) -> tuple[list[dict], dict[str, dict]]:
@@ -88,9 +142,15 @@ async def build(a: argparse.Namespace) -> None:
         qid = next(q["id"] for q in qs if q["domain"] == domain)
         order = hs[qid]
         leaves, threads = build_domain(domain, traj, order)
-        d = WORK / domain
+        d = WORK / (domain + a.suffix)
         d.mkdir(parents=True, exist_ok=True)
+        if a.page_cards:
+            stats = await write_page_cards(leaves, OpenRouter(concurrency=12))
+            print(domain, "page cards", stats, json.dumps(SPEND.as_dict()), flush=True)
         write_jsonl(d / "leaves.jsonl", leaves)
+        h = History(leaves, {"nodes": {}}, threads)
+        h.bm25_cache = d / "bm25.pkl"
+        h.bm25()
         (d / "threads.json").write_text(json.dumps(threads))
         t0 = time.time()
         tree = await TreeBuilder(leaves, threads, None, episode_max_tokens=8000, episode_max_leaves=12, tool_clip=1500).build()
@@ -166,14 +226,15 @@ async def run(a: argparse.Namespace) -> None:
         qs = picked[: a.n]
     hist: dict[str, History] = {}
     for domain in ("web", "enterprise"):
-        d = WORK / domain
+        d = WORK / (domain + a.suffix)
         hist[domain] = History(read_jsonl(d / "leaves.jsonl"), json.loads((d / "tree.json").read_text()), json.loads((d / "threads.json").read_text()))
+        hist[domain].bm25_cache = d / "bm25.pkl"
     for h in hist.values():
         proxy_gold(h, ["warm cache"])
     or_ = OpenRouter(concurrency=10)
-    wp = WalkParams(phrasing="v1", budget=a.budget, leaf_clip=1200)
-    wp.thresholds.update({"project": 0.15, "thread": 0.5, "episode": 0.5, "leaf": 0.5})
-    wp.beam.update({"thread": 12, "episode": 16})
+    wp = WalkParams(phrasing="v1", budget=a.budget, leaf_clip=1200, bm25_extra=a.bm25_extra)
+    wp.thresholds.update(PROFILES[a.profile]["thresholds"])
+    wp.beam.update(PROFILES[a.profile]["beam"])
     for kv in a.thr or []:
         k, v = kv.split("=")
         wp.thresholds[k] = float(v)
@@ -217,7 +278,8 @@ async def run(a: argparse.Namespace) -> None:
                     return
                 sysp = SYSTEM_TMPL.format(domain_prompt=DOMAIN_SYSTEM_PROMPTS[q["domain"]], tools_note=TOOLS_NOTE if s == "C" else "", pack=pack.text or "(no memory retrieved)")
                 scope = {"allowed_threads": sorted(h.allowed_threads(query)), "asked_at": query.asked_at, "project_id": "all", "thread_id": None}
-                env_extra = {"MEMBENCH_TREE": str(WORK / q["domain"] / "tree.json"), "MEMBENCH_LEAVES": str(WORK / q["domain"] / "leaves.jsonl"), "MEMBENCH_THREADS": str(WORK / q["domain"] / "threads.json")}
+                wd = WORK / (q["domain"] + a.suffix)
+                env_extra = {"MEMBENCH_TREE": str(wd / "tree.json"), "MEMBENCH_LEAVES": str(wd / "leaves.jsonl"), "MEMBENCH_THREADS": str(wd / "threads.json"), "MEMBENCH_BM25": str(wd / "bm25.pkl")}
                 out = await asyncio.to_thread(bench.run_pi, sysp, q["question"], tools=(s == "C"), scope=scope, env_extra=env_extra, timeout_s=240)
                 ans = out["answer"]
                 correct, ev = await asyncio.to_thread(score, q, ans)
@@ -279,6 +341,10 @@ if __name__ == "__main__":
     ap.add_argument("--d-subset", help="file with question ids (one per line) that also get strategy D")
     ap.add_argument("--parallel", type=int, default=6)
     ap.add_argument("--no-pi", action="store_true")
+    ap.add_argument("--suffix", default="", help="work-dir suffix, e.g. -v2 for the page-card build")
+    ap.add_argument("--page-cards", action="store_true")
+    ap.add_argument("--profile", default="tool", choices=list(PROFILES))
+    ap.add_argument("--bm25-extra", type=int, default=0)
     ap.add_argument("--thr", action="append")
     ap.add_argument("--beam", action="append")
     a = ap.parse_args()

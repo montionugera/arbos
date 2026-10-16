@@ -139,7 +139,7 @@ async def amain(a: argparse.Namespace) -> None:
     if a.qids:
         want = set(a.qids.split(","))
         questions = [q for q in questions if q["id"] in want]
-    wp = WalkParams(phrasing=a.phrasing, budget=a.budget, leaf_select=a.leaf_select, leaf_clip=a.leaf_clip)
+    wp = WalkParams(phrasing=a.phrasing, budget=a.budget, leaf_select=a.leaf_select, leaf_clip=a.leaf_clip, bm25_extra=a.bm25_extra)
     for kv in a.thr or []:
         k, v = kv.split("=")
         wp.thresholds[k] = float(v)
@@ -185,6 +185,7 @@ if __name__ == "__main__":
     ap.add_argument("--leaf-select", default="jev")
     ap.add_argument("--thr", action="append")
     ap.add_argument("--leaf-clip", type=int, default=420)
+    ap.add_argument("--bm25-extra", type=int, default=0)
     ap.add_argument("--beam", action="append")
     ap.add_argument("--parallel", type=int, default=4)
     asyncio.run(amain(ap.parse_args()))

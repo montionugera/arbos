@@ -22,6 +22,8 @@ LEAVES_PATH = Path(os.environ.get("MEMBENCH_LEAVES", PRIVATE / "leaves.jsonl"))
 THREADS_PATH = Path(os.environ.get("MEMBENCH_THREADS", PRIVATE / "threads.json"))
 
 H = History(read_jsonl(LEAVES_PATH), load_tree(TREE_PATH), json.loads(THREADS_PATH.read_text()))
+if os.environ.get("MEMBENCH_BM25"):
+    H.bm25_cache = Path(os.environ["MEMBENCH_BM25"])
 ALLOWED = set(SCOPE["allowed_threads"])
 ASKED_AT = int(SCOPE["asked_at"])
 CALLS_LOG = os.environ.get("MEMBENCH_TOOL_LOG")

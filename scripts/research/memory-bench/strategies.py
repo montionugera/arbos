@@ -12,8 +12,10 @@ Every strategy returns a Pack: the text to put in front of the model, the leaf i
 from __future__ import annotations
 
 import asyncio
+import pickle
 import re
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -99,10 +101,19 @@ class History:
     def tokenize(s: str) -> list[str]:
         return re.findall(r"[a-z0-9@_\-\.']+", s.lower())
 
+    bm25_cache: Path | None = None
+
     def bm25(self) -> tuple[BM25Okapi, list[str]]:
         if self._bm25 is None:
+            if self.bm25_cache and self.bm25_cache.exists():
+                with open(self.bm25_cache, "rb") as f:
+                    self._bm25, self._bm25_ids = pickle.load(f)
+                return self._bm25, self._bm25_ids
             self._bm25_ids = [x["id"] for x in self.leaves]
-            self._bm25 = BM25Okapi([self.tokenize(x["text"]) for x in self.leaves])
+            self._bm25 = BM25Okapi([self.tokenize(x.get("full_text") or x["text"]) for x in self.leaves])
+            if self.bm25_cache:
+                with open(self.bm25_cache, "wb") as f:
+                    pickle.dump((self._bm25, self._bm25_ids), f)
         return self._bm25, self._bm25_ids
 
     def bm25_search(self, q: Query, query_text: str, k: int) -> list[tuple[str, float]]:
@@ -209,6 +220,7 @@ class WalkParams:
     leaf_select: str = "jev"  # jev | all
     chunk: int = 24
     leaf_clip: int = LEAF_CLIP_FOR_JEV
+    bm25_extra: int = 0  # keyword hits added as extra leaf-level candidates for Jev
 
 
 PHRASINGS = {
@@ -342,8 +354,13 @@ class TreeWalker:
                 chosen_leaves.extend((nid, 1.0) for nid in frontier if node_visible(nid))
                 break
             cands = [nid for nid in frontier if node_visible(nid)]
+            extra: set[str] = set()
             if level == "leaf":
                 cands = list(dict.fromkeys(cands + direct_leaves))
+                if self.p.bm25_extra:
+                    hits = [lid for lid, _ in self.h.bm25_search(q, q.text, self.p.bm25_extra)]
+                    extra = {lid for lid in hits if lid not in cands}
+                    cands = list(dict.fromkeys(cands + hits))
             if not cands:
                 break
             probs = await self.score(q, level, cands, recent_text)
@@ -369,6 +386,7 @@ class TreeWalker:
                         "phrasing": self.p.phrasing,
                         "card": self.card(nid),
                         "n_siblings": len(cands),
+                        "source": "bm25" if nid in extra else "tree",
                     }
                 )
             if level == "leaf":
