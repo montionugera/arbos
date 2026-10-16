@@ -1,0 +1,6 @@
+# never commit history exports, question sets, packs, logs or results
+private/
+public/
+*.jsonl
+*.db
+*.tgz
