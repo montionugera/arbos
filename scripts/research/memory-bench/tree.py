@@ -63,7 +63,7 @@ def leaf_line(leaf: dict[str, Any], clip: int | None = None) -> str:
     return f"[{fmt_ts(leaf['at'])}] {who} ({leaf['kind']}): {text}"
 
 
-def split_episodes(leaves: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+def split_episodes(leaves: list[dict[str, Any]], max_tokens: int = EPISODE_MAX_TOKENS, max_leaves: int = EPISODE_MAX_LEAVES) -> list[list[dict[str, Any]]]:
     """Split one thread's time-ordered leaves into episodes at time gaps, size caps, or at a
     user message once the running episode is already substantial."""
     eps: list[list[dict[str, Any]]] = []
@@ -71,11 +71,11 @@ def split_episodes(leaves: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     cur_tok = 0
     for leaf in leaves:
         gap = leaf["at"] - cur[-1]["at"] if cur else 0
-        new_turn = leaf["kind"] == "user" and cur_tok > EPISODE_MAX_TOKENS // 2 and len(cur) >= 6
+        new_turn = leaf["kind"] == "user" and cur_tok > max_tokens // 2 and len(cur) >= 6
         if cur and (
             gap > EPISODE_GAP_MS
-            or cur_tok + leaf["tokens"] > EPISODE_MAX_TOKENS
-            or len(cur) >= EPISODE_MAX_LEAVES
+            or cur_tok + leaf["tokens"] > max_tokens
+            or len(cur) >= max_leaves
             or new_turn
         ):
             eps.append(cur)
@@ -88,7 +88,10 @@ def split_episodes(leaves: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
 
 
 class TreeBuilder:
-    def __init__(self, leaves: list[dict[str, Any]], threads: dict[str, dict[str, Any]], through: int | None):
+    def __init__(self, leaves: list[dict[str, Any]], threads: dict[str, dict[str, Any]], through: int | None, *, episode_max_tokens: int = EPISODE_MAX_TOKENS, episode_max_leaves: int = EPISODE_MAX_LEAVES, tool_clip: int = TOOL_CLIP):
+        self.episode_max_tokens = episode_max_tokens
+        self.episode_max_leaves = episode_max_leaves
+        self.tool_clip = tool_clip
         self.leaves = leaves
         self.threads = threads
         self.through = through
@@ -182,7 +185,7 @@ class TreeBuilder:
                 self.link(f"thread:{parent_chat}", tnode["id"])
             else:
                 self.link(f"project:{pid}", tnode["id"])
-            for i, ep in enumerate(split_episodes(tleaves)):
+            for i, ep in enumerate(split_episodes(tleaves, self.episode_max_tokens, self.episode_max_leaves)):
                 enode = self.add(
                     {
                         "id": f"ep:{tid}:{i}",
@@ -212,7 +215,7 @@ class TreeBuilder:
                 continue
             th = self.threads.get(n["thread_id"], {})
             hint = f"thread '{th.get('title', '')}' ({th.get('kind', '')}) in project {th.get('project_name', '')}"
-            body = "\n".join(leaf_line(leaf_by_id[c], clip=TOOL_CLIP if leaf_by_id[c]["kind"] != "user" else None) for c in n["children"])
+            body = "\n".join(leaf_line(leaf_by_id[c], clip=self.tool_clip if leaf_by_id[c]["kind"] != "user" else None) for c in n["children"])
             tasks.append(self._fill(n, "episode", body, hint))
         await asyncio.gather(*tasks)
         # Threads from their episode cards; projects from thread cards; root from project cards.

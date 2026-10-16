@@ -97,7 +97,9 @@ def context_open(node_id: str) -> str:
         return json.dumps({"error": "not found or not visible from this chat"})
     n = H.nodes[node_id]
     if n["level"] == "leaf":
-        out = {"id": node_id, "text": leaf_line(H.leaf_by_id[node_id])}
+        leaf = H.leaf_by_id[node_id]
+        full = leaf.get("full_text") or leaf["text"]
+        out = {"id": node_id, "text": leaf_line({**leaf, "text": full[:12000] + (" …[truncated; page continues]" if len(full) > 12000 else "")})}
     elif n["level"] == "episode":
         kids = [c for c in n["children"] if _vis_leaf(c)]
         out = {"id": node_id, "heading": n["heading"], "thread": H.thread_label(n["thread_id"]), "events": [leaf_line(H.leaf_by_id[c]) for c in kids]}
