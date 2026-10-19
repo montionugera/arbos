@@ -440,7 +440,7 @@ pub const SUBAGENT_MAX_CONCURRENT: usize = 4;
 
 /// Pack section for every subagent: an unknown service, API or tool is researched, not guessed
 /// at and not handed back to the user. Mirrors the main agent's rule in `prompts/router.md`.
-const RESEARCH_SECTION: &str = "## Unknown services, APIs and tools\n\nWhen the task involves a service, API, CLI or library you do not know, or a call fails (not found, unknown endpoint, auth error, unexpected shape), find the answer yourself; guessing more than one or two URLs is not research. Until one path works: `web_search` for the service's API reference or developer docs and `web_fetch` them (the docs site, its OpenAPI/Swagger spec at `/openapi.json`, `/swagger.json`, `/docs`, `/redoc`, `/llms.txt`, the README); find the official SDK or CLI, install it (`uv tool install`, `pip install`, `npm i -g`, a release binary) and read its `--help` and, when needed, its source for the real base URL, routes and auth header; read the service's GitHub repositories and examples; read the error body. Read what you fetched before the next call. Authenticated calls go through `egress` with the secret's placeholder in a header or the body.\n\nReport `blocked` or `needs_input` only for a real blocker: a credential or account that does not exist, a choice only the user can make between real options you found, a spend decision, or a service that is down after you checked it against its docs. Never ask for docs, an API reference, an endpoint, or for the user to install something. Money: anything that charges the user beyond what the brief states (renting, buying, subscribing, paying) needs their go-ahead first: show the chosen option with its price (and a cheaper alternative when one exists) and ask with `ask_user`; listing options and quoting prices is free.\n\nSecret notes: each secret the owner stored comes with their note (`use_notes` in `secrets_list`, comments in your shell's secrets.env); the note is the policy for that key — for `egress` and for any CLI, SDK or script that reads the real `$NAME`. Spending guidance in it binds you: a limit (\"may spend up to $X without asking\") lets you proceed within it and no further; \"confirm before charging\" or \"read-only\" means ask first or never charge, whatever the brief says. A note without spending guidance leaves the money rule above in force. Never pass a confirmation-skipping flag (`--yes`, `-y`, `--force`, `--no-confirm` and the like) to a command that charges unless the note allows that spend.\n\n";
+const RESEARCH_SECTION: &str = "## Unknown services, APIs and tools\n\nWhen the task involves an external service, API, CLI or library you do not know, or a call fails (not found, 404, unknown endpoint, auth error, unexpected shape), find the answer yourself; never guess endpoints and give up to ask the user. Until one path works: research the service yourself before anything else — `web_search` for the service's API reference or developer docs and `web_fetch` them (the vendor's site, docs, its OpenAPI/Swagger spec at `/openapi.json`, `/swagger.json`, `/docs`, `/redoc`, `/llms.txt`, the README); check package registries (`pip`, `npm`, `cargo`) for the official SDK or CLI, install it (`uv tool install`, `pip install`, `npm i -g`, `cargo install`, a release binary) and read its `--help` and, when needed, its source for the real base URL, routes and auth header; read the service's GitHub repositories and examples; read the error body. Read what you fetched before the next call. Authenticated calls go through `egress` with the secret's placeholder in a header or the body.\n\nReport `blocked` or `needs_input` only for a genuine blocker: a missing credential or account that does not exist, a paid decision or spend confirmation, or an ambiguous intent where only the user can choose between real alternatives you found — never for \"I don't know the API\", an unknown endpoint, or to ask the user for docs, an API reference, an endpoint, or for the user to install something. Money: anything that charges the user beyond what the brief states (renting, buying, subscribing, paying) needs their go-ahead first: show the chosen option with its price (and a cheaper alternative when one exists) and ask with `ask_user`; listing options and quoting prices is free.\n\nSecret notes: each secret the owner stored comes with their note (`use_notes` in `secrets_list`, comments in your shell's secrets.env); the note is the policy for that key — for `egress` and for any CLI, SDK or script that reads the real `$NAME`. Spending guidance in it binds you: a limit (\"may spend up to $X without asking\") lets you proceed within it and no further; \"confirm before charging\" or \"read-only\" means ask first or never charge, whatever the brief says. A note without spending guidance leaves the money rule above in force. Never pass a confirmation-skipping flag (`--yes`, `-y`, `--force`, `--no-confirm` and the like) to a command that charges unless the note allows that spend.\n\n";
 
 /// Why the main pi session is being prompted.
 #[derive(Debug, Clone)]
@@ -3807,5 +3807,86 @@ mod tests {
             cleaned.trim(),
             "Cloning RaoFoundation/subtensor into this project now."
         );
+    }
+
+    /// Regression test for [feedback lium-agent-gave-up-2026-10-18] (#1034):
+    /// Agents must research APIs, docs, OpenAPI specs, SDKs, package registries (pip/npm/cargo),
+    /// and CLI --help themselves rather than guessing endpoints and giving up to ask the user.
+    /// Escalations are restricted to genuine blockers (missing credentials, paid decisions, or ambiguous intent).
+    #[test]
+    fn router_prompt_enforces_api_research_before_escalation() {
+        let router_md = include_str!("../prompts/router.md");
+
+        // Section header and core directive
+        assert!(router_md.contains("## Unknown services, APIs and tools: find out, do not ask"));
+        assert!(router_md.contains("Never guess endpoints and give up to ask the user"));
+
+        // Mandatory self-research tools and targets
+        assert!(router_md.contains("`web_search`"));
+        assert!(router_md.contains("`web_fetch`"));
+        assert!(router_md.contains("/openapi.json"));
+        assert!(router_md.contains("/swagger.json"));
+        assert!(router_md.contains("/docs"));
+        assert!(router_md.contains("/redoc"));
+        assert!(router_md.contains("/llms.txt"));
+
+        // Package registries and CLI verification
+        assert!(router_md.contains("`pip`"));
+        assert!(router_md.contains("`npm`"));
+        assert!(router_md.contains("`cargo`"));
+        assert!(router_md.contains("`uv tool install`"));
+        assert!(router_md.contains("`pip install`"));
+        assert!(router_md.contains("`npm i -g`"));
+        assert!(router_md.contains("`cargo install`"));
+        assert!(router_md.contains("--help"));
+
+        // Escalation rules: genuine blockers only
+        assert!(router_md.contains("genuine blocker"));
+        assert!(router_md.contains("missing credential or account"));
+        assert!(router_md.contains("paid decision or spend confirmation"));
+        assert!(router_md.contains("ambiguous intent"));
+
+        // Never ask user for docs/endpoints or "I don't know the API"
+        assert!(router_md.contains("never for \"I don't know the API\""));
+        assert!(router_md.contains("ask the user for docs, an API reference, an endpoint"));
+
+        // Router rules: unknown service or API routes `new` to a subagent
+        assert!(router_md.contains("A request that involves a service, API, CLI or library you do not know yet is research plus the work itself: route it `new`"));
+    }
+
+    /// Regression test for [feedback lium-agent-gave-up-2026-10-18] (#1034):
+    /// Subagents context pack mirrors the external service self-research and blocker invariants.
+    #[test]
+    fn subagent_research_section_enforces_api_research_invariants() {
+        // Section header and core directive
+        assert!(RESEARCH_SECTION.contains("## Unknown services, APIs and tools"));
+        assert!(RESEARCH_SECTION.contains("never guess endpoints and give up to ask the user"));
+
+        // Research tools & specs
+        assert!(RESEARCH_SECTION.contains("`web_search`"));
+        assert!(RESEARCH_SECTION.contains("`web_fetch`"));
+        assert!(RESEARCH_SECTION.contains("/openapi.json"));
+        assert!(RESEARCH_SECTION.contains("/swagger.json"));
+        assert!(RESEARCH_SECTION.contains("/docs"));
+        assert!(RESEARCH_SECTION.contains("/redoc"));
+        assert!(RESEARCH_SECTION.contains("/llms.txt"));
+
+        // Package registries & CLI help
+        assert!(RESEARCH_SECTION.contains("`pip`"));
+        assert!(RESEARCH_SECTION.contains("`npm`"));
+        assert!(RESEARCH_SECTION.contains("`cargo`"));
+        assert!(RESEARCH_SECTION.contains("`uv tool install`"));
+        assert!(RESEARCH_SECTION.contains("`pip install`"));
+        assert!(RESEARCH_SECTION.contains("`npm i -g`"));
+        assert!(RESEARCH_SECTION.contains("`cargo install`"));
+        assert!(RESEARCH_SECTION.contains("--help"));
+
+        // Escalation conditions: genuine blockers only
+        assert!(RESEARCH_SECTION.contains("genuine blocker"));
+        assert!(RESEARCH_SECTION.contains("missing credential or account"));
+        assert!(RESEARCH_SECTION.contains("paid decision or spend confirmation"));
+        assert!(RESEARCH_SECTION.contains("ambiguous intent"));
+        assert!(RESEARCH_SECTION.contains("never for \"I don't know the API\""));
+        assert!(RESEARCH_SECTION.contains("ask the user for docs, an API reference, an endpoint"));
     }
 }
